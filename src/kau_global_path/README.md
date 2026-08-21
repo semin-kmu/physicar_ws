@@ -1,0 +1,1031 @@
+# kau_global_path
+
+KAU AMET PhysiCar 용 **lane_graph 수기 작성 + global path 생성** 패키지.
+
+> 상태: **0단계(재매핑) · 2단계(편집 도구) 완료.** 1단계(궤적 확보)에서 실차를
+> 기다리는 중이다. 3단계(ROS 발행 노드)는 아직 코드 없음.
+>
+> 최종 갱신: 2026-08-21. `kau_v3` 채택 · 편집 도구 구현 ·
+> **출력 형식을 `kau_msgs/KauPath` 로 정정** (6.8) · Object Detection 경계 인터페이스 (4.6).
+
+## 0. 빨리 쓰는 법
+
+```bash
+# 편집기 — 정적 서버를 띄운다 (지도·궤적을 fetch 로 읽는다). 어디서 실행해도 된다
+python3 src/kau_global_path/scripts/serve_editor.py
+#   http://localhost:8001/src/kau_global_path/web/lane_editor.html
+#   file:// 로 열면 fetch 가 막히니 pgm · yaml 을 창에 끌어다 놓는다
+#   8000 은 physicar_webserver 가 쓴다. 이 스크립트는 캐시를 막아서(no-store)
+#   편집기를 고치는 중에 옛 js 가 물려 있는 일이 없다
+
+# 궤적 기록 — localization 이 뜨고 2D Pose Estimate 로 초기화된 뒤에
+# 한 바퀴 돌고 Ctrl+C. 실행할 때마다 비어 있는 가장 작은 번호로 들어간다
+ros2 run kau_global_path record_trajectory.py --lane inner   # -> data/inner_1.csv
+ros2 run kau_global_path record_trajectory.py --lane inner   # -> data/inner_2.csv
+rm src/kau_global_path/data/inner_2.csv                      # 마음에 안 들면 지우고
+ros2 run kau_global_path record_trajectory.py --lane inner   # -> data/inner_2.csv 다시
+
+# 검증 (ROS · 브라우저 불필요)
+node   src/kau_global_path/test/test_geometry.js  # 곡선 기하 + 바퀴 겹치기
+node   src/kau_global_path/test/test_export.js    # 실제 지도 + 두 yaml 내보내기
+python3 src/kau_global_path/test/test_recorder.py # 바퀴 자르기 (ROS 불필요)
+```
+
+| 만들어지는 것 | 받는 쪽 |
+|---|---|
+| `lane_graph.yaml` | 이 패키지의 발행 노드 (3단계) |
+| `kau_v3_track.yaml` | `kau_object_detection/config/` — ROI (4.6) |
+
+## 1. 지금 하려는 것
+
+SLAM 으로 만든 pbstream 위에 **차선 그래프(lane_graph)를 손으로 그려 넣고**,
+그 위에서 **global path** 를 뽑는다. local path 는 그 global path 를 받아야
+동작하므로 이게 선행 작업이다.
+
+```text
+[재매핑] ✅ 완료 ──► kau_v3.pbstream / kau_v3.pgm / kau_v3.yaml
+                                  │        (유령 벽 없음. 2.1)
+                                  ▼
+   pure localization 모드에서 lane 별 teleop 주행 ──► inner.csv / outer.csv
+                                  │   record_trajectory.py (수기 편집의 좌표 기준)
+                                  ▼
+                    [ web/lane_editor.html 수기 편집 ]
+                                  │
+                 ┌────────────────┴────────────────┐
+                 ▼                                 ▼
+        lane_graph.yaml                    kau_v3_track.yaml
+     노드 + 엣지 + routes                outer/inner 경계 폴리곤
+     (map 프레임, 미터)                   (map 프레임, 미터)
+                 │                                 │
+                 ▼                                 ▼
+   [ 라우팅 + quintic Bezier ]          kau_object_detection/config/
+                 │                       ROI = outer 안 ∩ inner 밖 (4.6)
+                 ▼
+   /path/global (kau_msgs/KauPath, latched) ──► local path · 제어기
+   /viz/path/global (nav_msgs/Path)        ──► RViz
+```
+
+차선 표시는 바닥 테이프/페인트라 LiDAR 에 안 잡힌다. 따라서 SLAM 지도에서
+자동으로 차선을 추출하는 건 불가능하고, **사람이 그려 넣는 수밖에 없다.**
+
+## 2. 현재 확인된 사실
+
+### 2.1 지도 — `kau_v3` 확정 (2026-08-21)
+
+**재매핑 완료. 6.2 의 루프 클로저 패치가 먹었고 `kau_v3` 가 합격했다.**
+lane_graph 는 이 지도 위에서 그린다.
+
+| 항목 | 값 |
+|---|---|
+| 파일 | `kau_localization/maps/kau_v3.{pgm,yaml,pbstream}` |
+| 이미지 크기 | 156 x 255 px |
+| 해상도 | 0.05 m/px |
+| origin | `[-3.793323, -1.764733, 0.0]` |
+| 이미지 전체 범위 | 7.80 m x 12.75 m |
+| **실제 공간** | **12 m x 7 m** |
+
+`view_map.py kau_v3` 결과:
+
+| 측정 | 값 | 판정 |
+|---|---|---|
+| 내부 free 범위 | **7.10 m x 11.95 m** | ✅ |
+| occupied 범위 | 7.20 m x 12.20 m | ✅ 벽 바깥 여유 0.25 m |
+| 벽 두께 최대 | 0.15 m | ✅ (0.25 이하) |
+| 행별 내부 폭 | 6.95 ~ 7.05 m | ✅ 편차 0.10 m |
+| 기대 치수 대비 | 오차 0.10 m | ✅ |
+
+**유령 벽이 없다.** 이전 판(`kau_v1`, `kau_v2`)의 결함 ①②③ 은 전부 사라졌고
+방은 빈 직사각형 하나로 그려졌다. 6.9(b) 의 "0.9 m 어긋난 자리에 붙는" 위험도
+같이 없어졌다.
+
+> 아래 2.1.1 은 무엇이 잘못됐었는지의 기록이다. 원인 분석은 6.2 에 있다.
+
+#### 2.1.1 폐기된 지도들 — 기록
+
+```text
+kau_v1  루프 클로저를 너무 조여서 같은 벽이 0.30~0.45 m 떨어진 이중 벽으로 그려짐
+kau_v2  2차 조정 검증용
+kau_v3  ✅ 채택
+```
+
+이전 판에 있던 실측 표(9.90 x 13.80 m 평행사변형, y ~ -1.42 유령 벽)는
+`kau_v3` 에서 무효다. 다시 의심하지 않기 위해 원인만 6.2 에 남긴다.
+### 2.2 `amet_2026_track.yaml` 은 쓸 수 없다
+
+`kau_object_detection/config/amet_2026_track.yaml` 에 outer/inner 경계 폴리곤이
+388 점씩 들어 있어서 중심선을 자동 계산할 수 있을 것처럼 보이지만 **안 된다.**
+
+- 그 좌표는 **Gazebo world 프레임**(시뮬)이고 지금 지도는 `map` 프레임(실기 SLAM)이다.
+- 트랙은 10.22 m x 5.30 m, 실제 공간은 12 m x 7 m. 서로 다른 공간이다.
+
+즉 이 파일은 시뮬 전용이다. 실기 lane_graph 는 처음부터 새로 만들어야 한다.
+
+### 2.3 픽셀 <-> map 프레임 변환
+
+PGM 은 좌상단이 원점이고 y 축이 아래로 증가한다. ROS map 은 좌하단 기준이다.
+**y 를 뒤집어야 한다.** 이걸 틀리면 지도가 상하 반전된 채로 그려진다.
+
+```text
+world_x = origin_x + px * resolution
+world_y = origin_y + (height_px - py) * resolution
+
+px = (world_x - origin_x) / resolution
+py = height_px - (world_y - origin_y) / resolution
+```
+
+**값을 하드코딩하지 말고 `kau_v3.yaml` 을 읽어서 채운다.** 재매핑하면 origin 과
+이미지 크기가 전부 바뀐다. 2.1 의 숫자들도 재매핑 후 무효다.
+
+### 2.4 이미 있는 웹 스택
+
+- `kau_lane_detection/web/webui.html` : 카메라 뷰어. 정적 HTML + `fetch` 폴링.
+- `physicar_webserver` : 플랫폼 제공 FastAPI 서버 (REST + WebSocket).
+
+팀이 이미 HTML 기반 도구를 쓰고 있으므로 같은 방식이 결이 맞는다.
+
+### 2.5 LiDAR / Cartographer 설정 (`kau_localization/config/physicar_2d.lua`)
+
+| 항목 | 값 |
+|---|---|
+| `/scan` | 720점 360deg, 0.1 ~ **16 m**, 10 Hz |
+| `TRAJECTORY_BUILDER_2D.max_range` | **14.0** ← 12.0 에서 올렸으나 **효과 없음**. 6.2(b) 참고 |
+| `real_time_correlative_scan_matcher.linear_search_window` | 0.15 m |
+| `POSE_GRAPH.optimize_every_n_nodes` | 20 (localization) |
+| `POSE_GRAPH.global_sampling_ratio` | 0.003 (localization) |
+| `POSE_GRAPH.constraint_builder.global_localization_min_score` | 0.66 |
+
+## 3. 편집 도구 방식 결정
+
+### 3.1 비교
+
+| 방식 | 노드 찍기 | 수정/드래그 | 위상(엣지·방향) | 재편집 | 판정 |
+|---|---|---|---|---|---|
+| **HTML canvas** | 확대해서 정밀 | 자유 | 표현 가능 | 파일 저장 후 재편집 | **채택** |
+| RViz `clicked_point` | 빠름 | 되돌리기 불가 | 불가 | 불가 | 기각 |
+| matplotlib `ginput` | 확대 불편 | 불가 | 불가 | 부분적 | 기각 |
+| QGIS / Inkscape | 가능 | 가능 | 변환 필요 | 가능 | 과도 |
+
+**결론: HTML canvas.** 의존성이 없고, 브라우저만 있으면 팀 누구나 열 수 있고,
+결과가 텍스트 파일이라 버전 관리가 되고, 위상 정보(갈림길·주행 방향)를
+표현할 수 있는 유일한 선택지다.
+
+### 3.2 백지에 그리지 않는다 — 가장 중요한 지점
+
+지도가 벽 4개뿐이라 **캔버스에 띄워도 참조할 시각적 기준이 없다.**
+빈 화면에 눈대중으로 차선을 그리면 실제 바닥 차선과 수십 cm 단위로 어긋나고,
+그 오차는 local path 가 메꿀 수 있는 범위를 넘는다.
+
+그래서 순서를 뒤집는다. **먼저 실제 주행 궤적을 깔고, 그 위에서 손으로 다듬는다.**
+
+#### 궤적은 매핑 주행이 아니라 별도 주행으로 딴다
+
+pbstream 안의 `/trajectory_node_list` 를 그대로 쓰지 않는다. 이유:
+
+- 매핑 주행에는 **지도를 채우기 위한 움직임**이 섞인다. 벽 붙기, 후진,
+  제자리 회전, 재출발. 나중에 다 지워야 한다.
+- 결정적으로 **어느 구간이 inner lane 이고 어느 구간이 outer lane 인지 라벨이 없다.**
+  하나의 긴 점 뭉치로 나온다.
+
+대신:
+
+```text
+① 트랙을 비우고 slam.launch.py 로 재매핑          (지저분해도 됨. 지도 채우기가 목적)
+② kau_v3.pbstream 저장 + pgm/yaml 변환
+③ localization.launch.py 로 새 지도 위에 올림      ← 여기서부터 map 프레임 고정
+④ teleop 으로 inner lane 한 바퀴씩 -> inner_1.csv inner_2.csv ...
+⑤ teleop 으로 outer lane 한 바퀴씩 -> outer_1.csv outer_2.csv ...
+```
+
+#### 한 번 실행 = 한 바퀴, 번호는 빈 자리를 채운다
+
+한 바퀴 돌고 `Ctrl+C`. 실행할 때마다 **비어 있는 가장 작은 번호**로 들어간다.
+
+```bash
+ros2 run kau_global_path record_trajectory.py --lane inner   # -> inner_1.csv
+ros2 run kau_global_path record_trajectory.py --lane inner   # -> inner_2.csv
+ros2 run kau_global_path record_trajectory.py --lane inner   # -> inner_3.csv
+
+rm data/inner_2.csv                                          # 2 번이 마음에 안 들면
+ros2 run kau_global_path record_trajectory.py --lane inner   # -> inner_2.csv 다시
+```
+
+최대값+1 이 아니라 **빈 자리 채우기**다. 최대값+1 로 하면 지운 자리가 영영
+비어서 번호가 실제 바퀴 수와 어긋나고, 몇 바퀴를 모았는지 파일 이름만 보고
+알 수 없게 된다.
+
+멈추지 않고 계속 돌아도 된다. 시작점을 지날 때마다 그 바퀴가 닫히고 다음
+번호가 이어진다. 두 방식이 같은 결과를 낸다.
+
+```text
+data/inner_1.csv  inner_2.csv  inner_3.csv   <- 편집기가 읽어서 평균낸다
+     inner_partial_1.csv                     <- 한 바퀴를 못 채움. 평균에서 빠짐
+     inner_recording.csv                     <- 진행 중. 정상 종료하면 사라진다
+```
+
+`_partial_` 은 **바퀴 번호 대역을 안 쓴다.** 미완주 하나가 `inner_2` 자리를
+막으면 안 되기 때문이다. 완주했다고 판단되면 `<lane>_<n>.csv` 로 이름만
+바꾸면 그대로 평균에 들어간다.
+
+`_recording.csv` 가 남아 있으면 지난 실행이 비정상 종료한 것이다. 다음 실행이
+**덮어쓰기 전에** `_partial_` 로 옮겨 둔다. 한 번에 한 바퀴씩 도는 사용법에서는
+그 파일이 곧 한 바퀴 전체라, 덮어쓰면 주행 하나가 통째로 사라진다.
+
+#### 왜 여러 바퀴인가
+
+- **지터가 줄어든다.** 3 바퀴 평균은 한 바퀴보다 참값에 **8 배** 가깝다
+  (`test_geometry.js` [7]: 4.9 cm -> 0.6 cm).
+- **바퀴 간 벌어짐이 곧 측위 반복정밀도다.** 6.1 이 말하는 "경로 정확도의 하한"
+  이고, 재보지 않으면 알 수 없는 유일한 숫자다. 이보다 정밀하게 lane 을
+  그려봤자 의미가 없으므로, **노드를 얼마나 공들여 다듬을지가 이 값에서 정해진다.**
+
+종료 요약은 이번 실행이 아니라 **폴더에 있는 것 전부**를 기준으로 알려준다.
+한 바퀴씩 나눠 돌아도 "지금까지 몇 바퀴를 모았고 얼마나 잘 겹치는지" 가 보인다.
+
+```text
+  저장된 바퀴 : 1 개
+    inner_4.csv               1151 점   23.01 m
+  inner 전체 4 바퀴 (inner_1.csv, inner_2.csv, inner_3.csv, inner_4.csv)
+  바퀴 간 벌어짐 : 6.2 cm (좋다)      < 10 cm  좋다
+                                     10~15 cm 쓸 만하다
+                                     > 15 cm  측위를 먼저 볼 것
+  길이가 튀는 바퀴 : inner_3.csv — 지우고 다시 도는 것을 검토
+```
+
+길이가 중앙값에서 10% 넘게 벗어난 바퀴는 이름을 찍어준다. 코너를 크게 돈
+바퀴이므로 지우고 다시 도는 편이 낫다.
+
+#### 겹치는 방식 — 호길이 비율이 아니라 최근접점
+
+바퀴마다 주행거리가 조금씩 다르다. 호길이 비율로 맞추면 같은 k 번째 표본이
+트랙의 **다른 자리**를 가리키고, 그 세로 어긋남이 가로 오차로 둔갑해서 측위를
+실제보다 나쁘게 보이게 한다. 노이즈를 전혀 안 넣은 합성 궤적에서 1.8 cm 가
+나왔다 — 정답은 0 이다.
+
+그래서 대응을 **최근접점**으로 잡는다. 위상이 어긋난 지점(index) 주변 ±10%
+창 안에서 선분에 투영해 가장 가까운 점을 찾는다. 창을 씌우는 이유는 전역
+최근접을 쓰면 헤어핀처럼 트랙이 자기 자신과 가까워지는 곳에서 반대편 구간에
+붙기 때문이다.
+
+이렇게 하면 벌어짐이 **주입한 노이즈 진폭과 정확히 일치한다** (0 -> 0.0 cm,
+3 -> 3.0 cm, 5 -> 5.0 cm). 눈금이 맞는 자로 재는 셈이다.
+
+**대신 lane 은 반드시 따로 기록한다.** 안쪽 몇 바퀴 -> 멈춤 -> 바깥쪽 몇 바퀴.
+한 파일에 섞으면 라벨이 없어져서 매핑 주행 궤적을 안 쓰기로 한 이유와 같은
+문제가 된다.
+
+완주 판정은 **세션 첫 점(anchor) 반경 0.40 m 복귀 + 2 m 이상 주행**이다.
+한 바퀴씩 돌 때는 출발한 자리 근처에서 멈추면 된다. 그보다 멀리서 끝내면
+`_partial_` 로 나가고, 요약이 "시작점에서 0.62 m 떨어진 곳에서 끝났다
+(완주 판정 기준 0.40 m)" 처럼 얼마나 모자랐는지 찍어준다.
+멈추지 않고 여러 바퀴 돌 때, 직전 바퀴의 시작점을 기준으로 삼으면 자를 때마다
+표본 간격만큼 밀려서 그 오차가 바퀴 수만큼 쌓인다 (5 바퀴에 11 cm 를 쟀다).
+판정과 겹치기는
+`record_trajectory.py` 와 `lane_editor.js` 가 같은 알고리즘을 쓰고, 양쪽 테스트가
+같은 숫자를 확인한다.
+
+### 4.1 기능
+
+- **배경 레이어**: `kau_v3.pgm` -> PNG 변환본(벽) + `inner.csv` / `outer.csv` 궤적 오버레이
+- **CAD 트랙**: 시뮬레이터 world 의 AMET 2026 도형을 map 프레임에 깐다 (4.1.1)
+- **참조 이미지**: 사진·도면을 따로 깔고 벽에 맞춘다 (4.1.2)
+- **좌표 변환**: `kau_v3.yaml` 의 `resolution` / `origin` / 이미지 높이로 px <-> m
+- **뷰**: 팬 / 줌 / 미터 그리드 / 커서 위치 실좌표 표시
+- **편집**: 노드 추가·드래그·삽입·삭제, 진행방향 뒤집기, Ctrl+Z / Ctrl+Y
+- **레이어 4개**: 안쪽 차로 · 바깥쪽 차로 · outer boundary · inner boundary
+- **궤적 씨앗**: `inner.csv` / `outer.csv` 를 호길이 등간격으로 줄여 노드로 깐다 (3.2)
+- **곡선 미리보기**: 화면에 그려지는 것이 **실제로 발행될 quintic Bezier** 다 (4.4)
+- **세그먼트 나누기**: 노드를 세그먼트 경계로 지정하면 경계~경계가 곡선 한
+  조각(제어점 6 개)이 된다. 사이 노드 수로 직선/원호가 정해진다 (4.4.1)
+- **C² 검증**: 경계마다 양쪽이 제안한 (θ, κ) 차이를 숫자로 보여준다 (4.4.1)
+- **곡률 경고**: 임계값 초과 segment 를 빨갛게 표시 (6.4)
+- **boundary 생성**: 중심선을 법선으로 밀어 경계 폴리곤을 만든다 (4.6)
+- **입출력**: `lane_graph.yaml` export / import + `kau_v3_track.yaml` export
+
+띄우는 것은 `scripts/serve_editor.py` 다. 문서 루트를 워크스페이스 루트로 잡고
+(편집기가 지도·궤적을 상대경로로 읽는다) 캐시를 막는다. ROS 없이 돈다.
+
+브라우저가 pgm 을 직접 파싱하므로 **PNG 변환 단계가 없다.** 벽/빈공간 임계값은
+`save_map.py` 와 같게 맞춰서, 편집기에 보이는 벽이 품질 검사가 세는 벽과 같다.
+
+#### 4.1.1 CAD 트랙 — 시뮬레이터 world 에 실물 도형이 들어 있다 (2026-08-21)
+
+`kau_v3.pgm` 에는 벽밖에 없다. 그런데 **시뮬레이터 world 에 같은 트랙의 CAD 가
+통째로 들어 있다.**
+
+```text
+/opt/physicar/src/physicar-sim/share/
+  worlds/custom_71e69ee...pcpub.json   {"name": "AMET 2026", "size": [12, 7]}
+  meshes/custom_71e69ee.../*.dae       road / ol / il / cl / start_line
+```
+
+`ol`(바깥 차선) · `il`(안쪽 차선) · `cl`(중앙선 점선) · `start_line` 이 각각
+따로 있는 삼각형 메시다. **한 번만 등장하는 변**을 모아 고리로 이으면 윤곽선이
+그대로 나온다. `scripts/extract_sim_track.py` 가 이걸 해서
+`config/amet2026_track.json` (32 KB) 을 만들고 편집기가 배경으로 깐다.
+
+##### map 프레임과의 정렬 — 순수 90° 회전이다
+
+sim 은 방 구석이 원점이고 12 m 쪽이 x, 7 m 쪽이 y 다. map 은 축이 90도 돌아 있다.
+
+```text
+map_x = ox - sim_y          기본 ox = 3.68
+map_y = sim_x - oy          기본 oy = 1.39
+```
+
+야코비안이 `[[0,-1],[1,0]]` 이라 행렬식 +1 — **반사가 아니라 정회전이다.**
+이 값은 6.9 의 표시좌표 구석(3.68, -1.39)에서 그대로 나온 것이고, 검증은
+벽 경계상자로 한다.
+
+| | sim 벽 | -> map 환산 | kau_v3 실측 | 잔차 |
+|---|---|---|---|---|
+| 긴 쪽 | x [-0.04, 12.04] | y [-1.43, 10.65] | y [-1.41, 10.74] | 2 ~ 9 cm |
+| 짧은 쪽 | y [-0.04, 7.04] | x [-3.36, 3.72] | x [-3.49, 3.66] | 6 ~ 13 cm |
+
+주행 기록을 겹쳐 봐도 CAD 차선 안에 정확히 들어간다. 편집기에서 `ox` / `oy` /
+회전을 손으로 더 다듬을 수 있다.
+
+##### CAD 길이가 주행 기록 길이의 진짜 값이다 — 기록은 부풀어 있다
+
+| | CAD | 기록 원본 | 기록 평활 (±4 샘플) |
+|---|---|---|---|
+| 주행면 바깥 테두리 | 32.44 m | — | — |
+| 주행면 안쪽 테두리 | 27.74 m | — | — |
+| inner 1 바퀴 | — | 44.63 m | 28.59 m |
+| outer 1 바퀴 | — | 39.64 m | 30.45 m |
+
+**기록 길이는 측위 지터 때문에 40 ~ 55 % 부풀어 있다.** `record_trajectory.py` 는
+직전 점에서 `min_dist`(2 cm) 이상 움직이면 **방향을 안 보고** 점을 남긴다.
+`inner_1.csv` 는 961 구간 중 **268 개**에서 진행방향이 120도 이상 꺾인다 —
+주행이 아니라 노이즈다. 평활하면 길이가 CAD 값으로 수렴한다.
+
+따라오는 결론 두 가지.
+
+- **inner/outer 라벨은 정상이다.** 원본 길이로는 inner(44.6) > outer(39.6) 라
+  뒤집힌 것처럼 보였지만, 평활하면 inner(28.6) < outer(30.5) 로 제자리다.
+- **호길이에 기대는 계산은 기록을 그대로 쓰면 안 된다.** 3.2 의 바퀴 겹치기,
+  6.4 의 최소회전반경 실측이 여기 해당한다. (미해결 — `min_dist` 를 키우거나
+  기록 단계에서 진행방향 투영으로 거르는 쪽을 검토할 것)
+
+#### 4.1.2 참조 이미지 — 사진·도면을 직접 깔 때
+
+`kau_v3.pgm` 에 찍힌 것은 **벽뿐이다.** 방 하나 크기의 빈 직사각형
+(벽 범위 x [-3.49, 3.66] · y [-1.41, 10.74] = **7.15 x 12.15 m**) 이고 그 안은
+전부 빈 공간이다. 차선은 바닥 테이프라 LiDAR 평면에 안 걸린다 (4.3).
+
+보통은 4.1.1 의 CAD 로 충분하다. CAD 가 실물과 다르거나 (콘 배치 등) 위에서 찍은
+사진으로 대조하고 싶을 때를 위해 래스터 배경도 따로 깔 수 있게 했다.
+
+- 창에 이미지를 끌어다 놓거나 `이미지 열기`, 또는 `web/overlay.png` 에 두면 자동 로드
+- 처음에는 **벽 경계상자**에 맞춰 놓는다 (pgm 캔버스 전체가 아니다 — 여백이 있다)
+- `맞춤 모드`(<kbd>I</kbd>): 드래그 이동 · 휠 확대 · <kbd>[</kbd><kbd>]</kbd> 회전
+  (Shift 로 5°씩). 맞추는 동안 노드 편집은 멈춘다
+- 중심 / 가로폭 / 회전 / 투명도를 숫자로도 넣는다. 전부 **map 프레임 미터**다
+- <kbd>M</kbd> 으로 지도를 껐다 켜면 벽과 이미지가 얼마나 맞았는지 바로 보인다
+- 위치·크기는 브라우저에 남는다 (이미지 자체는 1.5 MB 미만일 때만 같이 저장)
+
+**참조 이미지는 저장·내보내기에 전혀 안 들어간다.** 화면 배경일 뿐이고
+`lane_graph.yaml` 좌표는 언제나 `map` 프레임 미터다 (4.2, 6.3).
+
+### 4.2 lane_graph 데이터 포맷 (초안)
+
+좌표는 전부 **`map` 프레임, 미터**.
+
+```yaml
+lane_graph:
+  frame_id: map
+  map_source: kau_v3       # 어느 지도 기준인지 반드시 기록. 6.3 참고
+  nodes:
+    - {id: 0,   x: 0.42, y: 1.05}   # inner lane
+    - {id: 1,   x: 0.44, y: 2.10}
+    - {id: 100, x: 1.02, y: 1.03}   # outer lane
+  edges:
+    - {from: 0,  to: 1,   type: lane,        lane: inner, width: 0.40, speed_limit: 0.8, direction: forward}
+    - {from: 12, to: 105, type: lane_change}          # inner -> outer
+  routes:
+    inner_loop: [0, 1, 2, ..., 0]                     # 기본. 짧아서 이걸로 돈다
+    outer_loop: [100, 101, ..., 100]                  # 미션 등 특수 상황
+    mission_a:  [0, 1, ..., 12, 105, ..., 0]          # 중간에 갈아타기
+```
+
+`segments:` / `bezier:` 블록이 뒤에 붙는다 (4.4.1). `segments:` 는 편집기가
+세그먼트 구분을 되살리는 데 쓰고, `bezier:` 는 소비자가 그대로 쓰는 제어점이다.
+둘 다 없는 예전 파일도 그대로 열린다 — 경계 미지정 = 전체 보간으로 동작한다.
+
+```yaml
+  segments:
+    lane_inner: {breaks: [0, 7, 9, 16], links: [7, 16]}
+  bezier:
+    lane_inner:
+      - {type: line, from: 0, to: 7, length: 2.0134, kappa_max: 0.0000,
+         ctrl: [[x,y], [x,y], [x,y], [x,y], [x,y], [x,y]]}
+```
+
+### 4.3 라우팅 — A* 를 쓰지 않는다
+
+경로는 `routes:` 에 **노드 시퀀스로 명시**한다. 탐색 알고리즘을 넣지 않는 이유:
+
+- **occupancy grid 위 A***: 차선은 바닥 테이프라 grid 에 존재하지 않는다.
+  빈 직사각형에서 돌리면 차선을 무시하고 시작점->목표점 대각선이 나온다. **틀린다.**
+- **lane_graph 위 A***: 폐곡선 한 바퀴는 선택지가 하나뿐이다. 시작 = 목표라
+  휴리스틱이 degenerate 해져서 사실상 Dijkstra 이고, 그마저도 후보가 하나다.
+- 진짜 필요해지는 건 갈림길이 여럿일 때인데, 그때도 비용함수가 유클리드 거리가
+  아니라 lane_change 페널티 + 곡률 + 방향 위반이라 A* 라기보다 작은 그래프 탐색이다.
+
+**하드코딩이 부끄러운 선택이 아니라 정확한 선택이다.** 다만 코드가 아니라
+yaml 에 넣는다. 미션이 바뀌면 노드 번호 나열만 고치면 되고 재빌드가 없다.
+나중에 탐색이 필요해지면 `routes` 를 탐색 결과로 대체하면 된다 — 그래프
+자료구조는 이미 있으므로 붙이는 비용이 거의 없다.
+
+어느 route 를 발행할지는 **launch 파라미터**로 정한다 (미션 시작 전 결정).
+
+### 4.4 스무딩 — quintic Bezier (팀 결정)
+
+**결정: quintic Bezier.** 팀 합의 사항이며 재검토하지 않는다.
+
+구간마다 quintic Bezier 하나씩을 이어 붙인다. 전역 곡선 하나가 아니다.
+
+#### 반드시 지킬 것 — 찍은 노드를 제어점으로 쓰지 않는다
+
+Bezier 는 approximating 이라 **양 끝점 외에는 제어점을 통과하지 않는다.**
+손으로 찍은 노드를 그대로 P0~P5 에 넣으면 경로가 안쪽으로 말려 차선을 벗어난다.
+제어점은 **통과점 + 미분값에서 유도**한다.
+
+구간 [p_i, p_{i+1}] 의 quintic Bezier 제어점 P0~P5 (매개변수 t ∈ [0,1]):
+
+```text
+P0 = p_i
+P1 = p_i + d_i / 5
+P2 = p_i + 2*d_i / 5 + a_i / 20
+
+P5 = p_{i+1}
+P4 = p_{i+1} - d_{i+1} / 5
+P3 = p_{i+1} - 2*d_{i+1} / 5 + a_{i+1} / 20
+```
+
+여기서 `d_i` 는 노드 i 에서의 1차 미분(접선), `a_i` 는 2차 미분이다.
+(quintic Bezier 의 성질 B'(0) = 5(P1-P0), B''(0) = 20(P2 - 2*P1 + P0) 을 역으로 푼 것.)
+
+이렇게 하면 **찍은 점을 정확히 지나가면서** 형상 제어가 된다.
+
+#### C2 연속성은 공짜로 따라온다
+
+인접한 두 구간이 **경계 노드에서 같은 `d_i` / `a_i` 를 공유**하면 위치·접선·곡률이
+자동으로 이어진다. 즉 노드마다 `d_i`, `a_i` 를 한 번만 계산해 양쪽 구간이 같이
+쓰면 C2 가 보장된다. 구간별로 따로 계산하면 이음새에서 곡률이 튄다.
+
+- `d_i`, `a_i` 는 이웃 노드로 유한차분해서 잡는다. 매개변수는 **chord-length**
+  (등간격 t 로 잡으면 노드 간격이 불균일한 구간에서 곡선이 부푼다).
+- **폐곡선이므로 인덱스를 wrap 한다.** 시작-끝 이음새도 같은 규칙을 타야
+  heading 이 안 튄다 (6.5).
+
+#### 4.4.1 세그먼트를 직접 나눈다 — 직선 / 원호 / 전이
+
+노드마다 유한차분으로 (d, a) 를 잡으면 **코너의 곡률이 옆 직진 구간으로 샌다.**
+C2 를 지키려고 경계 노드의 곡률을 공유하는데, 코너 쪽 노드의 곡률이 0 이 아니니
+직진 구간 첫 조각이 그만큼 휜다. 실측으로 직진 2.0 m / 코너 0.9 m 배치에서
+17.3 cm 나 부풀었다. 노드를 촘촘히 깔면 줄지만 0 이 되지는 않는다.
+
+그래서 **어디서 끊을지를 사람이 정한다.** 노드를 `Ctrl`+클릭 하면 세그먼트
+경계(■)가 되고, 경계와 경계 사이가 quintic Bezier 한 조각이다. 그 사이에 찍은
+노드 수로 종류가 정해진다.
+
+| 사이 노드 | 종류 | 양 끝 (θ, κ) | 결과 |
+|---|---|---|---|
+| 0 (경계 2 개뿐) | **직선** | θ = 현 방향, κ = 0 | 제어점 6 개가 전부 현 위. 정확히 직선 |
+| 1 (총 3 개) | **원호** | 세 점의 외접원 | κ = ±1/R 로 양 끝 같음. 가운데 노드로 곡률을 직접 조정 |
+| 0 + 전이 표시 | **전이** | 이웃 세그먼트에서 받아옴 | 직선과 원호를 C2 로 잇는다 |
+| 2 개 이상 | **보간** | 위의 노드별 프레임 | 예전 방식. 세그먼트 안에서 다시 쪼갠다 |
+
+원호는 (θ, κ) 를 원의 값으로 고정한 채 **재매개변수화 배율 σ 를 한 개 더 푼다.**
+σ 는 `P' = σt`, `P'' = σ²κn` 에 같이 들어가서 `κ = |P'×P''|/|P'|³` 에서 약분되므로
+**양 끝 곡률을 안 건드리고** 곡선이 부푸는 정도만 바꾼다. 이걸 자유도로 써서
+진짜 원에서 가장 덜 벗어나는 값을 황금분할로 찾는다. 결과 (R = 0.6 m):
+
+| 회전각 | 가운데 노드 오차 | κ 상대오차 | 호길이 오차 |
+|---|---|---|---|
+| 90° | 0.002 mm | 0.02 % | 0.001 mm |
+| 120° | 0.017 mm | 0.08 % | 0.008 mm |
+| 150° | 0.097 mm | 0.29 % | 0.058 mm |
+
+σ 를 안 풀면 90° 에서 벌써 24.6 mm 벌어지고 κ 가 21 % 부푼다.
+
+##### 직선과 원호는 맞닿는 한 절대 C2 가 안 된다
+
+직선은 κ = 0, 원호는 κ = 1/R 이다. 맞닿은 자리에서 곡률이 계단으로 뛴다.
+이건 구현 문제가 아니라 기하 그 자체다. 방법은 둘뿐이다.
+
+1. **전이 세그먼트를 하나 끼운다 (권장).** 노드 2 개짜리 세그먼트를 '전이' 로
+   표시하면 양 끝 (θ, κ) 를 이웃에서 그대로 받아 κ 0 → 1/R 을 그 안에서 흡수한다
+   (클로소이드가 하는 일과 같다). 직선은 정확히 직선으로, 원호는 정확히 원호로
+   남고 모든 경계가 Δθ = Δκ = 0 이 된다.
+2. **경계에서 (θ, κ) 를 평균낸다.** C2 는 성립하지만 **직진 구간이 휜다.**
+   위 예에서 직선이 57.6 mm 휘고 κ 가 0.833 까지 올라간다. 기본은 꺼 둔다.
+
+편집기는 경계마다 양쪽이 제안한 (θ, κ) 의 차이를 그대로 보여주고, 허용오차를
+넘으면 그 노드에 빨간 고리를 그린다. 평균으로 강제한 자리는 위반이 아니라
+"평균으로 강제 (직선이 휜다)" 로 따로 표시한다.
+
+(검증은 `test/test_geometry.js` 의 `[세그먼트]` 블록 21 개)
+
+#### 곡률은 해석적으로 뽑는다
+
+0.05 m 간격에서 유한차분 곡률은 노이즈가 크다. Bezier 계수를 갖고 있으므로
+
+```text
+k(t) = (B'(t) x B''(t)) / |B'(t)|^3
+```
+
+로 바로 계산된다. 공짜다. 4.1 의 곡률 경고와 6.8 의 부가 토픽이 이걸 쓴다.
+
+#### 리샘플 — 발행 경로에는 쓰지 않는다
+
+`/path/global` 은 제어점을 그대로 싣는다 (6.8). 리샘플이 필요한 곳은
+시각화용 `/viz/path/global` 과 Object Detection 경계 폴리곤(4.6) 뿐이다.
+
+t 는 호길이에 비례하지 않으므로, 등간격으로 뽑으려면 **호길이로 재매개변수화**
+해야 한다. t 를 잘게 샘플링해 누적 호길이 테이블을 만들고 역보간하면 충분하다.
+t 를 그냥 등간격으로 나누면 곡선이 급한 구간에서 점이 성겨진다.
+(`web/lane_editor.js` 의 `resample`, 검증은 `test/test_geometry.js` [5])
+
+### 4.5 ROS 쪽 소비
+
+노드 하나가 `lane_graph.yaml` 을 읽어서
+
+- `/path/global` (`kau_msgs/KauPath`) 를 **latched (transient_local · reliable · depth 1)** 로 발행
+- RViz 확인용 `/viz/path/global` (`nav_msgs/Path`) — RViz 는 custom message 를 못 그린다
+
+**한 번 발행하고 끝이다. 동적 재라우팅은 하지 않는다.** 6.7 참고.
+형식과 단위 환산은 6.8 이 확정본이다.
+
+
+### 4.6 Object Detection 경계 — lane_graph 와 분리해서 넘긴다
+
+Object Detection 이 ROI 용으로 outer / inner 경계를 요청했다. **lane_graph 를
+그대로 주지 않는다.** 소비측이 이미 원하는 형식을 갖고 있고, 그 형식은
+그래프가 아니라 폴리곤 두 개다.
+
+수신측 실제 코드 (`kau_object_detection/src/laser_scan_clusterer_node.cpp`):
+
+```cpp
+declare_parameter<std::vector<double>>("track_outer_x", {});   // + _y
+declare_parameter<std::vector<double>>("track_inner_x", {});   // + _y
+track_ring_ = make_track_ring(track_outer_x, track_outer_y,
+                              track_inner_x, track_inner_y);
+```
+
+즉 **평평한 double 배열 4개짜리 ROS 파라미터 yaml** 하나면 끝난다.
+`config/amet_2026_track.yaml` 과 같은 모양이고, 그 파일이 시뮬 전용이라
+못 쓰는 자리(2.2)를 이 파일이 대신한다.
+
+```text
+kau_global_path/web/lane_editor.html
+        ├─ lane_graph.yaml        -> 이 패키지 (경로 생성)
+        └─ kau_v3_track.yaml      -> kau_object_detection/config/ (ROI)
+```
+
+**두 파일 사이에 컴파일 의존성도 런타임 토픽도 없다.** Object Detection 은
+lane_graph 를 몰라도 되고, 이 패키지는 ROI 판정 로직을 몰라도 된다.
+경계를 토픽으로 발행할 이유도 없다 — 트랙은 주행 중에 안 변한다.
+
+#### 중심선을 경계로 쓰면 안 된다
+
+"안쪽 lane / 바깥쪽 lane 을 그려서 경계로 쓰자" 는 틀린다.
+ROI 는 `outer 안쪽 AND inner 바깥쪽` 고리다. 차로 **중심선**을 경계로 넣으면
+고리의 가장자리가 주행 차로 한가운데를 지나고, **자기 차로 위에 서 있는 콘이
+ROI 밖으로 떨어져 통째로 버려진다.** 안전 문제다.
+
+경계는 중심선을 법선 방향으로 민 것이다. 편집기의 "두 중심선에서 boundary
+생성" 버튼이 이걸 한다.
+
+```text
+bnd_outer = 바깥 차로 중심선을 바깥으로  width/2
+bnd_inner = 안쪽 차로 중심선을 안쪽으로  width/2
+```
+
+밀 방향은 폐곡선의 부호 면적으로 정한다. 노드를 어느 방향으로 찍었든
+(CW / CCW) 결과가 같다 — `test/test_geometry.js` 의 [4] 가 이걸 검사한다.
+
+생성값은 초안이다. 실제 테이프 위치와 다르면 손으로 다듬는다.
+`boundary_tolerance_m` 기본값이 0.15 m 라 그 안쪽 오차는 수신측이 흡수한다.
+
+## 5. 좌표계 / TF
+
+`kau_localization/README.md` 의 TF 소유권 규칙을 그대로 따른다.
+
+```text
+map ──────────────► odom              ← cartographer_node
+odom ─────────────► base_footprint    ← ekf_filter_node
+base_footprint ───► base_link ─► lidar_link / imu_link / camera_*
+```
+
+- global path 는 `map` 프레임에 산다. 이 패키지는 **TF 를 발행하지 않는다.**
+- `map -> odom` 을 발행하는 노드는 동시에 하나만 떠야 한다. `amcl` 은 끈다.
+
+## 6. 고려해야 할 것 / 미리 알아야 할 것
+
+### 6.1 측위 정확도가 곧 경로 정확도다
+
+global path 는 `map` 프레임 기준이다. **측위가 틀어진 만큼 경로도 그대로 틀어진다.**
+global path 를 아무리 정확히 그려도 실주행 오차의 하한은 측위 오차가 정한다.
+2.1 의 ② 오른쪽 벽 0.3 m 번짐은 그 구간 측위 정확도를 그만큼 깎는다.
+
+### 6.2 지도에 장애물을 넣으면 안 된다 (본선 규정)
+
+> ⚠️ 이전 판에서 "코너나 벽면에 박스·콘 몇 개를 비대칭으로 놓고 재매핑" 을
+> 제안했으나 **철회한다.**
+
+**예선에서는 라바콘 위치를 알려주지만 본선에서는 랜덤 배정된다.**
+공간 안의 구조물이라 할 것은 라바콘뿐이다. 지도에 넣은 구조물은 본선에서
+사라지거나 다른 자리에 있으므로, 그건 측위를 고치는 게 아니라
+**본선에서 깨지는 측위를 만드는 것**이다.
+
+**매핑은 트랙을 완전히 비운 상태에서 한다.** 지도는 빈 직사각형이 정답이다.
+(시뮬은 `kau_localization/scripts/cones.sh remove` 로 같은 상태를 만든다.)
+
+#### 그럼 측위는 어떻게 잡나 — 설정으로 잡는다
+
+**2026-08-19 실측으로 원인을 특정했다. 아래가 결론이다.**
+
+##### (a) 진짜 원인: 루프 클로저 오매칭 — ✅ 적용 완료
+
+시뮬 매핑 중 pose graph 를 뜯어본 결과:
+
+```text
+[Inter constraints, same trajectory]  30,021 개
+   길이 중앙값 4.50 m   최대 10.01 m
+    6 m 초과: 10,089 개 (33.6%)
+    8 m 초과:  5,046 개 (16.8%)
+```
+
+**12 x 7 m 방에서 길이 8 m 가 넘는 constraint 가 5,046 개.** 방 이쪽 끝 스캔을
+방 반대쪽 submap 에 갖다 붙였다는 뜻이다. 빈 직사각형이라 어느 벽이든 똑같이
+생겨서 매칭기가 반대편에 붙여도 점수가 잘 나온다.
+
+이 가짜 constraint 수천 개가 pose graph 를 잡아당겨 방을 평행사변형으로
+찌그러뜨렸다. 맵이 9.90 x 13.80 m 로 부풀고 벽이 대각선 계단으로 번진 것이
+전부 이것 하나로 설명된다.
+
+원인은 Cartographer 기본값이 이 방 크기에 안 맞는다는 것:
+
+| 파라미터 | 기본값 | 이 방 기준 |
+|---|---|---|
+| `max_constraint_distance` | 15.0 m | 방 대각선 13.9 m -> **방 안 전체가 후보** |
+| `fast_correlative_scan_matcher.linear_search_window` | 7.0 m | 방 폭 7 m -> **반대편까지 밀어볼 수 있음** |
+
+둘 다 오버라이드하지 않아 기본값이 쓰이고 있었다. 넓은 실외를 상정한 값이라
+이 크기 방에서는 사실상 "아무 데나 붙여봐라" 가 된다.
+
+```lua
+-- physicar_2d.lua (적용 완료)
+POSE_GRAPH.constraint_builder.max_constraint_distance = 4.0   -- 기본 15.0
+POSE_GRAPH.constraint_builder.fast_correlative_scan_matcher.linear_search_window = 3.0  -- 기본 7.0
+POSE_GRAPH.constraint_builder.min_score = 0.65                -- 0.62 -> 0.70 -> 0.65
+POSE_GRAPH.constraint_builder.sampling_ratio = 0.3            -- 0.3 -> 0.15 -> 0.3
+```
+
+`max_constraint_distance = 4.0` 이 핵심이다. 한 바퀴 돌아 제자리에 왔을 때
+누적 드리프트는 1 m 안쪽이므로, 4 m 면 진짜 루프 클로저는 다 잡으면서
+반대편 오매칭만 잘라낸다.
+
+##### 2차 조정 — 처음엔 너무 조였다 (`kau_v1`, 2 바퀴 주행)
+
+1차 패치(`min_score` 0.70 / `sampling_ratio` 0.15)로 매핑한 결과:
+
+| | 패치 전 | `kau_v1` | 실제 |
+|---|---|---|---|
+| occupied 범위 | 9.90 x 13.80 m | **7.90 x 12.80 m** | 7 x 12 m |
+| 형태 | 평행사변형 | **직사각형** | — |
+| 유령 벽 | 0.9 m 아래 | **없음** | — |
+
+**찌그러짐은 잡혔다.** 그러나 새 문제가 드러났다:
+
+```text
+왼쪽 벽    px 7 (x=-3.66) 과 px 11~15 (x=-3.46~-3.31)  -> 0.30 m 떨어진 이중 벽
+윗벽       y=10.60 과 y=10.10~10.20                     -> 0.45 m 떨어진 이중 벽
+오른쪽 벽  py 28 에서 px 162 -> py 244 에서 px 154      -> 0.40 m 단조 드리프트
+내부 폭    위 7.35 m -> 아래 6.95 m                      -> 0.40 m 사다리꼴 테이퍼
+```
+
+같은 벽이 0.3~0.45 m 떨어진 두 위치에 그려졌다. 두 바퀴를 돌았는데도
+**드리프트를 잡아줄 진짜 루프 클로저가 안 걸렸다는 뜻이다.** 1차 패치의
+정반대 실패다.
+
+거리 제한은 그대로 두고(실제 드리프트가 0.4 m 라 4 m 는 충분히 여유롭다)
+점수와 시도 횟수만 풀었다: `min_score` 0.70 -> **0.65**,
+`sampling_ratio` 0.15 -> **0.3**.
+
+> **재매핑 중 검증법**: 주행하면서 `kau_localization/scripts/check_constraints.py`
+> 를 돌린다. inter constraint 가
+> - **개수가 너무 적다** -> 루프 클로저가 안 걸린다 -> `min_score` 를 더 완화
+> - **개수는 많은데 6 m 초과가 있다** -> 가짜가 남았다 -> 거리 제한을 더 조임
+>
+> 두 실패 모드를 가르는 유일한 지표다. 지도를 다 만든 뒤에 보면 늦다.
+
+##### (b) `max_range` 는 효과 없었다 — 기록만 남긴다
+
+이전 판에서 "센서는 16 m 인데 12 m 에서 자르고 있다, 14 로 올려라" 고 썼고
+실제로 올렸다(12.0 -> 14.0). **그러나 측정해보니 효과가 없다.**
+
+```text
+유효 빔 720/720   최소 1.40 m   최대 11.54 m
+12 m 초과 빔: 0 개
+-> max_range 12->14 로 새로 들어온 빔: 0 개 (0.0%)
+```
+
+방 전체가 11.5 m 안에 들어와서 애초에 12 m 컷에 걸리는 빔이 없다.
+**"12 m 컷 때문에 끝벽이 잘린다" 는 이 환경에서 틀린 진단이었다.**
+14.0 은 무해하므로 되돌리지 않지만, 측위 문제의 원인이 아니다.
+
+##### (c) 검토했으나 원인이 아니었던 것들
+
+기록해 둔다. 다시 의심하지 않기 위해서다.
+
+| 의심 | 측정 | 판정 |
+|---|---|---|
+| 주행이 너무 빠름 | 0.53 m/s, 58 deg/s. 스캔 간 0.053 m / 5.8 deg | 탐색 범위(0.15 m / 20 deg) 안. **무관** |
+| EKF 가 yaw 를 증폭 | 누적 회전량 `/odom` `/odom/laser` `/imu` 셋이 일치 | **무관** |
+| EKF 위치 흔들림 | 속도로 설명 안 되는 흔들림 1.7 cm/s | 작다. **무관** |
+| Cartographer 가 스캔을 놓침 | cartographer 로그에 경고 0 건 (rviz2 만 136 줄) | **무관** |
+| CPU 부족 | 4 코어 / load 10.3 / RTF 0.826 | 직접 원인은 아니지만 6.10 참고 |
+
+"10 초 정지 후 저속 출발" 은 제대로 한 것이었고, **설정이 문제였다.**
+
+### 6.3 재매핑하면 lane_graph 좌표가 전부 무효가 된다
+
+`map` 프레임 원점은 카토그래퍼가 시작한 위치다. 재매핑하면 원점도, `kau_v3.yaml` 의
+`origin` 도 바뀐다. 즉 **지금 그린 lane_graph 는 지금 pbstream 에서만 유효하다.**
+
+- 그래서 `lane_graph.yaml` 에 `map_source` 를 기록한다.
+- **결정: 재매핑을 먼저 하고 lane_graph 를 그린다.** 순서를 반대로 하면
+  lane_graph 작업을 통째로 반복해야 한다.
+
+### 6.4 최소회전반경 — 궤적에서 실측한다
+
+스펙 시트를 찾을 필요가 없다. **차가 실제로 지나간 궤적이면 그 곡률은
+정의상 주행 가능하다.** `inner.csv` / `outer.csv` 에서 `max|k|` 를 재면
+그게 차량 능력의 실측 하한이고, 스펙 값보다 신뢰할 만하다.
+
+궤적 위에 그리는 한 곡률은 대체로 안전하다. **예외 셋:**
+
+1. **`lane_change` 엣지** — 주행해본 적 없는 구간. 두 lane 사이를 가로지르는
+   짧은 대각선이라 Bezier 구간 이음새에서 곡률이 제일 튀는 곳이다.
+2. **코너를 손으로 "다듬을" 때** — 궤적이 코너에서 밖으로 부푼 걸 보고 안쪽으로
+   당기면 원래보다 급한 코너를 만든 것이다. 궤적을 매끈하게 하는 편집은 안전하지만
+   **가로지르는 편집은 아니다.**
+3. **주행하지 않은 lane** — inner 만 돌고 outer 를 offset 으로 만들면
+   outer 는 검증된 적이 없다. 그래서 3.2 에서 둘 다 돌라고 한 것이다.
+
+따라서 곡률 경고는 **필수 기능이 아니라 싸게 만드는 sanity check** 로 내린다.
+구현은 리샘플된 점 3개로 외접원 반지름을 구하는 몇 줄이면 된다.
+
+### 6.5 폐곡선 / 시작점
+
+트랙을 반복 주행하므로 각 lane 은 닫힌 순환이다.
+시작-끝 이음새에서 heading 이 튀지 않게 **Bezier 구간을 순환으로 처리**해야 한다.
+노드별 `d_i` / `a_i` 계산에서 인덱스를 wrap 하면 된다 (4.4).
+
+### 6.6 리샘플 간격
+
+기본 0.05 m 는 지도 해상도와 맞춘 값이다. 트랙 한 바퀴가 대략 30~40 m 이므로
+lane 당 600~800 점. latched 메시지 하나로는 부담 없는 크기다.
+
+### 6.7 팀 인터페이스 — 확정됨
+
+**콘 회피는 전적으로 local path 가 소유한다.** 안쪽 lane 이 콘으로 막혀 있으면
+local path 가 경로를 생성한다. 따라서:
+
+- 이 패키지는 **콘을 모른다.** object detection 을 구독하지 않는다.
+- `/path/global` 은 **정적 latched 발행**이다. 동적 재라우팅 노드가 아니다.
+- `outer_loop` route 는 콘 대응용이 아니라 **미션용**이다.
+
+`kau_object_detection/AGENTS.md` 의 "Local Planning 이 path generation 을
+소유한다" 와 일치한다. 이 패키지는 **global path 까지만** 담당하고
+회피·충돌검사·안전 여유는 건드리지 않는다.
+
+**아직 합의가 필요한 것 하나:**
+
+> inner lane 이 콘으로 막혔을 때 local 이 옆으로 벌어져야 하는데,
+> **어디까지 벌어져도 되는지**를 알아야 한다. 중심선만 주면
+> "이쪽으로 0.5 m 나가도 아직 트랙 안인가" 를 판단할 근거가 없다.
+
+lane_graph 엣지에 이미 `width` 가 있고, 4.6 에서 만드는 경계 폴리곤이
+그대로 답이 된다. Object Detection 에 주는 것과 **같은 파일을 주면 된다** —
+새로 만들 것이 없다. local 이 "중심선만 주면 알아서 한다" 면 `KauPath` 하나로
+끝낸다. **local 담당자에게 물어보고 정한다.**
+
+### 6.8 출력 메시지 형식 — **`kau_msgs/KauPath` 로 확정** (2026-08-21 정정)
+
+> ⚠️ **이전 판의 `nav_msgs/Path` 결정은 폐기됐다.** 그 판단은
+> "`/global_path` 를 소비하는 코드가 아직 없다" 는 조사 결과 위에 서 있었는데,
+> 그 사이에 **팀 공통 규약이 먼저 확정됐다.** 지금 맞춰야 할 규약이 있다.
+
+이미 존재하는 것:
+
+| 근거 | 내용 |
+|---|---|
+| `kau_msgs/msg/KauPath.msg` | 함수형 경로. quintic Bezier segment 열. **빌드되어 있다** |
+| `kau_state_machine/docs/07_인터페이스.md` | `/path/global` 표에 **확정본: 변경 금지** |
+| `kau_control/src/path_follower_node.cpp` | `/path/global` 을 **이미 구독하고 있다** |
+| `kau_control/include/kau_control/kau_path.hpp` | 수신측 무결성 검사 · 곡선 복원 |
+
+즉 **이산 좌표 집합을 발행하면 제어기가 못 받는다.** 규약의 대전제가
+"경로는 함수다" 이고, `nav_msgs/Path` 는 그 대전제를 위반해서 기각된 형식이다.
+
+```text
+토픽   : /path/global
+타입   : kau_msgs/KauPath
+프레임 : map
+QoS    : RELIABLE · TRANSIENT_LOCAL · depth 1   (latched)
+필드   : source = SRC_GLOBAL, degree = 5, is_closed = true, s_offset = 0
+단위   : 길이 cm  ← lane_graph.yaml 은 m 다. 발행 직전에 100 을 곱한다
+시각화 : /viz/path/global (nav_msgs/Path, BEST_EFFORT) 로 **분리 발행**
+```
+
+#### 리샘플은 발행 대상이 아니다
+
+이전 판의 "0.05 m 등간격으로 리샘플해서 발행" 은 `nav_msgs/Path` 전제였다.
+`KauPath` 는 **제어점을 그대로 싣는다.** 리샘플이 필요한 곳은 둘뿐이다.
+
+| 용도 | 간격 | 비고 |
+|---|---|---|
+| `/viz/path/global` | 0.05 m | RViz 육안 검증용. 발행 경로가 아니다 |
+| `track_boundary` 폴리곤 | 0.10 m | Object Detection ROI (4.6) |
+
+#### 발행측이 채워야 하는 사전계산값
+
+`kau_msgs/README.md` 의 배열 길이 규약과 `validateKauPath` 를 통과해야 한다.
+
+| 필드 | 계산 |
+|---|---|
+| `ctrl_x` / `ctrl_y` | `nseg * 6` 개. 인접 segment 는 단부 제어점을 **중복 저장** |
+| `seg_length` | Gauss-Legendre 10 점 |
+| `seg_kappa_max` | 표본 상한 (제어기는 이 값을 안 쓰고 직접 정확값을 구한다) |
+| `total_length` | `sum(seg_length)` |
+| `confidence` | 1.0 |
+| `valid_length` | **0.0** (Lane Detection 전용 필드다) |
+
+**이 계산은 이미 구현되어 있다.** `kau_control/scripts/fake_path.py` 의
+`hermite_to_bezier` / `seg_length` / `seg_kappa_max` / `to_msg` 가
+그대로 쓸 수 있는 참조 구현이고, `web/lane_editor.js` 가 같은 식을 JS 로
+옮겨 놓았다 (`test/test_geometry.js` 로 검증). 3단계 발행 노드는
+**새로 유도할 것이 없고 옮겨 담기만 하면 된다.**
+
+`fake_path.py` 는 경로 발행자가 생기면 버리기로 되어 있는 스크립트다.
+이 패키지의 발행 노드가 그 자리를 대신한다.
+
+### 6.9 초기 측위가 몇 초간 헤매는 현상
+
+RViz 에서 "맵과 차가 같이 움직이다가 몇 초 뒤 갑자기 제자리를 찾는" 현상은
+**두 가지가 겹쳐 있다.**
+
+**(a) 앞부분은 정상 동작이다 (버그 아님)**
+
+pure localization 에서 Cartographer 는 새 trajectory 를 시작하고, 이게 frozen
+submap 에 붙기 전까지는 자유롭게 떠다닌다. constraint 를 하나 찾으면 pose graph
+최적화가 새 trajectory 를 기존 지도 위로 끌어다 붙인다. 그게 "갑자기 잘 되는" 순간이다.
+
+걸리는 시간을 정하는 값 (`physicar_2d_localization.lua`):
+
+```lua
+POSE_GRAPH.global_sampling_ratio = 0.003   -- 노드 0.3% 만 전역 탐색 시도
+POSE_GRAPH.optimize_every_n_nodes = 20
+```
+
+**해결책은 이미 패키지에 있다** — RViz 의 **2D Pose Estimate** 로 대략 위치를 찍으면
+`initial_pose_relay` 가 즉시 재측위한다. 전역 탐색을 기다릴 이유가 없다.
+자동화하려면 `global_sampling_ratio` 를 0.01~0.03 으로 올린다 (CPU 비용).
+
+**(b) 뒷부분이 진짜 위험하다**
+
+2.1 의 ③ 유령 벽이 **진짜 아랫벽과 평행하게 0.9 m 떨어져** 있다. 밋밋한
+직사각형 공간에서 이건 전역 재측위 입장의 **가짜 정답**이다. 차를 0.9 m 옮겨
+놓은 해석도 스캔과 그럴듯하게 맞아서 `global_localization_min_score = 0.66` 을
+통과할 수 있다.
+
+즉 **가끔 0.9 m 어긋난 곳에 붙을 수 있다.** 트랙 아래쪽 끝에서 시작하면
+지금과 다르게 나올 수 있다. **재매핑으로 유령 벽을 없애는 것이 근본 해결이다.**
+
+### 6.10 재매핑할 때 유령 벽을 안 만들려면
+
+③ 은 시작 직후 몇 초간 스캔 매칭이 못 따라가서 초기 submap 이 어긋난 자리에
+박힌 결과다. 한번 박히면 나중 루프 클로저로도 잘 안 지워진다.
+
+- **정지 상태로 3~5초 기다린 뒤 출발.** `motion_filter.max_time_seconds = 0.5` 라
+  정지 중에도 노드가 쌓이면서 첫 submap 이 안정적으로 잡힌다.
+- **처음 한 바퀴는 아주 천천히.** 10 Hz LiDAR 에 `linear_search_window = 0.15 m`
+  이므로 스캔 간 이동이 15 cm 를 넘으면 correlative matcher 의 탐색 범위를 벗어난다.
+  **1.5 m/s 이상이면 못 따라온다.**
+- **cartographer 를 띄우기 전에 `/odom` 이 안정적으로 나오는지 확인.**
+  EKF 수렴 전이면 초기 prior 가 쓰레기다.
+- **매핑 중에는 RViz 를 끈다.** 실측: 4 코어 / load average 10.33 / RTF 0.826.
+
+  ```text
+  %CPU  프로세스
+   136  rviz2            <- 카토그래퍼(35%)의 4배
+   111  ruby (Gazebo)
+    35  cartographer_node
+  ```
+
+  `/constraint_list` 마커에 점이 11 만 개라 RViz 가 이걸 그리느라 코어 1.4 개를
+  태운다. 게다가 RViz 는 이미 메시지를 계속 버리고 있어서(`Message Filter
+  dropping message ... queue is full` 136 줄) **화면에 보이는 것도 실시간이 아니다.**
+  끄고 매핑한 뒤 `save_map.py` 의 검사와 ASCII 축소도로 확인하는 편이 정확하다.
+  꼭 봐야 하면 Constraint 디스플레이만이라도 끈다.
+- **매핑 후 반드시 검증.** 새 pgm 에서 (a) occupied 바운딩박스가
+  12 x 7 m + 벽 두께 수준인지, (b) 방 밖에 점이 없는지, (c) 벽 두께가
+  0.05~0.15 m 를 넘지 않는지. 2.1 을 만든 것과 같은 검사다.
+
+## 7. 해야 할 일
+
+### 0단계 — 재매핑 ✅ 완료 (`kau_v3`, 2026-08-21)
+
+- [x] `physicar_2d.lua` 의 `max_range` 12.0 -> 14.0  (2026-08-19. **효과 없었음**, 6.2(b))
+- [x] **`physicar_2d.lua` 루프 클로저 오매칭 패치** (2026-08-19, 6.2(a))
+      `max_constraint_distance` 4.0 / `fast_correlative linear_search_window` 3.0
+- [x] **2차 조정** — 1차가 너무 조여서 루프가 안 닫혔다 (`kau_v1` 결과 반영)
+      `min_score` 0.70 -> 0.65 / `sampling_ratio` 0.15 -> 0.3
+- [x] 트랙을 비우고 재매핑 -> `kau_v3`
+- [x] `view_map.py kau_v3` **통과** — 유령 벽 없음, 7.10 x 11.95 m
+- [x] 2.1 의 실측 표를 `kau_v3` 기준으로 갱신
+- [ ] `lane_graph.yaml` 의 `map_source` 를 `kau_v3` 로 기록 (6.3) — 편집기가 자동으로 넣는다
+
+### 1단계 — 궤적 확보  ← **지금 여기. 차가 있어야 진행된다**
+
+- [x] `map -> base_footprint` 를 CSV 로 기록하는 스크립트 (`scripts/record_trajectory.py`)
+- [ ] `localization.launch.py` 로 `kau_v3` 위에 올리고 2D Pose Estimate 로 초기화
+- [ ] teleop 으로 inner lane **한 바퀴씩 여러 번** -> `data/inner_1.csv ...` (3.2)
+- [ ] teleop 으로 outer lane **한 바퀴씩 여러 번** -> `data/outer_1.csv ...` (6.4 의 3번 때문에 필수)
+- [ ] 잘못 돈 바퀴 csv 삭제 -> 다시 돌리면 그 번호를 다시 채운다
+- [ ] 종료 요약의 **바퀴 간 벌어짐** 확인 — 15 cm 를 넘으면 측위부터 본다
+- [ ] 편집기에 겹쳐 띄워서 트랙이 지도 안에 다 들어오는지 확인
+- [ ] 궤적에서 `max|k|` 측정 -> 곡률 경고 임계값 확정 (6.4). 편집기 HUD 가 바로 보여준다
+
+### 2단계 — 편집 도구 ✅ 구현 완료 (사용은 궤적이 나온 뒤)
+
+- [x] pgm 을 브라우저에서 직접 파싱 — PNG 변환 단계를 없앴다 (`parsePGM`)
+- [x] `web/lane_editor.html` : 배경 + inner/outer 궤적 오버레이 + 팬/줌/미터 격자
+- [x] 노드 추가·드래그·삽입·삭제 + Ctrl+Z / Ctrl+Y + localStorage 자동 저장
+- [x] 4 레이어 (안쪽 차로 · 바깥쪽 차로 · outer boundary · inner boundary)
+- [x] **궤적에서 노드 씨앗 생성** — 백지에 그리지 않는다 (3.2)
+- [x] 바퀴 파일 자동 로드 (`inner_1.csv` ...) + 평균 / 개별 선택 + 벌어짐 표시 (3.2)
+      — 번호에 구멍이 나도 읽는다 (첫 404 에서 안 멈춘다)
+- [x] quintic Bezier 제어점 유도 + 화면에 실제 발행될 곡선을 그린다 (4.4)
+- [x] 폐곡선 wrap 처리 — 시작-끝 이음새도 같은 규칙 (6.5)
+- [x] 호길이 재매개변수화 + 등간격 리샘플
+- [x] 곡률 경고 (임계 초과 segment 를 빨갛게)
+- [x] `lane_graph.yaml` export / import
+- [x] `kau_v3_track.yaml` export — Object Detection ROI (4.6)
+- [x] `test/test_geometry.js` — 원호 재현 · 노드 통과 · G2 · offset 부호 · 리샘플
+- [x] `test/test_export.js` — 실제 `kau_v3` 로 두 yaml 을 뽑아 형식·기하 검사.
+      **경계 고리가 두 차로를 자르지 않는지**가 핵심 항목이다 (4.6)
+- [ ] 실제 궤적으로 한 번 돌려보고 조작감 조정
+
+### 3단계 — ROS 연동
+
+- [ ] `lane_graph.yaml` 로더 + `/path/global` (`kau_msgs/KauPath`, latched) 발행 노드
+      — 계산식은 `fake_path.py` 와 `lane_editor.js` 에 이미 있다 (6.8)
+- [ ] m -> cm 환산 (**KauPath 는 cm**. 이거 하나가 제일 흔한 실수다)
+- [ ] `/viz/path/global` (`nav_msgs/Path`) 분리 발행
+- [ ] route 선택 launch 파라미터 (`route:=inner_loop`)
+- [ ] `kau_v3_track.yaml` 을 `kau_object_detection/config/` 로 넘기고 launch 에 연결
+- [ ] launch 파일
+- [ ] RViz 에서 지도·경로·실시간 pose 겹쳐서 육안 검증
+
+### 4단계 — 검증
+
+- [ ] **콘을 깔아놓고 pure localization 이 붙는지 확인** — 콘 점들이 지도에 없는
+      free/unknown 셀에 떨어져 매칭 점수를 깎는다. 콘이 많으면
+      `min_score = 0.62` 에 걸려 재측위가 안 잡힐 수 있다
+- [ ] 실차로 global path 를 따라 저속 주행, 실제 차선과의 횡방향 오차 측정
+- [ ] 측위 드리프트 구간 기록
+- [ ] Object Detection 에서 ROI 가 자기 차로 위 콘을 안 버리는지 확인 (4.6)
+- [ ] local path 와 연동 테스트
+
+## 8. 열린 질문
+
+해결된 것:
+
+| 질문 | 답 |
+|---|---|
+| 재매핑을 할 것인가 | **한다.** 재매핑 -> lane_graph 순서 (6.3) |
+| 매핑 주행을 궤적 시드로 쓸 것인가 | **아니다.** 재매핑 후 lane 별 teleop 으로 따로 딴다 (3.2) |
+| lane 이 몇 개이고 그래프가 필요한가 | **2개, 필요하다.** inner 기본 + outer + lane_change 엣지 (4.2) |
+| 최소회전반경 | 스펙 불필요. 궤적에서 실측 (6.4) |
+| 콘 회피는 누가 하나 | **local path.** 이 패키지는 정적 latched 발행 (6.7) |
+| `/path/global` 형식 | **`kau_msgs/KauPath`**, transient_local, cm, degree 5 (6.8) |
+| 양쪽 lane 을 엣지로 이을 것인가 | **지금은 안 잇는다.** 따로 그려두고 필요할 때 `lane_change` 한 줄 추가 (4.2) |
+| Object Detection 경계는 어떻게 주나 | **별도 param yaml.** lane_graph 와 무관 (4.6) |
+| 차로 중심선을 경계로 써도 되나 | **안 된다.** 자기 차로 위 콘이 ROI 밖으로 떨어진다 (4.6) |
+
+남은 것:
+
+1. **local path 에 lane 폭 / 경계선 정보도 줄 것인가?** (6.7 마지막)
+   중심선만으로 충분한지 local 담당자에게 확인.
+2. **노드 (theta, kappa) 추정 방식** (4.4) — **잠정 결론: 지금 방식으로 충분해 보인다.**
+   접선은 chord-length 이차식 미분, 곡률은 **세 점의 외접원**(Menger)에서 뽑는다.
+   이차식을 두 번 미분하는 쪽은 chord-length 가 호길이가 아니라서 원호에서
+   곡률을 4~17% 부풀렸다. 외접원은 원호에서 정확하다 (`test_geometry.js` [1]).
+   실측 궤적은 코너에서 거의 원호라 이 차이가 그대로 곡률 경고 오판이 된다.
+   남는 오차는 quintic Hermite 고유의 segment 내부 부풀림 뿐이고
+   (노드 간격 0.5 m 에서 +1~2%, 항상 위쪽), 이건 곡선 종류를 바꾸지 않는 한 남는다.
+   **실제 궤적을 띄워 곡률 그래프를 본 뒤 확정한다.**

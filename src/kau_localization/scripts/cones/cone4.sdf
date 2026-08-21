@@ -1,0 +1,29 @@
+<sdf version='1.6'>
+  <model name="cone4">
+    <pose>9.7342 1.3917 0.1900 0 0 0.0000</pose>
+    <link name="object">
+      <inertial>
+        <mass>0.2</mass>
+        <inertia>
+          <ixx>0.002947</ixx><ixy>0</ixy><ixz>0</ixz>
+          <iyy>0.002947</iyy><iyz>0</iyz>
+          <izz>0.001080</izz>
+        </inertia>
+      </inertial>
+      <collision name="cone">
+        <geometry><box><size>0.18 0.18 0.38</size></box></geometry>
+      </collision>
+      <visual name="visual">
+        <geometry>
+          <mesh><uri>model://meshes/custom_71e69ee938032295503bfed557fde18c/cone4.dae</uri></mesh>
+        </geometry>
+      </visual>
+    </link>
+    <plugin filename="gz-sim-hydrodynamics-system" name="gz::sim::systems::Hydrodynamics">
+      <link_name>object</link_name>
+      <xU>-0.2</xU><yV>-0.2</yV><zW>-0.2</zW>
+      <kP>-0.002</kP><mQ>-0.002</mQ><nR>-0.002</nR>
+    </plugin>
+    <static>false</static>
+  </model>
+</sdf>

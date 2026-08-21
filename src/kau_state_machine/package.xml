@@ -1,0 +1,38 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>kau_state_machine</name>
+  <version>0.1.0</version>
+  <description>KAU AMET 상태 머신. system_supervisor(감시·복구) + state_machine(임무·거동). 설계는 docs/00~10</description>
+  <maintainer email="eiffeltower1206@gmail.com">Jeon Semin</maintainer>
+  <license>Apache-2.0</license>
+
+  <depend>rclpy</depend>
+  <depend>kau_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>geometry_msgs</depend>
+
+  <!-- Lifecycle 전이 요청 (01 section 5, G3) -->
+  <depend>lifecycle_msgs</depend>
+
+  <!-- TF 생존 확인 (01 section 5, G4) -->
+  <depend>tf2_ros</depend>
+
+  <!-- config/*.yaml 로드 (08) -->
+  <depend>python3-yaml</depend>
+
+  <!-- launch/state_machine.launch.py -->
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>ament_index_python</exec_depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

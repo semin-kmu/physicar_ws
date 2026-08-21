@@ -1,0 +1,10 @@
+laser_scan_validator:
+  ros__parameters:
+    use_sim_time: true
+    input_topic: /scan_filtered
+    expected_frame_id: lidar_link
+    minimum_sample_count: 2
+    sample_count_tolerance: 1
+    require_intensities: false
+    summary_period_seconds: 2.0
+

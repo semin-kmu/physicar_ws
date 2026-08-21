@@ -1,0 +1,65 @@
+start_signal_detector:
+  ros__parameters:
+    use_sim_time: true
+    input_topic: /camera/image_raw/compressed
+    output_topic: /perception/start_permission
+
+    # --- Start permission policy ---------------------------------------------
+    # Consecutive green frames before the start is permitted. The camera runs at
+    # roughly 15 Hz, so five frames span about 0.33 s: long enough to reject a
+    # single mis-classified frame, short enough not to lose the start.
+    green_confirmation_frames: 5
+    # No usable frame for this long clears the run and keeps the permission
+    # false. Roughly seven frame intervals at 15 Hz, so ordinary jitter and a
+    # few dropped frames never trip it. Has no effect once latched.
+    camera_timeout_s: 0.5
+    # The permission is published on this period regardless of the camera, so a
+    # consumer sees the state even while no frame arrives. Node clock based.
+    publish_period_s: 0.1
+
+    # --- Region of interest --------------------------------------------------
+    # Full camera frame is 480x360 and the signal stands to the right of the
+    # vehicle at the start pose. Measured on the real PhysiCar camera, the lit
+    # lamp component is bbox (412, 217, 28x28), centre (425.7, 230.4), 591 px.
+    #
+    # The window used to end at x=415, which clipped the lamp to a 3 px slice
+    # that then failed the minimum area gate: the signal was green and the
+    # permission still stayed false. x_max=450 clears the lamp by 10 px while
+    # staying 30 px short of the frame edge, and the vertical span already
+    # contains 217..245 with room to spare.
+    #
+    # Green outside this window is never considered.
+    roi_x_min: 280
+    roi_x_max: 450
+    roi_y_min: 135
+    roi_y_max: 265
+
+    # --- Colour gate ---------------------------------------------------------
+    # OpenCV hue is 0..179. Measured on the live camera with the lamp lit:
+    #   lit lamp   hue 59..61   saturation 199..255   value 174..255
+    #   grass      hue 25..44   (yellow-green, never above 44)
+    # The hue window therefore starts well above the grass band and stays below
+    # cyan, and the saturation and value floors sit clearly under the measured
+    # lamp so dimmer lighting still passes.
+    hue_min: 45
+    hue_max: 85
+    saturation_min: 150
+    value_min: 150
+
+    # --- Shape gate ----------------------------------------------------------
+    # Measured lamp component: 192 px, bbox 16x16, aspect 1.00, fill 0.75.
+    # Largest measured grass fragment: 29 px, aspect up to 2.33, fill 0.23..0.62.
+    # min_area_px sits above every grass fragment and below a third of the lamp,
+    # so the lamp survives being seen from farther away.
+    min_area_px: 60
+    max_area_px: 5000
+    # A lamp is round, so its bounding box is close to square.
+    min_aspect_ratio: 0.6
+    max_aspect_ratio: 1.6
+    # Component area over bounding box area. A filled circle reaches pi/4 (0.785)
+    # and the measured lamp reached 0.75; scattered foliage stays well below.
+    min_fill_ratio: 0.6
+
+    # Per-frame detection detail, throttled to 1 Hz. Off by default: only state
+    # changes belong in the log during a run. Turn on while tuning the gates.
+    log_detection_detail: false

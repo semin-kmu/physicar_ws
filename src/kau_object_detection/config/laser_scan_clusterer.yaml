@@ -1,0 +1,82 @@
+laser_scan_clusterer:
+  ros__parameters:
+    use_sim_time: true
+    input_topic: /scan_filtered
+    expected_frame_id: lidar_link
+    minimum_sample_count: 2
+    sample_count_tolerance: 1
+    require_intensities: false
+    base_distance_threshold_m: 0.05
+    angular_resolution_scale: 1.5
+    circular_scan_tolerance_rad: 0.05
+    # Neighbour/speckle filtering runs before clustering. A beam is kept when it
+    # links to its immediate previous or next beam under the same adaptive
+    # distance rule the clusterer uses, so a real two-beam cone survives and only
+    # a beam with no reachable neighbour at all is dropped.
+    speckle_filter_enabled: true
+    # 1 keeps mutually supported two-beam candidates; 2 discards them again.
+    minimum_support_neighbors: 1
+    # Support radius relative to the clustering link threshold. At 1.0 a point
+    # holding any clustering link can never be removed as speckle.
+    neighbor_distance_scale: 1.0
+    # Candidate acceptance only. Raw clustering no longer deletes small clusters,
+    # so 1 lets a supported two-point cone reach the geometry stage.
+    minimum_cluster_points: 1
+    # Perpendicular distance in metres below which a point is treated as
+    # collinear while building the observed footprint.
+    collinear_tolerance_m: 0.001
+    # Provisional circular occupancy candidate, derived read-only from the
+    # measured cluster geometry. No safety inflation is applied here.
+    # Half of the 0.18 x 0.18 m cone base footprint.
+    nominal_cone_radius_m: 0.09
+    # Radius of the cone cross-section visible at the 0.20 m LiDAR height. The
+    # closest measured point is pushed away from the sensor by this amount to
+    # recover a provisional cone axis centre.
+    visible_slice_radius_m: 0.043
+    # Largest observed extent that may still be a single cone. Deliberately
+    # loose: 1.7x the full 0.18 m base diameter absorbs beam quantisation,
+    # mounting-height error, and cone tilt, while still rejecting the multi-metre
+    # wall clusters seen in the practice world by a wide margin.
+    maximum_observed_width_m: 0.30
+    log_cluster_geometry: true
+    log_circle_candidates: true
+    geometry_log_cluster_count: 3
+    summary_period_seconds: 2.0
+    # Read-only Gazebo Transport world pose diagnostics. Nothing in this package
+    # transforms perception output with these values yet.
+    world_pose_topic: /model/physicar/pose
+    # Matched against the per-pose child_frame_id first, then the model name.
+    # An empty value always takes the first entry of the message.
+    world_pose_base_frame: base_footprint
+    world_pose_timeout_s: 0.5
+    # Planar part of the measured base_footprint -> lidar_link translation
+    # [-0.027, 0, 0.200]. The rotation between the two frames is identity, and
+    # the z offset does not affect the planar track ROI test.
+    lidar_offset_x_m: -0.027
+    lidar_offset_y_m: 0.0
+    # Keep band around either track boundary. One cone radius (0.09) plus the
+    # visible-slice correction (0.043) rounded up, so a cone standing on the
+    # edge is never dropped because of centre-estimation error. The boundary
+    # polygons themselves live in config/amet_2026_track.yaml.
+    track_boundary_tolerance_m: 0.15
+    # --- Object List output (kau_msgs/ObstacleCircleArray) ---------------------
+    # Published for Local Path Planning. Circles carry the measured physical
+    # obstacle only; vehicle size and safety margin stay with the planner.
+    object_list_topic: /perception/obstacles
+    # Carried on every frame, failures included, so a consumer never has to
+    # branch on the status to know which frame the message speaks about.
+    object_list_frame_id: map
+    # v1 approves candidates in a binary way, so every published circle is 1.0.
+    object_list_confidence: 1.0
+    # Freshness the Object List demands of the world pose. Deliberately stricter
+    # than world_pose_timeout_s: the ROI stage may still trust a 0.4 s old pose
+    # and fail open, but a frame that old must not be published as STATUS_OK.
+    object_list_pose_timeout_s: 0.3
+    # No usable scan for this long makes the node report STATUS_LIDAR_UNAVAILABLE.
+    object_list_scan_timeout_s: 0.3
+    # Watchdog tick. Node clock, so it follows simulation time.
+    object_list_watchdog_period_s: 0.1
+    # Republication period while the watchdog holds. Must stay below
+    # object_list_scan_timeout_s so a consumer sees the state inside its own
+    # 0.3 s discard window without being spammed at the full tick rate.
+    object_list_watchdog_publish_period_s: 0.2

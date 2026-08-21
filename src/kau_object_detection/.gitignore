@@ -1,0 +1,11 @@
+build/
+install/
+log/
+.cache/
+.pytest_cache/
+__pycache__/
+*.pyc
+.vscode/
+.idea/
+compile_commands.json
+

@@ -1,0 +1,159 @@
+# Copyright 2026 KAU AMET Team
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Cartographer 2D pure localization (저장된 지도 위에서 위치 추정).
+
+    ros2 launch kau_localization localization.launch.py \
+        pbstream:=/home/physicar/maps/kau.pbstream
+
+slam.launch.py 로 만들어 /write_state 로 저장한 .pbstream 이 필요하다.
+입출력과 TF 소유권은 slam.launch.py 와 동일하다.
+지도를 키우지 않고 frozen submap 에 붙어 map -> odom 만 갱신한다.
+
+초기 위치
+    재부팅하면 /odom 이 0 에서 다시 시작하므로 Cartographer 는 로봇이
+    지도 어디에 있는지 모른 채 전역 재탐색을 한다. RViz 의
+    "2D Pose Estimate" 로 /initialpose 를 찍으면 initial_pose_relay 가
+    현재 trajectory 를 끝내고 그 pose 로 새 trajectory 를 시작해 즉시 수렴시킨다.
+
+주요 인자
+    pbstream:=/path/to.pbstream    (필수)
+    use_sim_time:=false            실기에서 실행할 때
+    initial_pose:=false            /initialpose 릴레이 없이 전역 재탐색만
+    publish_map:=false             /map 을 안 띄울 때 (nav2 map_server 를 따로 쓸 때)
+    rviz:=true                     RViz 동시 실행
+"""
+
+from pathlib import Path
+
+from ament_index_python.packages import get_package_share_directory
+
+from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument
+from launch.conditions import IfCondition
+from launch.substitutions import LaunchConfiguration
+
+from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
+
+
+PACKAGE = 'kau_localization'
+
+
+def generate_launch_description():
+    share = Path(get_package_share_directory(PACKAGE))
+    config_dir = str(share / 'config')
+    rviz_config = str(share / 'rviz' / 'cartographer.rviz')
+
+    use_sim_time = LaunchConfiguration('use_sim_time')
+    scan_topic = LaunchConfiguration('scan_topic')
+    odom_topic = LaunchConfiguration('odom_topic')
+    config_file = LaunchConfiguration('config_file')
+    pbstream = LaunchConfiguration('pbstream')
+    resolution = LaunchConfiguration('resolution')
+    publish_period = LaunchConfiguration('publish_period_sec')
+
+    args = [
+        # default_value 를 주지 않으면 인자 없이 실행할 때 launch 가
+        # 바로 에러를 낸다. 지도 없이 localization 은 의미가 없으므로 의도된 동작.
+        DeclareLaunchArgument(
+            'pbstream',
+            description='slam.launch.py + /write_state 로 만든 .pbstream 경로.'),
+        DeclareLaunchArgument(
+            'use_sim_time', default_value='true',
+            description='Gazebo 는 true, 실기는 false.'),
+        DeclareLaunchArgument(
+            'scan_topic', default_value='/scan',
+            description='SLAM 때와 동일한 토픽을 써야 매칭 특성이 일치한다.'),
+        DeclareLaunchArgument(
+            'odom_topic', default_value='/odom',
+            description='EKF 융합 출력.'),
+        DeclareLaunchArgument(
+            'config_file', default_value='physicar_2d_localization.lua',
+            description='config/ 안의 lua 파일명.'),
+        DeclareLaunchArgument(
+            'resolution', default_value='0.05',
+            description='/map 격자 해상도 [m].'),
+        DeclareLaunchArgument(
+            'publish_period_sec', default_value='1.0',
+            description='/map 발행 주기 [s].'),
+        DeclareLaunchArgument(
+            'initial_pose', default_value='true',
+            description='RViz 2D Pose Estimate(/initialpose) 릴레이 사용 여부.'),
+        DeclareLaunchArgument(
+            'publish_map', default_value='true',
+            description='occupancy_grid_node 로 /map 을 발행할지.'),
+        DeclareLaunchArgument(
+            'rviz', default_value='false',
+            description='RViz 동시 실행 여부.'),
+    ]
+
+    cartographer_node = Node(
+        package='cartographer_ros',
+        executable='cartographer_node',
+        name='cartographer_node',
+        output='screen',
+        arguments=[
+            '-configuration_directory', config_dir,
+            '-configuration_basename', config_file,
+            '-load_state_filename', pbstream,
+            # frozen 으로 올려야 저장된 지도가 재최적화로 변형되지 않는다.
+            '-load_frozen_state', 'true',
+        ],
+        parameters=[{'use_sim_time': use_sim_time}],
+        remappings=[
+            ('scan', scan_topic),
+            ('odom', odom_topic),
+        ],
+    )
+
+    occupancy_grid_node = Node(
+        package='cartographer_ros',
+        executable='cartographer_occupancy_grid_node',
+        name='cartographer_occupancy_grid_node',
+        output='log',
+        parameters=[{
+            'use_sim_time': use_sim_time,
+            'resolution': ParameterValue(resolution, value_type=float),
+            'publish_period_sec': ParameterValue(publish_period, value_type=float),
+        }],
+        condition=IfCondition(LaunchConfiguration('publish_map')),
+    )
+
+    initial_pose_relay = Node(
+        package=PACKAGE,
+        executable='initial_pose_relay',
+        name='initial_pose_relay',
+        output='screen',
+        parameters=[{
+            'use_sim_time': use_sim_time,
+            'configuration_directory': config_dir,
+            'configuration_basename': config_file,
+        }],
+        condition=IfCondition(LaunchConfiguration('initial_pose')),
+    )
+
+    rviz_node = Node(
+        package='rviz2',
+        executable='rviz2',
+        name='rviz2',
+        output='log',
+        arguments=['-d', rviz_config],
+        parameters=[{'use_sim_time': use_sim_time}],
+        condition=IfCondition(LaunchConfiguration('rviz')),
+    )
+
+    return LaunchDescription(
+        args + [cartographer_node, occupancy_grid_node,
+                initial_pose_relay, rviz_node])

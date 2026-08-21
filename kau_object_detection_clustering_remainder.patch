@@ -1,0 +1,398 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -24,6 +24,18 @@ ament_target_dependencies(laser_scan_validator sensor_msgs)
+ 
++add_library(laser_scan_clusterer
++  src/laser_scan_clusterer.cpp
++)
++target_include_directories(laser_scan_clusterer PUBLIC
++  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
++  $<INSTALL_INTERFACE:include>
++)
++ament_target_dependencies(laser_scan_clusterer sensor_msgs)
++
+ add_executable(laser_scan_validator_node
+   src/laser_scan_validator_node.cpp
+ )
+@@ -41,7 +53,8 @@ install(
+ )
+ install(
+-  TARGETS laser_scan_validator laser_scan_validator_node
++  TARGETS laser_scan_validator laser_scan_clusterer
++  laser_scan_validator_node
+   EXPORT export_${PROJECT_NAME}
+   ARCHIVE DESTINATION lib
+   LIBRARY DESTINATION lib
+@@ -61,6 +74,15 @@ if(BUILD_TESTING)
+     ament_target_dependencies(test_laser_scan_validator sensor_msgs)
+   endif()
+ 
++  ament_add_gtest(test_laser_scan_clusterer
++    test/test_laser_scan_clusterer.cpp
++  )
++  if(TARGET test_laser_scan_clusterer)
++    target_link_libraries(test_laser_scan_clusterer laser_scan_clusterer)
++    ament_target_dependencies(test_laser_scan_clusterer sensor_msgs)
++  endif()
++
+ endif()
+ 
+ ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)
+diff --git a/src/laser_scan_clusterer.cpp b/src/laser_scan_clusterer.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/laser_scan_clusterer.cpp
+@@ -0,0 +1,183 @@
++// Copyright 2026 KAU AMET Team
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++#include "kau_object_detection/laser_scan_clusterer.hpp"
++
++#include <algorithm>
++#include <cmath>
++#include <cstddef>
++#include <vector>
++
++namespace kau_object_detection
++{
++namespace
++{
++
++constexpr double kTwoPi = 6.28318530717958647692;
++
++bool is_finite(const float value)
++{
++  return std::isfinite(static_cast<double>(value));
++}
++
++bool has_valid_scan_geometry(const sensor_msgs::msg::LaserScan & scan)
++{
++  return is_finite(scan.angle_min) &&
++         is_finite(scan.angle_max) &&
++         is_finite(scan.angle_increment) &&
++         scan.angle_max > scan.angle_min &&
++         scan.angle_increment > 0.0F &&
++         is_finite(scan.range_min) &&
++         is_finite(scan.range_max) &&
++         scan.range_min >= 0.0F &&
++         scan.range_max > scan.range_min;
++}
++
++double point_distance(const ScanPoint2D & first, const ScanPoint2D & second)
++{
++  return std::hypot(second.x_m - first.x_m, second.y_m - first.y_m);
++}
++
++bool points_are_adjacent(
++  const ScanPoint2D & first,
++  const ScanPoint2D & second,
++  const double angle_increment_rad,
++  const ScanClusteringOptions & options)
++{
++  const double expected_angular_spacing =
++    0.5 * (first.range_m + second.range_m) * std::abs(angle_increment_rad);
++  const double threshold =
++    options.base_distance_threshold_m +
++    options.angular_resolution_scale * expected_angular_spacing;
++
++  return std::isfinite(threshold) &&
++         threshold >= 0.0 &&
++         point_distance(first, second) <= threshold;
++}
++
++}  // namespace
++
++std::vector<ScanPoint2D> convert_scan_indices_to_points(
++  const sensor_msgs::msg::LaserScan & scan,
++  const std::vector<std::size_t> & usable_indices)
++{
++  std::vector<ScanPoint2D> points;
++  if (!has_valid_scan_geometry(scan)) {
++    return points;
++  }
++
++  points.reserve(usable_indices.size());
++  for (const auto index : usable_indices) {
++    if (index >= scan.ranges.size()) {
++      continue;
++    }
++
++    const float range = scan.ranges[index];
++    if (!is_finite(range) || range < scan.range_min || range > scan.range_max) {
++      continue;
++    }
++
++    const double angle =
++      static_cast<double>(scan.angle_min) +
++      static_cast<double>(index) * static_cast<double>(scan.angle_increment);
++    const double range_m = static_cast<double>(range);
++    if (!std::isfinite(angle)) {
++      continue;
++    }
++
++    points.push_back(ScanPoint2D{
++      index,
++      range_m * std::cos(angle),
++      range_m * std::sin(angle),
++      range_m,
++      angle});
++  }
++
++  std::sort(
++    points.begin(), points.end(),
++    [](const ScanPoint2D & first, const ScanPoint2D & second) {
++      return first.scan_index < second.scan_index;
++    });
++  return points;
++}
++
++bool scan_covers_full_circle(
++  const sensor_msgs::msg::LaserScan & scan,
++  const double tolerance_rad)
++{
++  if (!has_valid_scan_geometry(scan) || !std::isfinite(tolerance_rad) ||
++    tolerance_rad < 0.0)
++  {
++    return false;
++  }
++
++  const double covered_angle =
++    static_cast<double>(scan.angle_max - scan.angle_min) +
++    std::abs(static_cast<double>(scan.angle_increment));
++  return std::abs(covered_angle - kTwoPi) <= tolerance_rad;
++}
++
++std::vector<Cluster2D> cluster_laser_scan(
++  const sensor_msgs::msg::LaserScan & scan,
++  const std::vector<std::size_t> & usable_indices,
++  const ScanClusteringOptions & options)
++{
++  std::vector<Cluster2D> clusters;
++  if (options.base_distance_threshold_m < 0.0 ||
++    options.angular_resolution_scale < 0.0)
++  {
++    return clusters;
++  }
++
++  const auto points = convert_scan_indices_to_points(scan, usable_indices);
++  if (points.empty()) {
++    return clusters;
++  }
++
++  for (const auto & point : points) {
++    if (clusters.empty()) {
++      clusters.push_back(Cluster2D{{point}, false});
++      continue;
++    }
++
++    auto & current_cluster = clusters.back();
++    const auto & previous_point = current_cluster.points.back();
++    const bool consecutive_indices =
++      point.scan_index == previous_point.scan_index + 1U;
++    if (!consecutive_indices ||
++      !points_are_adjacent(
++        previous_point, point, static_cast<double>(scan.angle_increment), options))
++    {
++      clusters.push_back(Cluster2D{{point}, false});
++      continue;
++    }
++
++    current_cluster.points.push_back(point);
++  }
++
++  const bool can_merge_boundary_clusters =
++    clusters.size() > 1U &&
++    scan_covers_full_circle(scan, options.circular_scan_tolerance_rad) &&
++    points.front().scan_index == 0U &&
++    points.back().scan_index == scan.ranges.size() - 1U &&
++    points_are_adjacent(
++      clusters.back().points.back(),
++      clusters.front().points.front(),
++      static_cast<double>(scan.angle_increment),
++      options);
++
++  if (can_merge_boundary_clusters) {
++    Cluster2D merged_cluster = clusters.back();
++    clusters.pop_back();
++    const Cluster2D first_cluster = clusters.front();
++    clusters.erase(clusters.begin());
++    merged_cluster.points.insert(
++      merged_cluster.points.end(),
++      first_cluster.points.begin(),
++      first_cluster.points.end());
++    merged_cluster.wraps_scan_boundary = true;
++    clusters.insert(clusters.begin(), merged_cluster);
++  }
++
++  const std::size_t minimum_points =
++    std::max<std::size_t>(1U, options.minimum_cluster_points);
++  clusters.erase(
++    std::remove_if(
++      clusters.begin(), clusters.end(),
++      [minimum_points](const Cluster2D & cluster) {
++        return cluster.points.size() < minimum_points;
++      }),
++    clusters.end());
++  return clusters;
++}
++
++}  // namespace kau_object_detection
+diff --git a/test/test_laser_scan_clusterer.cpp b/test/test_laser_scan_clusterer.cpp
+new file mode 100644
+--- /dev/null
++++ b/test/test_laser_scan_clusterer.cpp
+@@ -0,0 +1,188 @@
++// Copyright 2026 KAU AMET Team
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//     http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++#include <cmath>
++#include <cstddef>
++#include <limits>
++#include <vector>
++
++#include "gtest/gtest.h"
++#include "kau_object_detection/laser_scan_clusterer.hpp"
++#include "sensor_msgs/msg/laser_scan.hpp"
++
++namespace
++{
++
++constexpr float kPi = 3.14159265358979323846F;
++
++sensor_msgs::msg::LaserScan make_scan(
++  const std::vector<float> & ranges,
++  const float angle_min,
++  const float angle_increment)
++{
++  sensor_msgs::msg::LaserScan scan;
++  scan.header.frame_id = "lidar_link";
++  scan.angle_min = angle_min;
++  scan.angle_increment = angle_increment;
++  scan.angle_max =
++    angle_min + angle_increment * static_cast<float>(ranges.size() - 1U);
++  scan.range_min = 0.1F;
++  scan.range_max = 20.0F;
++  scan.ranges = ranges;
++  return scan;
++}
++
++kau_object_detection::ScanClusteringOptions test_options(
++  const std::size_t minimum_cluster_points = 1U)
++{
++  kau_object_detection::ScanClusteringOptions options;
++  options.base_distance_threshold_m = 0.05;
++  options.angular_resolution_scale = 1.0;
++  options.minimum_cluster_points = minimum_cluster_points;
++  options.circular_scan_tolerance_rad = 0.05;
++  return options;
++}
++
++TEST(LaserScanClusterer, ConvertsPolarScanValuesAndPreservesIndices)
++{
++  const auto scan = make_scan({2.0F, 3.0F}, 0.0F, kPi / 2.0F);
++  const auto points =
++    kau_object_detection::convert_scan_indices_to_points(scan, {0U, 1U});
++
++  ASSERT_EQ(points.size(), 2U);
++  EXPECT_EQ(points[0].scan_index, 0U);
++  EXPECT_NEAR(points[0].x_m, 2.0, 1e-9);
++  EXPECT_NEAR(points[0].y_m, 0.0, 1e-9);
++  EXPECT_EQ(points[1].scan_index, 1U);
++  EXPECT_NEAR(points[1].x_m, 0.0, 1e-6);
++  EXPECT_NEAR(points[1].y_m, 3.0, 1e-6);
++}
++
++TEST(LaserScanClusterer, SplitsClustersAtLargeGeometricGap)
++{
++  const auto scan = make_scan({2.0F, 2.0F, 10.0F, 10.0F}, 0.0F, 0.01F);
++  const auto clusters = kau_object_detection::cluster_laser_scan(
++    scan, {0U, 1U, 2U, 3U}, test_options(2U));
++
++  ASSERT_EQ(clusters.size(), 2U);
++  EXPECT_EQ(clusters[0].points.size(), 2U);
++  EXPECT_EQ(clusters[1].points.size(), 2U);
++  EXPECT_EQ(clusters[0].points.front().scan_index, 0U);
++  EXPECT_EQ(clusters[1].points.front().scan_index, 2U);
++}
++
++TEST(LaserScanClusterer, MissingOrNonFiniteBeamBreaksACluster)
++{
++  const auto nan_value = std::numeric_limits<float>::quiet_NaN();
++  const auto scan = make_scan({2.0F, 2.0F, nan_value, 2.0F, 2.0F}, 0.0F, 0.01F);
++  const auto clusters = kau_object_detection::cluster_laser_scan(
++    scan, {0U, 1U, 3U, 4U}, test_options(2U));
++
++  ASSERT_EQ(clusters.size(), 2U);
++  EXPECT_EQ(clusters[0].points.back().scan_index, 1U);
++  EXPECT_EQ(clusters[1].points.front().scan_index, 3U);
++}
++
++TEST(LaserScanClusterer, RemovesClustersSmallerThanConfiguredMinimum)
++{
++  const auto scan = make_scan({2.0F, 2.0F}, 0.0F, 0.01F);
++  const auto clusters = kau_object_detection::cluster_laser_scan(
++    scan, {0U, 1U}, test_options(3U));
++
++  EXPECT_TRUE(clusters.empty());
++}
++
++TEST(LaserScanClusterer, MergesBoundaryClustersOnlyForFullCircleScans)
++{
++  auto scan = make_scan({1.0F, 10.0F, 10.0F, 1.0F}, 0.0F, kPi / 2.0F);
++  scan.angle_max = 3.0F * kPi / 2.0F;
++
++  const auto clusters = kau_object_detection::cluster_laser_scan(
++    scan, {0U, 1U, 2U, 3U}, test_options(1U));
++
++  ASSERT_EQ(clusters.size(), 3U);
++  ASSERT_TRUE(clusters.front().wraps_scan_boundary);
++  ASSERT_EQ(clusters.front().points.size(), 2U);
++  EXPECT_EQ(clusters.front().points.front().scan_index, 3U);
++  EXPECT_EQ(clusters.front().points.back().scan_index, 0U);
++}
++
++TEST(LaserScanClusterer, DoesNotMergeBoundaryClustersForPartialScan)
++{
++  auto scan = make_scan({1.0F, 10.0F, 10.0F, 1.0F}, 0.0F, kPi / 2.0F);
++  scan.angle_max = kPi;
++
++  const auto clusters = kau_object_detection::cluster_laser_scan(
++    scan, {0U, 1U, 2U, 3U}, test_options(1U));
++
++  ASSERT_EQ(clusters.size(), 4U);
++  EXPECT_FALSE(clusters.front().wraps_scan_boundary);
++}
++
++TEST(LaserScanClusterer, ReturnsNoPointsForInvalidGeometry)
++{
++  const auto scan = make_scan({2.0F, 2.0F}, 0.0F, 0.0F);
++  const auto points =
++    kau_object_detection::convert_scan_indices_to_points(scan, {0U, 1U});
++
++  EXPECT_TRUE(points.empty());
++}
++
++}  // namespace

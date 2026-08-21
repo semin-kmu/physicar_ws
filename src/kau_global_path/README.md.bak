@@ -1,0 +1,275 @@
+# kau_global_path
+
+KAU AMET PhysiCar 용 **lane_graph 수기 작성 + global path 생성** 패키지.
+
+> 상태: **설계 단계**. 아직 코드 없음. 이 문서는 무엇을 왜 어떻게 만들지에 대한
+> 합의 문서이자 작업 목록이다. 구현이 시작되면 이 문서의 "해야 할 일"을 갱신한다.
+
+## 1. 지금 하려는 것
+
+SLAM 으로 만든 `kau.pbstream` 위에 **차선 그래프(lane_graph)를 손으로 그려 넣고**,
+그 위에서 **global path** 를 뽑는다. local path 는 그 global path 를 받아야
+동작하므로 이게 선행 작업이다.
+
+```text
+kau.pbstream  ──(변환)──►  kau.pgm / kau.yaml     ← 이미 있음 (kau_localization)
+                                  │
+                                  ▼
+                         [ 수기 lane_graph 편집 ]  ← 이 패키지가 만들 것
+                                  │
+                                  ▼
+                          lane_graph.yaml         ← 노드 + 엣지 (map 프레임, 미터)
+                                  │
+                                  ▼
+                         [ 라우팅 + 스플라인 리샘플 ]
+                                  │
+                                  ▼
+                       /global_path (nav_msgs/Path) ──► local path (다음 단계)
+```
+
+차선 표시는 바닥 테이프/페인트라 LiDAR 에 안 잡힌다. 따라서 SLAM 지도에서
+자동으로 차선을 추출하는 건 불가능하고, **사람이 그려 넣는 수밖에 없다.**
+
+## 2. 현재 확인된 사실
+
+### 2.1 지도
+
+| 항목 | 값 |
+|---|---|
+| 파일 | `kau_localization/maps/kau.pgm`, `kau.yaml`, `kau.pbstream` |
+| 크기 | 158 x 270 px |
+| 해상도 | 0.05 m/px |
+| 실제 범위 | **7.9 m x 13.5 m** |
+| origin | `[-4.179311, -1.722695, 0.0]` |
+| map 프레임 범위 | x: -4.179 ~ 3.721, y: -1.723 ~ 11.777 |
+
+**지도를 렌더해 보면 벽 테두리만 있는 빈 직사각형이다.** 내부에 특징물이 전혀 없다.
+이게 이후 모든 판단의 전제다.
+
+### 2.2 `amet_2026_track.yaml` 은 쓸 수 없다
+
+`kau_object_detection/config/amet_2026_track.yaml` 에 outer/inner 경계 폴리곤이
+388 점씩 들어 있어서 중심선을 자동 계산할 수 있을 것처럼 보이지만 **안 된다.**
+
+- 그 좌표는 **Gazebo world 프레임**(시뮬)이고 지금 지도는 `map` 프레임(실기 SLAM)이다.
+- 크기가 안 맞는다. 트랙은 10.22 m x 5.30 m, 지금 지도는 7.9 m x 13.5 m.
+  가로세로 비율이 아예 다르므로 회전만으로 겹쳐지지 않는다. 서로 다른 공간이다.
+
+즉 이 파일은 시뮬 전용이다. 실기 lane_graph 는 처음부터 새로 만들어야 한다.
+
+### 2.3 픽셀 <-> map 프레임 변환
+
+PGM 은 좌상단이 원점이고 y 축이 아래로 증가한다. ROS map 은 좌하단 기준이다.
+**y 를 뒤집어야 한다.** 이걸 틀리면 지도가 상하 반전된 채로 그려진다.
+
+```text
+world_x = origin_x + px * resolution
+world_y = origin_y + (height_px - py) * resolution
+
+px = (world_x - origin_x) / resolution
+py = height_px - (world_y - origin_y) / resolution
+```
+
+여기서 `origin = [-4.179311, -1.722695]`, `resolution = 0.05`, `height_px = 270`.
+값을 하드코딩하지 말고 `kau.yaml` 을 읽어서 채운다. 재매핑하면 다 바뀐다.
+
+### 2.4 이미 있는 웹 스택
+
+- `kau_lane_detection/web/webui.html` : 카메라 뷰어. 정적 HTML + `fetch` 폴링.
+- `physicar_webserver` : 플랫폼 제공 FastAPI 서버 (REST + WebSocket).
+
+팀이 이미 HTML 기반 도구를 쓰고 있으므로 같은 방식이 결이 맞는다.
+
+## 3. 편집 도구 방식 결정
+
+### 3.1 비교
+
+| 방식 | 노드 찍기 | 수정/드래그 | 위상(엣지·방향) | 재편집 | 판정 |
+|---|---|---|---|---|---|
+| **HTML canvas** | 확대해서 정밀 | 자유 | 표현 가능 | 파일 저장 후 재편집 | **채택** |
+| RViz `clicked_point` | 빠름 | 되돌리기 불가 | 불가 | 불가 | 기각 |
+| matplotlib `ginput` | 확대 불편 | 불가 | 불가 | 부분적 | 기각 |
+| QGIS / Inkscape | 가능 | 가능 | 변환 필요 | 가능 | 과도 |
+
+**결론: HTML canvas.** 의존성이 없고, 브라우저만 있으면 팀 누구나 열 수 있고,
+결과가 텍스트 파일이라 버전 관리가 되고, 위상 정보(갈림길·주행 방향)를
+표현할 수 있는 유일한 선택지다.
+
+### 3.2 다만 백지에 그리지 않는다 — 가장 중요한 지점
+
+지도가 벽 4개뿐이라 **캔버스에 띄워도 참조할 시각적 기준이 없다.**
+빈 화면에 눈대중으로 차선을 그리면 실제 바닥 차선과 수십 cm 단위로 어긋나고,
+그 오차는 local path 가 메꿀 수 있는 범위를 넘는다.
+
+그래서 순서를 뒤집는다. **먼저 실제 주행 궤적을 깔고, 그 위에서 손으로 다듬는다.**
+
+궤적 확보 방법 두 가지:
+
+1. **pbstream 에 이미 들어 있는 SLAM 궤적**
+   `localization.launch.py` 가 pbstream 을 frozen 으로 올리면
+   `/trajectory_node_list` (`visualization_msgs/MarkerArray`) 로 매핑 당시
+   차가 지나간 궤적이 나온다. 매핑할 때 차선을 따라 돌았다면 그게 곧 중심선 초안이다.
+2. **teleop 재주행 기록** (이쪽이 더 깨끗함)
+   차선을 따라 천천히 한 바퀴 돌면서 `map -> base_footprint` 를 CSV 로 기록.
+
+이러면 손으로 하는 작업이 "처음부터 그리기"가 아니라
+**노이즈 정리 / 코너 다듬기 / 갈림길 연결**이 된다. 좌표가 실측 기반이라 안 틀어진다.
+
+## 4. 만들 도구 설계
+
+정적 HTML 파일 하나. 서버 없이 브라우저에서 열린다.
+(맵 PNG 를 base64 로 인라인하거나, 안 되면 `python3 -m http.server` 로 띄운다.)
+
+### 4.1 기능
+
+- **배경 레이어**: `kau.pgm` -> PNG 변환본(벽) + 주행 궤적 점 오버레이
+- **좌표 변환**: `kau.yaml` 의 `resolution` / `origin` / 이미지 높이로 px <-> m
+- **뷰**: 팬 / 줌 / 미터 그리드 / 커서 위치 실좌표 표시
+- **편집**: 노드 추가·드래그·삭제, 엣지 연결, 주행 방향 지정, Ctrl+Z
+- **경로 생성**: Catmull-Rom 스플라인 -> 고정 간격(기본 0.05 m) 리샘플 + heading 계산
+- **곡률 경고**: 차량 최소회전반경보다 급한 구간을 빨갛게 표시.
+  손으로 그린 경로가 물리적으로 주행 불가능한 걸 미리 잡는다.
+- **입출력**: `lane_graph.yaml` export / import (다시 열어서 수정 가능)
+
+### 4.2 lane_graph 데이터 포맷 (초안)
+
+좌표는 전부 **`map` 프레임, 미터**.
+
+```yaml
+lane_graph:
+  frame_id: map
+  map_source: kau.pbstream          # 어느 지도 기준인지 반드시 기록
+  nodes:
+    - {id: 0, x: 0.42, y: 1.05}
+    - {id: 1, x: 0.44, y: 2.10}
+  edges:
+    - from: 0
+      to: 1
+      width: 0.40                    # 차선 폭 [m]
+      speed_limit: 0.8               # [m/s]
+      direction: forward             # forward | bidirectional
+```
+
+`map_source` 를 넣는 이유는 6.3 참고.
+
+### 4.3 ROS 쪽 소비
+
+노드 하나가 `lane_graph.yaml` 을 읽어서
+
+- `/global_path` (`nav_msgs/Path`) 를 **latched(transient_local)** 로 발행
+- RViz 확인용 `visualization_msgs/MarkerArray` 발행
+
+local path 는 `/global_path` 를 구독해서 쓴다.
+
+## 5. 좌표계 / TF
+
+`kau_localization/README.md` 의 TF 소유권 규칙을 그대로 따른다.
+
+```text
+map ──────────────► odom              ← cartographer_node
+odom ─────────────► base_footprint    ← ekf_filter_node
+base_footprint ───► base_link ─► lidar_link / imu_link / camera_*
+```
+
+- global path 는 `map` 프레임에 산다. 이 패키지는 **TF 를 발행하지 않는다.**
+- `map -> odom` 을 발행하는 노드는 동시에 하나만 떠야 한다. `amcl` 은 끈다.
+
+## 6. 고려해야 할 것 / 미리 알아야 할 것
+
+### 6.1 측위 정확도가 곧 경로 정확도다
+
+global path 는 `map` 프레임 기준이다. **측위가 틀어진 만큼 경로도 그대로 틀어진다.**
+지금 localization 이 완벽하지 않다고 했으므로, global path 를 아무리 정확히 그려도
+실주행 오차의 하한은 측위 오차가 정한다.
+
+### 6.2 특징 없는 지도는 측위가 미끄러진다
+
+벽 4개짜리 빈 직사각형은 스캔 매칭 입장에서 최악에 가깝다.
+긴 벽과 나란한 방향(세로축)으로는 구속이 거의 없어서 위치가 슬금슬금 흐른다.
+
+- 단기: 지금 상태로 진행한다. global path 를 먼저 뽑는 순서 자체는 맞다.
+- 중기: **코너나 벽면에 박스·콘 몇 개를 비대칭으로 놓고 재매핑**하면 측위가 크게 안정된다.
+  단, 재매핑하면 6.3 문제가 생긴다.
+
+### 6.3 재매핑하면 lane_graph 좌표가 전부 무효가 된다
+
+`map` 프레임 원점은 카토그래퍼가 시작한 위치다. 재매핑하면 원점도, `kau.yaml` 의
+`origin` 도 바뀐다. 즉 **지금 그린 lane_graph 는 지금 pbstream 에서만 유효하다.**
+
+- 그래서 `lane_graph.yaml` 에 `map_source` 를 기록한다.
+- 재매핑 계획이 있으면 lane_graph 작업에 며칠씩 쓰지 말 것. 순서를 정해야 한다.
+  (재매핑 -> lane_graph 가 낭비가 적다. 아래 열린 질문 참고.)
+
+### 6.4 최소회전반경
+
+PhysiCar 구동 방식과 최소회전반경을 **확인해야 한다**(미확인). Ackermann 이면
+손으로 찍은 급코너가 물리적으로 주행 불가능할 수 있다. 4.1 의 곡률 경고가 이걸 잡는다.
+
+### 6.5 폐곡선 / 시작점
+
+트랙을 반복 주행한다면 lane_graph 는 닫힌 순환이어야 한다.
+시작-끝 이음새에서 heading 이 튀지 않게 스플라인을 순환으로 처리해야 한다.
+
+### 6.6 리샘플 간격
+
+기본 0.05 m 는 지도 해상도와 맞춘 값이다. 너무 촘촘하면 `Path` 메시지가 커지고,
+너무 성기면 곡률 계산이 부정확해진다. local path 가 어떤 간격을 기대하는지에 맞춘다.
+
+### 6.7 팀 인터페이스
+
+`kau_object_detection/AGENTS.md` 에 "최종 절대 프레임은 팀 인터페이스 결정 사항이며
+2026-08-14 시점에 `map` 프레임은 관측되지 않았다"는 기록이 있다.
+**이제 `map` 프레임이 생겼다.** Object Detection / Local Planning 담당자와
+출력 프레임을 `map` 으로 통일할지 합의해야 한다.
+
+또 같은 문서에 "Local Planning 이 path generation 을 소유한다"고 되어 있다.
+이 패키지는 **global path 까지만** 담당하고 회피·충돌검사·안전 여유는 건드리지 않는다.
+경계를 명확히 해 둔다.
+
+### 6.8 지도 크기 대비 트랙
+
+지도가 7.9 m x 13.5 m 인데, 실제 주행 코스가 이 안에 다 들어오는지 확인해야 한다.
+SLAM 이 공간 일부만 훑었을 가능성이 있다. 궤적을 띄워 보면 바로 알 수 있다.
+
+## 7. 해야 할 일
+
+### 1단계 — 궤적 확보 (선행)
+
+- [ ] 매핑할 때 실제 차선을 따라 주행했는지 확인
+- [ ] `/trajectory_node_list` 를 CSV 로 덤프하는 스크립트 작성
+- [ ] (필요시) teleop 주행 중 `map -> base_footprint` 를 기록하는 스크립트 작성
+- [ ] 궤적을 지도 위에 겹쳐 그려서 6.8 확인
+
+### 2단계 — 편집 도구
+
+- [ ] `kau.pgm` -> PNG 변환 스크립트 (`kau.yaml` 파라미터도 같이 뽑기)
+- [ ] `web/lane_editor.html` : 배경 + 궤적 오버레이 + 팬/줌
+- [ ] 노드/엣지 편집 + Ctrl+Z
+- [ ] `lane_graph.yaml` export / import
+- [ ] 스플라인 리샘플 + heading 계산
+- [ ] 곡률 경고 (최소회전반경 확인 후)
+
+### 3단계 — ROS 연동
+
+- [ ] `lane_graph.yaml` 로더 + `/global_path` (latched) 발행 노드
+- [ ] RViz 마커 발행
+- [ ] launch 파일
+- [ ] RViz 에서 지도·경로·실시간 pose 겹쳐서 육안 검증
+
+### 4단계 — 검증
+
+- [ ] 실차로 global path 를 따라 저속 주행, 실제 차선과의 횡방향 오차 측정
+- [ ] 측위 드리프트 구간 기록
+- [ ] (판단 후) 특징물 추가 재매핑
+
+## 8. 열린 질문
+
+1. **매핑 주행이 실제 차선을 따라 이루어졌나?**
+   그렇다면 pbstream 궤적을 바로 시드로 쓸 수 있다. 아니면 teleop 재주행이 필요하다.
+2. **재매핑을 할 것인가, 한다면 언제인가?**
+   할 거라면 재매핑을 먼저 하고 lane_graph 를 그리는 편이 낭비가 없다.
+3. **PhysiCar 최소회전반경은 얼마인가?** (곡률 경고 임계값)
+4. **local path 가 기대하는 `/global_path` 형식과 리샘플 간격은?**
+5. **코스에 갈림길이나 차선 변경이 있나?**
+   단순 순환 한 바퀴면 lane_graph 없이 polyline 하나로도 충분하다.
+   그래프 구조가 필요한지 먼저 확정하면 도구를 더 단순하게 만들 수 있다.

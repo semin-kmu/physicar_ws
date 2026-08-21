@@ -1,0 +1,109 @@
+# ============================================================
+# 차선 추종 실험용 parameter
+#
+# path_follower.yaml 의 사본이 아니라 "lane detection 경로만
+# 보고 달린다" 는 다른 운전 조건이다. 다른 점만 아래 주석에
+# 근거를 적는다. 나머지는 path_follower.yaml 과 같다.
+#
+# 전제
+#   - 경로 = /lane/center (kau_lane_detection, base_link 프레임)
+#   - 측위(map -> odom TF) 불필요. 경로가 이미 차량 프레임이다.
+#   - 경로는 차량과 같이 움직이는 rolling horizon 이라 종점이
+#     "도착" 이 아니다 (path_follower_node 가 SRC_LANE 을 그렇게 다룬다)
+#
+# 단위: 길이 cm / 각도 deg / 속도 m/s
+# ============================================================
+
+path_follower:
+  ros__parameters:
+
+    # --- 인터페이스 ---
+
+    path_topic: "/lane/center"
+
+    # fallback 은 사실상 비활성이다. pose_source=identity 이면
+    # 노드가 frame_id == base_frame 인 경로만 받으므로, map 프레임
+    # 으로 오는 /path/global 은 자동으로 거부된다. 측위 없이 도는
+    # 실험 중에 전역 경로가 끼어드는 사고를 막아준다.
+    fallback_path_topic: "/path/global"
+
+    map_frame: "map"
+
+    # ★ lane detection 이 발행하는 프레임과 반드시 같아야 한다
+    #   (kau_lane_detection 의 path_frame_id, 기본값 base_link)
+    base_frame: "base_link"
+
+    # ★ TF 를 보지 않고 차량을 경로 프레임의 원점으로 둔다.
+    #   후륜축만 rear_axle_offset_cm 만큼 뒤로 물러난다.
+    pose_source: "identity"
+
+    control_hz: 100.0
+
+    # identity 모드에서는 TF 를 안 보므로 tf_timeout 이 놀고,
+    # 경로 갱신이 유일한 생존 신호가 된다.
+    #
+    # lane detection 은 14 Hz 로 돌지만 게이트에 걸린 프레임은
+    # 발행하지 않는다. 점선 공백 한두 프레임은 넘기고, 그보다
+    # 오래 끊기면 세운다. 0.5 s = 최대 7 프레임 연속 실패.
+    tf_timeout: 0.2
+    path_timeout: 0.5
+
+    # 경로가 차량 기준이므로 cte 는 곧 "중앙선에서 얼마나
+    # 벗어났나" 다. 도로 반폭이 31.25 cm 이니 40 cm 를 넘었으면
+    # 도로 밖 무언가를 차선으로 물었다고 보고 세운다.
+    cte_abort_cm: 40.0
+
+    # SRC_LANE 은 종점 판정을 하지 않으므로 이 값은 쓰이지 않는다.
+    goal_tol_cm: 10.0
+
+    # --- 차량 제원 (path_follower.yaml 과 동일. 차가 같으니 같아야 한다) ---
+    vehicle:
+      wheelbase_cm: 18.0
+      max_steer_deg: 20.0
+      rear_axle_offset_cm: -9.0
+
+    # --- Pure Pursuit ---
+    #
+    # ld_max 를 175 -> 80 으로 내렸다. lane detection 의
+    # valid_length 가 80 cm 안팎이고 그 너머는 외삽이라,
+    # 175 cm 는 어차피 노드가 valid_length 로 다시 잘라낸다.
+    # 여기서 미리 맞춰두면 로그의 Ld 가 실제 값과 일치해 읽기 쉽다.
+    #
+    # ld_min 은 25. 30 으로 두면 관측 구간이 35 cm 밑으로
+    # 떨어질 때마다 "LookAhead 를 둘 곳이 없다" 로 정지한다.
+    # 25 면 코너에서 관측이 짧아져도 조금 더 버틴다.
+    # 더 내리면 조향이 떨린다 (휠베이스 18 cm 대비 너무 짧다).
+    controller:
+      k_v: 0.5
+      ld_min_cm: 25.0
+      ld_max_cm: 80.0
+
+    # --- 속도 ---
+    #
+    # ★ 첫 실험은 상수 속도로 시작한다 (enabled: false).
+    #
+    # 곡률 기반 속도 제어는 경로 전체의 곡률을 보고 감속하는데,
+    # lane 경로는 앞 80 cm 짜리 토막이라 코너를 미리 못 본다.
+    # 코너에 들어간 뒤에야 감속하므로 아직 이 조합은 검증되지
+    # 않았다. 먼저 상수 속도로 조향을 확인하고, 그다음에
+    # adaptive_speed:=true 로 올린다.
+    #
+    # 0.4 m/s: 100 Hz 제어 기준 한 tick 에 4 mm, LookAhead 25 cm 를
+    # 0.6 초에 통과한다. 차선 인지가 14 Hz 이므로 인지 한 프레임
+    # 사이에 2.9 cm 진행 — 인지 지연이 조향에 묻히는 범위다.
+    speed:
+      enabled: false
+      constant: 0.4
+      v_min: 0.3
+      v_max: 0.8
+      look_min_cm: 20.0
+      look_max_cm: 80.0
+      min_span_cm: 20.0
+      margin: 0.8
+      use_sqrt_law: true
+      ema_tau: 0.4
+
+    # --- 시각화 ---
+    viz:
+      enabled: true
+      samples_per_seg: 20

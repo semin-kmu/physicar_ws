@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>KAU lane_graph 편집기</title>
+<style>
+  :root {
+    --bg: #14171c; --panel: #1b1f26; --line: #2c323c;
+    --fg: #e6e9ef; --dim: #8b94a4; --accent: #4ea3ff; --warn: #ff5f56;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden;
+    background: var(--bg); color: var(--fg);
+    font: 13px/1.5 ui-monospace, "DejaVu Sans Mono", monospace; }
+  #app { display: flex; height: 100%; }
+  #side { width: 320px; flex: none; background: var(--panel);
+    border-right: 1px solid var(--line); overflow-y: auto; padding: 10px; }
+  #stage { flex: 1; position: relative; }
+  canvas { display: block; width: 100%; height: 100%; cursor: crosshair; }
+  #hud { position: absolute; left: 8px; bottom: 8px; padding: 6px 10px;
+    background: rgba(20,23,28,.85); border: 1px solid var(--line);
+    border-radius: 4px; white-space: pre; pointer-events: none; }
+  #toast { position: absolute; right: 8px; top: 8px; padding: 6px 10px;
+    background: rgba(20,23,28,.9); border: 1px solid var(--line);
+    border-radius: 4px; opacity: 0; transition: opacity .25s; }
+  h1 { font-size: 14px; margin: 0 0 8px; }
+  h2 { font-size: 12px; margin: 14px 0 6px; color: var(--dim);
+    text-transform: uppercase; letter-spacing: .06em;
+    border-top: 1px solid var(--line); padding-top: 10px; }
+  h2:first-of-type { border-top: 0; }
+  button { font: inherit; background: #262c36; color: var(--fg);
+    border: 1px solid var(--line); border-radius: 3px;
+    padding: 4px 8px; cursor: pointer; }
+  button:hover { background: #303845; }
+  button.primary { background: #1d4f83; border-color: #2d6fb3; }
+  button.primary:hover { background: #245f9c; }
+  select { font: inherit; background: #11141a; color: var(--fg);
+    border: 1px solid var(--line); border-radius: 3px; padding: 2px 4px; max-width: 180px; }
+  input[type=number], input[type=text] { font: inherit; width: 68px;
+    background: #11141a; color: var(--fg);
+    border: 1px solid var(--line); border-radius: 3px; padding: 2px 4px; }
+  label { display: block; margin: 3px 0; }
+  .row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin: 4px 0; }
+  .layer { display: flex; align-items: center; gap: 6px; padding: 4px 5px;
+    border: 1px solid transparent; border-radius: 3px; }
+  .layer.active { border-color: var(--accent); background: #1e2733; }
+  .swatch { width: 11px; height: 11px; border-radius: 2px; flex: none; }
+  .name { flex: 1; }
+  .count { color: var(--dim); font-size: 11px; }
+  .note { color: var(--dim); font-size: 11px; margin: 4px 0; }
+  .bad { color: var(--warn); }
+  .ok { color: #5ac878; }
+  kbd { background: #262c36; border: 1px solid var(--line);
+    border-radius: 3px; padding: 0 4px; font-size: 11px; }
+  table.keys { width: 100%; font-size: 11px; color: var(--dim); }
+  table.keys td:first-child { white-space: nowrap; padding-right: 6px; }
+  table.segs { width: 100%; font-size: 11px; border-collapse: collapse; }
+  table.segs td { padding: 1px 3px 1px 0; white-space: nowrap; }
+  table.segs button { padding: 0 4px; font-size: 10px; }
+  #seglist { max-height: 260px; overflow-y: auto; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="side">
+    <h1>lane_graph 편집기 <span class="note" id="build">—</span></h1>
+    <div class="note" id="mapinfo">지도 없음</div>
+
+    <h2>지도 / 궤적</h2>
+    <div class="row">
+      <button id="btnReload">지도 다시 읽기</button>
+      <button id="btnFit">화면 맞춤 (F)</button>
+    </div>
+    <div class="row">
+      <label><input type="checkbox" id="chkCurve"> 곡선 미리보기 (B)</label>
+    </div>
+    <div class="note">
+      끄면 노드를 직선으로 잇는다. 내보내는 lane_graph.yaml 은 두 모드가 같다 —
+      저장되는 것은 노드뿐이고 곡선은 화면 표시일 뿐이다.
+    </div>
+    <div class="row">
+      <label><input type="checkbox" id="chkDisp" checked> 표시 좌표 x↔y 맞바꿈</label>
+    </div>
+    <div class="row">
+      <span class="note">원점(map)</span>
+      <input type="number" id="dispOx" value="3.68" step="0.01">
+      <input type="number" id="dispOy" value="-1.39" step="0.01">
+    </div>
+    <div class="note">
+      <b>화면 표시 전용이다.</b> X = y − oy, Y = x − ox 로 읽기만 바꾼다.
+      저장·내보내기 좌표는 언제나 map 프레임 미터다.
+    </div>
+    <div class="note">
+      pgm · yaml · csv · lane_graph.yaml 을 창에 끌어다 놓아도 열린다.
+    </div>
+    <div id="trajinfo" class="note"></div>
+
+    <h2>CAD 트랙 (AMET 2026)</h2>
+    <div class="note" id="trkInfo">—</div>
+    <div class="note">
+      시뮬레이터 world 에서 뽑은 <b>실제 트랙 도형</b>이다 (도면이지 사진이 아니다).
+      지도에는 벽밖에 없으니 차선은 이걸 보고 딴다.
+      만드는 스크립트는 <code>scripts/extract_sim_track.py</code>.
+    </div>
+    <div class="row">
+      <label><input type="checkbox" id="chkTrack" checked> 표시 (K)</label>
+      <label><input type="checkbox" id="chkTrackRoad" checked> 주행면 채우기</label>
+    </div>
+    <div class="row">
+      <span class="note">원점 ox</span>
+      <input type="number" id="trkOx" value="3.68" step="0.01">
+      <span class="note">oy</span>
+      <input type="number" id="trkOy" value="1.39" step="0.01">
+      <span class="note">m</span>
+    </div>
+    <div class="row">
+      <span class="note">회전</span>
+      <input type="number" id="trkRot" value="0" step="0.1"><span class="note">°</span>
+      <span class="note">투명도</span>
+      <input type="number" id="trkAlpha" value="0.85" step="0.05" min="0" max="1">
+      <button id="btnTrackReset">기본값</button>
+    </div>
+    <div class="note">
+      <code>map_x = ox − sim_y</code> · <code>map_y = sim_x − oy</code>.
+      기본값은 kau_v3 벽 경계상자에 맞춘 것이고 잔차가 10 cm 안쪽이다.
+      <kbd>M</kbd> 으로 지도를 껐다 켜면서 벽에 맞는지 확인한다.
+    </div>
+
+    <h2>참조 이미지</h2>
+    <div class="note">
+      지도(<code>kau_v3.pgm</code>)에는 <b>벽밖에 안 찍힌다</b> — 차선은 바닥
+      테이프라 LiDAR 에 안 잡힌다. 트랙 도면이나 위에서 찍은 사진을 깔고
+      <b>벽 모서리에 맞춘</b> 다음 그 위에서 노드를 찍는다.
+    </div>
+    <div class="row">
+      <button id="btnImgPick">이미지 열기</button>
+      <button id="btnImgFitMap">지도에 맞춰 놓기</button>
+      <button id="btnImgClear">지우기</button>
+      <input type="file" id="fileImg" accept="image/*" hidden>
+    </div>
+    <div class="note" id="imgName">이미지 없음</div>
+    <div class="row">
+      <label><input type="checkbox" id="chkImg" checked> 표시 (O)</label>
+      <label><input type="checkbox" id="chkImgFit"> 맞춤 모드 (I)</label>
+    </div>
+    <div class="note">
+      맞춤 모드에서는 <b>드래그로 이동 · 휠로 확대 · <kbd>[</kbd> <kbd>]</kbd> 로 회전</b>
+      (<kbd>Shift</kbd> 같이 누르면 5°씩). 화면 확대는 우드래그로 한다.
+      맞추는 동안 노드 편집은 멈춘다. <kbd>M</kbd> 으로 지도를 껐다 켜면
+      이미지와 벽이 얼마나 맞았는지 보기 쉽다.
+    </div>
+    <div class="row">
+      <span class="note">중심(map)</span>
+      <input type="number" id="imgCx" value="0" step="0.01">
+      <input type="number" id="imgCy" value="0" step="0.01">
+      <span class="note">m</span>
+    </div>
+    <div class="row">
+      <span class="note">가로 폭</span>
+      <input type="number" id="imgW" value="1" step="0.05" min="0.05"><span class="note">m</span>
+      <span class="note">회전</span>
+      <input type="number" id="imgRot" value="0" step="0.5"><span class="note">°</span>
+    </div>
+    <div class="row">
+      <span class="note">투명도</span>
+      <input type="number" id="imgAlpha" value="0.60" step="0.05" min="0" max="1">
+    </div>
+    <div class="note">
+      숫자는 <b>map 프레임 미터</b>다 (표시 좌표 맞바꿈과 무관). 위치·크기는
+      브라우저에 저장돼 새로고침해도 남는다. <code>web/overlay.png</code> 에
+      파일을 두면 자동으로 뜬다.
+    </div>
+
+    <h2>레이어</h2>
+    <div id="layers"></div>
+    <div class="row">
+      <label><input type="checkbox" id="chkClosed" checked> 폐곡선 (is_closed)</label>
+    </div>
+    <div class="row">
+      <span class="note">씨앗으로 쓸 바퀴</span>
+      <select id="lapPick"><option>—</option></select>
+    </div>
+    <div class="row">
+      <button id="btnSeed">궤적에서 노드 생성</button>
+      <input type="number" id="seedSpacing" value="0.5" step="0.1" min="0.1">
+      <span class="note">m 간격</span>
+    </div>
+    <div class="row">
+      <button id="btnSeedAdapt">궤적 오차 기준 노드 생성</button>
+      <input type="number" id="seedTol" value="0.02" step="0.01" min="0.005">
+      <span class="note">m 이내</span>
+    </div>
+    <div class="row">
+      <span class="note">최소 노드 간격</span>
+      <input type="number" id="seedMin" value="0.15" step="0.05" min="0.05">
+      <span class="note">m</span>
+    </div>
+    <div class="note">
+      간격을 정하지 않는다. 발행될 곡선이 궤적에서 이 값보다 멀어지는 자리에만
+      노드를 끼운다 — 직진은 성기게, 코너는 촘촘하게 깔린다.
+    </div>
+    <div class="row">
+      <button id="btnClear">현재 레이어 비우기</button>
+      <button id="btnReverse">진행방향 뒤집기</button>
+    </div>
+
+    <h2>세그먼트</h2>
+    <div class="note">
+      <kbd>Ctrl</kbd>+클릭(또는 노드 위에서 <kbd>C</kbd>)으로 노드를
+      <b>세그먼트 경계</b>로 만든다 — 경계는 <b>■</b>, 안쪽 노드는 <b>●</b>다.
+      경계와 경계 사이가 quintic Bezier 한 조각(제어점 6 개)이고,
+      그 사이 노드 수로 종류가 정해진다.
+    </div>
+    <table class="keys">
+      <tr><td>노드 2 개</td><td><b>직선</b> — κ=0. 정확히 직선이 나온다.</td></tr>
+      <tr><td>노드 3 개</td><td><b>원호</b> — 세 점의 외접원. 가운데 노드로 곡률을 직접 조정.</td></tr>
+      <tr><td>노드 2 개 + 전이</td><td><b>전이</b> — 양 끝 (θ,κ)를 이웃에서 받는다.</td></tr>
+      <tr><td>노드 4 개+</td><td><b>보간</b> — 예전 방식으로 안에서 다시 쪼갠다.</td></tr>
+    </table>
+    <div class="row">
+      <button id="btnBrkAll">모든 노드를 경계로</button>
+      <button id="btnBrkNone">경계 모두 해제</button>
+    </div>
+    <div class="note">
+      경계를 하나도 안 찍으면 예전 그대로 — 전체를 한 덩어리로 보간한다.
+    </div>
+
+    <h2>C² 검증</h2>
+    <div class="row">
+      <span class="note">허용오차</span>
+      <input type="number" id="c2Theta" value="1.0" step="0.5" min="0"><span class="note">deg</span>
+      <input type="number" id="c2Kappa" value="0.05" step="0.01" min="0"><span class="note">1/m</span>
+    </div>
+    <div class="row">
+      <label><input type="checkbox" id="chkBlend"> 경계에서 (θ,κ) 평균내서 C² 강제</label>
+    </div>
+    <div class="note">
+      직선(κ=0)과 원호(κ=1/R)는 <b>맞닿아 있는 한 절대 C² 가 될 수 없다.</b>
+      평균으로 강제하면 C² 는 되지만 직선이 살짝 휜다. 직선을 정확히 남기려면
+      직선과 원호 사이에 노드 2 개짜리 <b>전이</b> 세그먼트를 하나 두는 쪽이 낫다
+      — 아래 목록에서 <kbd>전이로</kbd> 를 누르면 된다.
+    </div>
+    <div id="seglist" class="note"></div>
+
+    <h2>Boundary 생성</h2>
+    <div class="note">
+      차선 중심선을 법선 방향으로 밀어서 트랙 경계를 만든다.
+      Object Detection ROI 는 <b>outer 안쪽 ∩ inner 바깥쪽</b> 고리다.
+    </div>
+    <div class="row">
+      <label>차로 폭 <input type="number" id="laneWidth" value="0.40" step="0.05" min="0.1"> m</label>
+    </div>
+    <div class="row">
+      <button id="btnBnd">두 중심선에서 boundary 생성</button>
+    </div>
+
+    <h2>검사</h2>
+    <div class="row">
+      <label>곡률 경고 <input type="number" id="kappaLimit" value="2.0" step="0.1"> 1/m</label>
+    </div>
+    <div id="check" class="note"></div>
+
+    <h2>내보내기</h2>
+    <div class="row">
+      <button class="primary" id="btnExportGraph">lane_graph.yaml</button>
+      <button class="primary" id="btnExportBnd">track_boundary.yaml</button>
+    </div>
+    <div class="row">
+      <label>boundary 샘플 간격
+        <input type="number" id="bndSpacing" value="0.10" step="0.01" min="0.02"> m</label>
+    </div>
+    <div class="row">
+      <button id="btnImport">lane_graph.yaml 불러오기</button>
+      <input type="file" id="fileImport" accept=".yaml,.yml" hidden>
+    </div>
+
+    <h2>단축키</h2>
+    <table class="keys">
+      <tr><td><kbd>좌클릭</kbd></td><td>끝에 노드 추가</td></tr>
+      <tr><td><kbd>드래그</kbd></td><td>노드 이동</td></tr>
+      <tr><td><kbd>Shift</kbd>+클릭</td><td>가까운 구간에 노드 삽입</td></tr>
+      <tr><td><kbd>Alt</kbd>+클릭</td><td>노드 삭제</td></tr>
+      <tr><td><kbd>Ctrl</kbd>+클릭 · <kbd>C</kbd></td><td>세그먼트 경계 토글</td></tr>
+      <tr><td><kbd>Ctrl</kbd>+<kbd>Z</kbd> / <kbd>Y</kbd></td><td>되돌리기 / 다시</td></tr>
+      <tr><td><kbd>휠</kbd> · <kbd>우드래그</kbd></td><td>확대 · 이동</td></tr>
+      <tr><td><kbd>1</kbd>~<kbd>4</kbd></td><td>레이어 전환</td></tr>
+      <tr><td><kbd>G</kbd> <kbd>T</kbd> <kbd>M</kbd></td><td>격자 · 궤적 · 지도 토글</td></tr>
+      <tr><td><kbd>K</kbd></td><td>CAD 트랙 표시</td></tr>
+      <tr><td><kbd>O</kbd> <kbd>I</kbd></td><td>참조 이미지 표시 · 맞춤 모드</td></tr>
+      <tr><td><kbd>[</kbd> <kbd>]</kbd></td><td>참조 이미지 회전 (Shift = 5°)</td></tr>
+      <tr><td><kbd>B</kbd></td><td>곡선 미리보기 토글 (끄면 직선)</td></tr>
+    </table>
+  </div>
+  <div id="stage">
+    <canvas id="cv"></canvas>
+    <div id="hud"></div>
+    <div id="toast"></div>
+  </div>
+</div>
+<script src="lane_editor.js?v=20260821d"></script>
+</body>
+</html>
