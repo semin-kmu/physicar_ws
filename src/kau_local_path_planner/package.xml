@@ -23,7 +23,7 @@
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>rclpy</exec_depend>
-  <!-- amet_2026_track.yaml (도로 경계 폴리곤) 을 그대로 재사용한다 --
+  <!-- amet_2026_track.yaml (도로 경계 폴리곤) 을 그대로 재사용한다.
        파일을 복제하지 않고 launch 시점에 그 패키지의 share 경로를 찾는다. -->
   <exec_depend>kau_object_detection</exec_depend>
 
