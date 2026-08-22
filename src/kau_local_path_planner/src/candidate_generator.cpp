@@ -1,0 +1,539 @@
+#include "kau_local_path_planner/candidate_generator.hpp"
+
+#include <algorithm>
+#include <cmath>
+#include <limits>
+
+#include "kau_local_path_planner/path_evaluator.hpp"
+
+namespace kau
+{
+namespace local_path_planner
+{
+
+namespace
+{
+constexpr double kInf = std::numeric_limits<double>::infinity();
+constexpr std::array<double, 3> kSigmaRatios{0.85, 1.05, 1.30};
+}  // namespace
+
+std::pair<std::optional<Ctrl>, double> fitSegment(
+    const Knot & a, const Knot & b, int bound_depth)
+{
+    const double chord = std::hypot(b.p.x - a.p.x, b.p.y - a.p.y);
+    if (chord < 1e-6)
+    {
+        return {std::nullopt, kInf};
+    }
+
+    std::optional<Ctrl> best;
+    double best_kb = kInf;
+    for (double r : kSigmaRatios)
+    {
+        const double s = r * chord;
+        Ctrl c = hermiteToBezier(
+            a.p, a.theta, a.kappa, b.p, b.theta, b.kappa, s, s);
+        const double kb = kappaBound(c, bound_depth);
+        if (kb < best_kb)
+        {
+            best = std::move(c);
+            best_kb = kb;
+        }
+    }
+    if (!std::isfinite(best_kb))
+    {
+        return {std::nullopt, kInf};
+    }
+    return {best, best_kb};
+}
+
+ObstacleStation makeStation(const Curve & global_path, const Obstacle & obstacle)
+{
+    const kau::control::TrackState st = global_path.nearestGlobal(obstacle.center);
+    const Frame f = referenceFrame(global_path, st.s);
+    const double vx = obstacle.center.x - f.point.x;
+    const double vy = obstacle.center.y - f.point.y;
+
+    ObstacleStation out;
+    out.station_s = st.s;
+    out.lateral = -std::sin(f.heading) * vx + std::cos(f.heading) * vy;
+    out.obstacle = obstacle;
+    return out;
+}
+
+CandidateGenerator::CandidateGenerator(
+    const Curve & global_path, const RoadBoundary & boundary,
+    const std::vector<Obstacle> & obstacles,
+    const std::vector<ObstacleStation> & stations,
+    const PlannerParams & params, double kappa_lim,
+    double kappa_max_vehicle, double body_radius_cm)
+: global_path_(global_path), boundary_(boundary), obstacles_(obstacles),
+  stations_(stations), params_(params), kappa_lim_(kappa_lim),
+  kappa_max_vehicle_(kappa_max_vehicle), body_radius_cm_(body_radius_cm)
+{
+}
+
+std::array<std::pair<double, double>, 7> CandidateGenerator::corridorOffsets(
+    const std::array<Frame, 2> & frames) const
+{
+    const double footprint = body_radius_cm_ + kRoadSafetyMarginCm;
+    std::array<std::array<double, 7>, 2> offsets{};
+
+    for (int f = 0; f < 2; ++f)
+    {
+        const Point2 normal{-std::sin(frames[f].heading), std::cos(frames[f].heading)};
+        const double safe_lower = -marginAlongNormal(
+            boundary_, frames[f].point, normal, -1.0, footprint);
+        const double safe_upper = marginAlongNormal(
+            boundary_, frames[f].point, normal, 1.0, footprint);
+        for (std::size_t i = 0; i < kCorridorFractions.size(); ++i)
+        {
+            offsets[static_cast<std::size_t>(f)][i] =
+                safe_lower + kCorridorFractions[i] * (safe_upper - safe_lower);
+        }
+    }
+
+    std::array<std::pair<double, double>, 7> pairs;
+    for (std::size_t i = 0; i < 7; ++i)
+    {
+        pairs[i] = {offsets[0][i], offsets[1][i]};
+    }
+    return pairs;
+}
+
+Candidate CandidateGenerator::candidate(
+    const Point2 & p, double yaw, double kappa0,
+    const std::array<Frame, 2> & frames,
+    const std::pair<double, double> & offsets,
+    double s0, const Curve * previous_path) const
+{
+    const std::array<double, 2> dd{offsets.first, offsets.second};
+
+    std::vector<Knot> knots;
+    knots.push_back(Knot{p, yaw, kappa0});
+    double peak = 0.0;
+    for (int i = 0; i < 2; ++i)
+    {
+        const double d = dd[static_cast<std::size_t>(i)];
+        const Frame & fr = frames[static_cast<std::size_t>(i)];
+        if (std::abs(d * fr.kappa) > params_.cusp_guard)
+        {
+            Candidate c; c.d = offsets.second; c.reason = "cusp"; c.cost = kInf;
+            return c;
+        }
+        const Point2 n{-std::sin(fr.heading), std::cos(fr.heading)};
+        Knot k;
+        k.p = Point2{fr.point.x + d * n.x, fr.point.y + d * n.y};
+        k.theta = fr.heading;
+        k.kappa = fr.kappa / (1.0 - d * fr.kappa);
+        knots.push_back(k);
+        peak = std::max(peak, std::abs(d));
+    }
+
+    std::vector<Ctrl> segs;
+    double bound = 0.0;
+    for (std::size_t i = 0; i + 1 < knots.size(); ++i)
+    {
+        auto [seg_opt, kb] = fitSegment(knots[i], knots[i + 1], params_.bound_depth);
+        if (!seg_opt)
+        {
+            Candidate c; c.d = offsets.second; c.reason = "degenerate"; c.cost = kInf;
+            return c;
+        }
+        segs.push_back(std::move(*seg_opt));
+        bound = std::max(bound, kb);
+    }
+
+    Curve cv(segs, false);
+    if (bound > kappa_lim_)
+    {
+        Candidate c; c.d = offsets.second; c.curve = cv; c.reason = "kappa_bound";
+        c.cost = kInf;
+        return c;
+    }
+    if (!roadOk(boundary_, cv, body_radius_cm_ + kRoadSafetyMarginCm,
+               kRoadSampleIntervalCm))
+    {
+        Candidate c; c.d = offsets.second; c.curve = cv; c.reason = "road_boundary";
+        c.cost = kInf;
+        return c;
+    }
+    const double clear = clearance(cv, obstacles_, body_radius_cm_, params_.clear_target);
+    if (clear < params_.obs_margin)
+    {
+        Candidate c; c.d = offsets.second; c.curve = cv; c.reason = "obstacle";
+        c.cost = kInf;
+        return c;
+    }
+
+    const double d_final = offsets.second;
+    const double preview = previewClear(
+        global_path_, stations_, d_final, kEndRatio, s0, params_.l_plan,
+        params_.preview, body_radius_cm_);
+    const double combined_clear = std::min(clear, preview);
+    const double c_cost = cost(
+        params_, kappa_max_vehicle_, global_path_, kappa_lim_, s0, d_final,
+        peak, bound, combined_clear, cv, previous_path);
+
+    Candidate c; c.d = d_final; c.curve = cv; c.cost = c_cost; c.reason = "";
+    return c;
+}
+
+Candidate CandidateGenerator::primitiveCandidate(
+    const std::vector<Knot> & knots, double terminal_offset, double peak,
+    double s0, const Curve * previous_path) const
+{
+    std::vector<Ctrl> segs;
+    double bound = 0.0;
+    for (std::size_t i = 0; i + 1 < knots.size(); ++i)
+    {
+        auto [seg_opt, kb] = fitSegment(knots[i], knots[i + 1], params_.bound_depth);
+        if (!seg_opt)
+        {
+            Candidate c; c.d = terminal_offset; c.reason = "degenerate"; c.cost = kInf;
+            return c;
+        }
+        segs.push_back(std::move(*seg_opt));
+        bound = std::max(bound, kb);
+    }
+
+    Curve cv(segs, false);
+    if (bound > kappa_lim_)
+    {
+        Candidate c; c.d = terminal_offset; c.curve = cv; c.reason = "kappa_bound";
+        c.cost = kInf;
+        return c;
+    }
+    if (!roadOk(boundary_, cv, body_radius_cm_ + kRoadSafetyMarginCm,
+               kRoadSampleIntervalCm))
+    {
+        Candidate c; c.d = terminal_offset; c.curve = cv; c.reason = "road_boundary";
+        c.cost = kInf;
+        return c;
+    }
+    const double clear = clearance(cv, obstacles_, body_radius_cm_, params_.clear_target);
+    if (clear < params_.obs_margin)
+    {
+        Candidate c; c.d = terminal_offset; c.curve = cv; c.reason = "obstacle";
+        c.cost = kInf;
+        return c;
+    }
+
+    const double c_cost = cost(
+        params_, kappa_max_vehicle_, global_path_, kappa_lim_, s0,
+        terminal_offset, peak, bound, clear, cv, previous_path);
+    Candidate c; c.d = terminal_offset; c.curve = cv; c.cost = c_cost; c.reason = "";
+    return c;
+}
+
+std::vector<Candidate> CandidateGenerator::obstaclePrimitives(
+    const Point2 & start, double yaw, double kappa0, const Frame & terminal_frame,
+    double s0, const Curve * previous_path) const
+{
+    struct Fwd { double advance; double station_s; const Obstacle * obstacle; };
+    std::vector<Fwd> forward;
+    for (const auto & st : stations_)
+    {
+        const double advance = global_path_.deltaS(s0, st.station_s);
+        if (advance >= 20.0 && advance <= params_.l_plan + 80.0)
+        {
+            forward.push_back({advance, st.station_s, &st.obstacle});
+        }
+    }
+    if (forward.empty())
+    {
+        return {};
+    }
+    std::sort(forward.begin(), forward.end(),
+             [](const Fwd & a, const Fwd & b) { return a.advance < b.advance; });
+
+    const double advance = forward.front().advance;
+    const double station = forward.front().station_s;
+    const Obstacle & obstacle = *forward.front().obstacle;
+    if (advance > params_.l_plan - 20.0)
+    {
+        return {};
+    }
+    const Obstacle * next_obstacle =
+        (forward.size() > 1) ? forward[1].obstacle : nullptr;
+
+    const double lead = std::min(60.0, 0.35 * advance);
+    const double apex_station = global_path_.wrapS(station - lead);
+    const Frame ref = referenceFrame(global_path_, apex_station);
+    const Point2 normal{-std::sin(ref.heading), std::cos(ref.heading)};
+    const double cone_lateral =
+        (obstacle.center.x - ref.point.x) * normal.x +
+        (obstacle.center.y - ref.point.y) * normal.y;
+    const double required =
+        obstacle.radius + body_radius_cm_ + params_.obs_margin + 0.5;
+
+    std::vector<Candidate> candidates;
+    for (double side : {-1.0, 1.0})
+    {
+        const double apex_offset = cone_lateral + side * required;
+        const Point2 apex_point{
+            ref.point.x + apex_offset * normal.x,
+            ref.point.y + apex_offset * normal.y};
+
+        const Point2 terminal_normal{
+            -std::sin(terminal_frame.heading), std::cos(terminal_frame.heading)};
+        double terminal_offset;
+        if (next_obstacle == nullptr)
+        {
+            terminal_offset = apex_offset;
+        }
+        else
+        {
+            const double next_lateral =
+                (next_obstacle->center.x - terminal_frame.point.x) * terminal_normal.x +
+                (next_obstacle->center.y - terminal_frame.point.y) * terminal_normal.y;
+            const double direction = next_lateral >= 0.0 ? 1.0 : -1.0;
+            const double terminal_required =
+                next_obstacle->radius + body_radius_cm_ + params_.obs_margin + 0.5;
+            terminal_offset = next_lateral - direction * terminal_required;
+        }
+        const Point2 end_point{
+            terminal_frame.point.x + terminal_offset * terminal_normal.x,
+            terminal_frame.point.y + terminal_offset * terminal_normal.y};
+
+        const double apex_heading = ref.heading;
+        const double apex_kappa =
+            (std::abs(apex_offset * ref.kappa) < params_.cusp_guard)
+                ? ref.kappa / (1.0 - apex_offset * ref.kappa) : 0.0;
+
+        const Frame hold_ref =
+            referenceFrame(global_path_, global_path_.wrapS(station + lead));
+        const Point2 hold_normal{
+            -std::sin(hold_ref.heading), std::cos(hold_ref.heading)};
+        const Point2 hold_point{
+            hold_ref.point.x + apex_offset * hold_normal.x,
+            hold_ref.point.y + apex_offset * hold_normal.y};
+        const double hold_kappa =
+            (std::abs(apex_offset * hold_ref.kappa) < params_.cusp_guard)
+                ? hold_ref.kappa / (1.0 - apex_offset * hold_ref.kappa) : 0.0;
+
+        const double chord_heading = std::atan2(
+            end_point.y - hold_point.y, end_point.x - hold_point.x);
+        const double terminal_heading_used = terminal_frame.heading +
+            std::clamp(kau::control::wrapPi(chord_heading - terminal_frame.heading),
+                      -0.30, 0.30);
+        constexpr double end_kappa = 0.0;
+
+        std::vector<Knot> knots{
+            Knot{start, yaw, kappa0},
+            Knot{apex_point, apex_heading, apex_kappa},
+            Knot{hold_point, hold_ref.heading, hold_kappa},
+            Knot{end_point, terminal_heading_used, end_kappa},
+        };
+        candidates.push_back(primitiveCandidate(
+            knots, terminal_offset,
+            std::max(std::abs(apex_offset), std::abs(terminal_offset)),
+            s0, previous_path));
+    }
+    return candidates;
+}
+
+std::vector<int> CandidateGenerator::directTargetIndices(
+    double s0, const std::array<std::pair<double, double>, 7> & offset_pairs) const
+{
+    std::array<double, 7> absolute_targets;
+    for (std::size_t i = 0; i < 7; ++i)
+    {
+        absolute_targets[i] = offset_pairs[i].second;
+    }
+
+    struct Fwd { double advance; double lateral; };
+    std::vector<Fwd> forward;
+    for (const auto & st : stations_)
+    {
+        const double advance = global_path_.deltaS(s0, st.station_s);
+        if (advance >= 0.0 && advance <= params_.l_plan)
+        {
+            forward.push_back({advance, st.lateral});
+        }
+    }
+
+    if (forward.empty())
+    {
+        int best_i = 0;
+        double best_abs = kInf;
+        for (std::size_t i = 0; i < 7; ++i)
+        {
+            const double a = std::abs(absolute_targets[i]);
+            if (a < best_abs)
+            {
+                best_abs = a;
+                best_i = static_cast<int>(i);
+            }
+        }
+        return {best_i};
+    }
+
+    const auto nearest = std::min_element(
+        forward.begin(), forward.end(),
+        [](const Fwd & a, const Fwd & b) { return a.advance < b.advance; });
+    const double obstacle_lateral = nearest->lateral;
+
+    const std::array<double, 3> desired = (obstacle_lateral < 0.0)
+        ? std::array<double, 3>{0.1625, 0.3875, 0.50}
+        : std::array<double, 3>{0.8375, 0.6125, 0.50};
+
+    std::vector<int> out;
+    for (double fraction : desired)
+    {
+        int best_i = 0;
+        double best_d = kInf;
+        for (std::size_t i = 0; i < kCorridorFractions.size(); ++i)
+        {
+            const double d = std::abs(kCorridorFractions[i] - fraction);
+            if (d < best_d)
+            {
+                best_d = d;
+                best_i = static_cast<int>(i);
+            }
+        }
+        out.push_back(best_i);
+    }
+    return out;
+}
+
+Candidate CandidateGenerator::directCandidate(
+    const Point2 & start, double yaw, double kappa0, const Point2 & terminal,
+    double reference_heading, double target, double s0,
+    const Curve * previous_path)
+{
+    const double chord = std::hypot(terminal.x - start.x, terminal.y - start.y);
+    if (chord < 1e-6)
+    {
+        Candidate c; c.d = target; c.reason = "degenerate"; c.cost = kInf;
+        return c;
+    }
+
+    const double delta = kau::control::wrapPi(reference_heading - yaw);
+    const double turn = delta >= 0.0 ? 1.0 : -1.0;
+    const double chord_heading = std::atan2(terminal.y - start.y, terminal.x - start.x);
+    const double geometry_offset = std::clamp(
+        kau::control::wrapPi(chord_heading - reference_heading), -0.4, 0.4);
+
+    using Combo = std::array<double, 4>;
+    const std::vector<Combo> raw{
+        {-0.20 * turn, 0.0, 0.6, 2.2},
+        {geometry_offset, 0.0, 0.6, 2.2},
+        {0.0, 0.0, 0.6, 2.2},
+        {0.20 * turn, 0.0, 0.6, 2.2},
+        {-0.20 * turn, 0.006 * turn, 0.6, 2.2},
+        {-0.20 * turn, 0.0, 1.0, 2.2},
+        {-0.20 * turn, 0.0, 0.6, 1.4},
+        {0.0, 0.0, 1.0, 1.4},
+    };
+    std::vector<Combo> combinations;
+    for (const auto & c : raw)
+    {
+        if (std::find(combinations.begin(), combinations.end(), c) ==
+            combinations.end())
+        {
+            combinations.push_back(c);
+        }
+    }
+    if (direct_seed_.has_value())
+    {
+        auto it = std::find(combinations.begin(), combinations.end(), *direct_seed_);
+        if (it != combinations.end())
+        {
+            combinations.erase(it);
+        }
+        combinations.insert(combinations.begin(), *direct_seed_);
+    }
+
+    std::string best_reason = "kappa_exact";
+    for (const auto & combo : combinations)
+    {
+        const double heading_offset = combo[0];
+        const double terminal_kappa = combo[1];
+        const double start_ratio = combo[2];
+        const double end_ratio = combo[3];
+
+        Ctrl ctrl = hermiteToBezier(
+            start, yaw, kappa0, terminal, reference_heading + heading_offset,
+            terminal_kappa, start_ratio * chord, end_ratio * chord);
+        if (!kau::bezier::isRegular(ctrl))
+        {
+            continue;
+        }
+
+        double max_sampled = 0.0;
+        for (int i = 0; i < 25; ++i)
+        {
+            const double u = static_cast<double>(i) / 24.0;
+            max_sampled = std::max(
+                max_sampled, std::abs(kau::bezier::curvature(ctrl, u)));
+        }
+        if (max_sampled > kappa_lim_)
+        {
+            continue;
+        }
+
+        Curve candidate_curve(std::vector<Ctrl>{ctrl}, false);
+        if (!roadOk(boundary_, candidate_curve, body_radius_cm_ + kRoadSafetyMarginCm,
+                   kRoadSampleIntervalCm))
+        {
+            best_reason = "road_boundary";
+            continue;
+        }
+        const double clear = clearance(
+            candidate_curve, obstacles_, body_radius_cm_, params_.clear_target);
+        if (clear < params_.obs_margin)
+        {
+            best_reason = "obstacle";
+            continue;
+        }
+        const double exact = candidate_curve.kappaMax();
+        if (exact > kappa_lim_)
+        {
+            continue;
+        }
+
+        direct_seed_ = combo;
+        const double c_cost = cost(
+            params_, kappa_max_vehicle_, global_path_, kappa_lim_, s0, target,
+            std::abs(target), exact, clear, candidate_curve, previous_path);
+        Candidate c; c.d = target; c.curve = candidate_curve; c.cost = c_cost;
+        c.reason = "";
+        return c;
+    }
+
+    // Python 원본도 실패 시 curve 를 끝까지 None 으로 둔다 (best_curve 가
+    // 루프 안에서 한 번도 대입되지 않음) -- 그대로 재현.
+    Candidate c; c.d = target; c.reason = best_reason; c.cost = kInf;
+    return c;
+}
+
+std::vector<Candidate> CandidateGenerator::directFamily(
+    const Point2 & p, double yaw, double kappa0, const Frame & terminal_frame,
+    const std::array<std::pair<double, double>, 7> & offset_pairs,
+    std::vector<Candidate> base_candidates, double s0,
+    const Curve * previous_path)
+{
+    const Point2 normal{
+        -std::sin(terminal_frame.heading), std::cos(terminal_frame.heading)};
+    std::vector<Candidate> family = std::move(base_candidates);
+
+    for (int index : directTargetIndices(s0, offset_pairs))
+    {
+        const double target = offset_pairs[static_cast<std::size_t>(index)].second;
+        const Point2 terminal{
+            terminal_frame.point.x + target * normal.x,
+            terminal_frame.point.y + target * normal.y};
+        family[static_cast<std::size_t>(index)] = directCandidate(
+            p, yaw, kappa0, terminal, terminal_frame.heading, target, s0,
+            previous_path);
+        if (family[static_cast<std::size_t>(index)].reason.empty())
+        {
+            break;
+        }
+    }
+    return family;
+}
+
+}  // namespace local_path_planner
+}  // namespace kau

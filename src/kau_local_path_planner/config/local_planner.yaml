@@ -1,0 +1,52 @@
+# kau_local_path_planner 파라미터.
+#
+# 값들은 KAU_AMET_Test 시뮬레이션 세션(2026-08-22)에서 실측/스윕으로
+# 확정한 최종값이다. 비용 가중치(w_*)는 여기만 바꾸면 재빌드 없이
+# 바로 반영된다 -- 실차/시뮬 테스트로 튜닝할 때 이 파일만 만지면 된다.
+#
+# track_yaml_path 는 launch 파일이 kau_object_detection 의 share 경로로
+# 채워 넣는다 (여기 기본값은 launch 인자가 없을 때만 쓰임).
+
+local_planner_node:
+  ros__parameters:
+    plan_hz: 5.0
+    map_frame: "map"
+    base_frame: "base_footprint"
+
+    # 차량 제원 (docs/경로_형식.md 부록 B 확정값)
+    kappa_max_vehicle: 0.020221      # 1/cm, R_min=49.455cm, delta_max=20deg
+    body_radius_cm: 11.0353          # 3분할 원 근사 반경 (body 28x20cm, rear_overhang 5cm)
+    wheelbase_cm: 18.0
+
+    # sim world -> map 변환 (kau_global_path 확인값, 회전 없음)
+    sim_to_map_ox: 3.68
+    sim_to_map_oy: 1.39
+    sim_to_map_rot_deg: 0.0
+
+    # --- PlannerParams ---
+    l_plan: 300.0                    # cm. 400 이상은 2-segment 고정 구조와
+                                      # 충돌해 오히려 악화됨 (실측, 늘리지 말 것)
+    ref_mode: "fuse"
+    w_lane: 1.0                      # 실측: 0~1.0 스윕해도 결과 불변, 원인 아님
+
+    kappa_margin: 0.95
+    bound_depth: 2
+    cusp_guard: 0.6
+    obs_margin: 4.0
+    lane_gate: 60.0
+    preview: 450.0                   # l_plan+preview=750cm. 스윕 결과 최적값,
+                                      # 600 이상은 오히려 악화
+
+    # 비용 가중치
+    w_obstacle: 4.0
+    w_ref: 1.0
+    w_kappa: 2.0
+    w_end: 0.6
+    w_continuity: 10.0               # 스윕 결과 10 근방 최적. 20+ 부터
+                                      # 회피 반응 지연으로 안전 악화
+    w_path_preview: 2.0
+
+    clear_target: 15.0
+    d_scale: 18.0
+
+    track_yaml_path: ""              # launch 가 채움
