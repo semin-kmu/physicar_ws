@@ -22,7 +22,7 @@ double continuityCost(
     const Point2 p0 = referenceFrame(candidate, candidate.wrapS(0.0)).point;
     // Python: prev.nearest_global(p0) -- window 상태를 안 쓰고 매번 전역
     // 탐색 (previous_path 는 candidate 와 다른 곡선이라 window 재사용 불가).
-    const TrackState st = previous_path->nearestGlobal(p0);
+    const kau::control::TrackState st = previous_path->nearestGlobal(p0);
 
     const double common = std::min(
         candidate.length(), previous_path->length() - st.s);
