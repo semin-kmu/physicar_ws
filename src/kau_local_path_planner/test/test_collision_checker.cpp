@@ -17,7 +17,7 @@ namespace
 // (0,0) -> (100,0) 직선, 곡률 0.
 Curve straightLine()
 {
-    const auto ctrl = hermiteToBezier(
+    auto ctrl = hermiteToBezier(
         Point2{0.0, 0.0}, 0.0, 0.0, Point2{100.0, 0.0}, 0.0, 0.0, 100.0, 100.0);
     return Curve(std::vector<decltype(ctrl)>{ctrl}, false);
 }

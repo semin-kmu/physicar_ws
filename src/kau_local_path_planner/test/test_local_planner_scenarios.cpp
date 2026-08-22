@@ -32,7 +32,7 @@ RoadBoundary wideOpenBoundary()
 
 Curve straightGlobalPath(double length)
 {
-    const auto ctrl = hermiteToBezier(
+    auto ctrl = hermiteToBezier(
         Point2{0.0, 0.0}, 0.0, 0.0, Point2{length, 0.0}, 0.0, 0.0,
         length, length);
     return Curve(std::vector<decltype(ctrl)>{ctrl}, false);

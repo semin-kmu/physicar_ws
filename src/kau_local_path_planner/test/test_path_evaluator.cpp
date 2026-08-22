@@ -16,7 +16,7 @@ namespace
 
 Curve straightLine(double x0, double x1)
 {
-    const auto ctrl = hermiteToBezier(
+    auto ctrl = hermiteToBezier(
         Point2{x0, 0.0}, 0.0, 0.0, Point2{x1, 0.0}, 0.0, 0.0,
         x1 - x0, x1 - x0);
     return Curve(std::vector<decltype(ctrl)>{ctrl}, false);
@@ -41,9 +41,9 @@ TEST(PathEvaluator, ContinuityCostPositiveWhenOffsetFromPrevious)
 {
     // candidate 는 previous 보다 y=+20cm 만큼 평행이동된 직선 -- 형상은
     // 같지만 위치가 달라야 하므로 continuity cost 는 0보다 커야 한다.
-    const auto ctrl_prev = hermiteToBezier(
+    auto ctrl_prev = hermiteToBezier(
         Point2{0.0, 0.0}, 0.0, 0.0, Point2{100.0, 0.0}, 0.0, 0.0, 100.0, 100.0);
-    const auto ctrl_cand = hermiteToBezier(
+    auto ctrl_cand = hermiteToBezier(
         Point2{0.0, 20.0}, 0.0, 0.0, Point2{100.0, 20.0}, 0.0, 0.0, 100.0, 100.0);
     const Curve previous(std::vector<decltype(ctrl_prev)>{ctrl_prev}, false);
     const Curve candidate(std::vector<decltype(ctrl_cand)>{ctrl_cand}, false);
