@@ -63,6 +63,16 @@ laser_scan_clusterer:
     # Published for Local Path Planning. Circles carry the measured physical
     # obstacle only; vehicle size and safety margin stay with the planner.
     object_list_topic: /perception/obstacles
+    # --- Raw diagnostic Object List twin -------------------------------------
+    # Diagnostics only. Carries the candidates as they entered the tracker:
+    # after the tf2 map transform, before association, outlier rejection and
+    # EMA smoothing. Same header.stamp, frame_id and status as the frame on
+    # object_list_topic, so raw and final can be compared frame by frame.
+    # Local Path Planning must never subscribe to this topic.
+    raw_diagnostic_object_list_topic: /perception/obstacles_raw_diagnostic
+    # Set false to stop advertising the diagnostic topic. Nothing about the
+    # published Object List changes either way.
+    raw_diagnostic_object_list_enabled: true
     # Carried on every frame, failures included, so a consumer never has to
     # branch on the status to know which frame the message speaks about.
     object_list_frame_id: map

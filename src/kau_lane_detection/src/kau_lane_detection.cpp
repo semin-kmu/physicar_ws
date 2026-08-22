@@ -840,6 +840,12 @@ KauLaneDetectionNode::KauLaneDetectionNode()
             1.5
         );
 
+    obstacle_lane_lateral_m_ =
+        this->declare_parameter<double>(
+            "obstacle_lane_lateral_m",
+            0.5
+        );
+
     obstacle_min_points_ =
         static_cast<int>(
             this->declare_parameter<int>(
@@ -954,6 +960,23 @@ KauLaneDetectionNode::KauLaneDetectionNode()
             this->declare_parameter<int>(
                 "pan_trigger_miss_frames",
                 3
+            )
+        );
+
+    // 재검출 인정 기준 (선언부 주석 참고).
+    pan_found_min_windows_ =
+        static_cast<int>(
+            this->declare_parameter<int>(
+                "pan_found_min_windows",
+                6
+            )
+        );
+
+    pan_found_confirm_frames_ =
+        static_cast<int>(
+            this->declare_parameter<int>(
+                "pan_found_confirm_frames",
+                2
             )
         );
 
@@ -3858,6 +3881,32 @@ bool KauLaneDetectionNode::obstacleOnSide(
         }
 
 
+        // 각도 의존 상한. 가림이 성립하려면 반사가 카메라와
+        // 놓친 흰선 "사이" 에 있어야 한다 (근거: CLAUDE.md).
+        //
+        //   r_max(theta) = obstacle_lane_lateral_m / sin(theta)
+        //
+        // 트랙 경계벽은 선 바깥이므로 이 조건을 구조적으로
+        // 통과하지 못한다. 급커브에서 벽이 부채꼴에 들어와도
+        // 가림으로 오인해 pan 을 막는 일이 없다.
+        //
+        // side_ang 은 [lo, hi] 로 걸러진 뒤라 항상 양수다.
+        if (obstacle_lane_lateral_m_ > 0.0)
+        {
+            const double sin_ang = std::sin(side_ang);
+
+            // theta 가 0 에 가까우면 상한이 발산한다. 그 구간은
+            // range_hi 가 이미 잡고 있으므로 넘긴다.
+            if (
+                sin_ang > 1e-3 &&
+                r > obstacle_lane_lateral_m_ / sin_ang
+            )
+            {
+                continue;
+            }
+        }
+
+
         ++hits;
 
         // 단일 빔 노이즈가 아니라고 판정되는 순간 끝낸다.
@@ -4075,6 +4124,8 @@ void KauLaneDetectionNode::updatePanSearch(
 
             pan_state_ = PanSearchState::Searching;
 
+            pan_found_streak_ = 0;
+
             // 첫 명령은 기어가지 않고 쓸 만한 각도로 바로 뛴다.
             commandPan(pan_start_deg_ * pan_search_dir_);
 
@@ -4099,10 +4150,20 @@ void KauLaneDetectionNode::updatePanSearch(
             }
 
 
-            const bool found =
+            // 창 수 + 연속 프레임. 왜 창 하나로는 안 되는지는
+            // 선언부 pan_found_min_windows_ 주석 참고.
+            const int side_windows =
                 (pan_search_dir_ > 0)
-                    ? (left.found_count > 0)
-                    : (right.found_count > 0);
+                    ? left.found_count
+                    : right.found_count;
+
+            pan_found_streak_ =
+                (side_windows >= pan_found_min_windows_)
+                    ? pan_found_streak_ + 1
+                    : 0;
+
+            const bool found =
+                pan_found_streak_ >= pan_found_confirm_frames_;
 
 
             if (found)
@@ -4120,9 +4181,13 @@ void KauLaneDetectionNode::updatePanSearch(
 
                 RCLCPP_INFO(
                     this->get_logger(),
-                    "Pan 탐색 성공: %+.1fdeg 에서 재검출. "
+                    "Pan 탐색 성공: %+.1fdeg 에서 재검출 "
+                    "(창 %d개 >= %d, %d프레임 연속). "
                     "%+.1fdeg 에 정지하고 직선 구간까지 유지.",
                     at_deg,
+                    side_windows,
+                    pan_found_min_windows_,
+                    pan_found_confirm_frames_,
                     pan_cmd_deg_
                 );
 
@@ -4145,8 +4210,11 @@ void KauLaneDetectionNode::updatePanSearch(
                 RCLCPP_WARN(
                     this->get_logger(),
                     "Pan 탐색 실패: %.1fdeg 까지 돌렸지만 "
-                    "재검출 못 함. 포기하고 복귀.",
-                    pan_max_deg_
+                    "재검출 못 함 (마지막 창 %d개, 기준 %d). "
+                    "포기하고 복귀.",
+                    pan_max_deg_,
+                    side_windows,
+                    pan_found_min_windows_
                 );
 
                 pan_state_ = PanSearchState::Returning;

@@ -31,8 +31,6 @@ ROS 쪽에는 image_raw 만 bridge 되어 있어서 camera_info 가 비어 있�
     viewer:=false               웹 뷰어(포트 5000) 없이 노드만
     params_file:=/path/to.yaml  다른 파라미터 파일로 교체
     pan_search:=true            차선 소실 시 카메라 pan 탐색 (기본 꺼짐)
-    pan_hold_timeout:=3.0       재검출 후 복귀를 못 하고 버티는 상한 [s].
-                                0 이하면 무한 대기 (yaml 기본값)
 
 pan_search 는 노드가 생성자에서 한 번만 읽는 값이라
 ros2 param set 으로는 켜지지 않는다. 기동 시점에 넣어야 한다.
@@ -82,7 +80,6 @@ def generate_launch_description():
     image_bridge = LaunchConfiguration('image_bridge')
     viewer = LaunchConfiguration('viewer')
     pan_search = LaunchConfiguration('pan_search')
-    pan_hold_timeout = LaunchConfiguration('pan_hold_timeout')
 
     return LaunchDescription([
 
@@ -122,16 +119,7 @@ def generate_launch_description():
             default_value='false',
             description=(
                 '차선 소실 시 카메라 pan 탐색. 켜면 탐색/복귀 동안 '
-                '/lane/center 가 끊긴다'
-            ),
-        ),
-
-        DeclareLaunchArgument(
-            'pan_hold_timeout',
-            default_value='0.0',
-            description=(
-                '재검출 후 복귀를 못 하고 버티는 상한 [s]. '
-                '0 이하 = 무한 대기. 주행과 같이 쓸 때는 양수로 줄 것'
+                '/lane/center 가 끊긴다 (주행과 같이 켜지 말 것)'
             ),
         ),
 
@@ -176,9 +164,6 @@ def generate_launch_description():
                     # 여기서 넣지 않으면 나중에 켤 방법이 없다.
                     'pan_search_enable': ParameterValue(
                         pan_search, value_type=bool),
-
-                    'pan_hold_timeout_s': ParameterValue(
-                        pan_hold_timeout, value_type=float),
                 },
             ],
         ),

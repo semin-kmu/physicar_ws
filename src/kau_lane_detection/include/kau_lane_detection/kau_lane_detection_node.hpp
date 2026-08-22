@@ -878,8 +878,19 @@ private:
 
     double obstacle_sector_max_deg_;
 
-    // 이 거리 안의 반사만 가림으로 본다 [m].
+    // 이 거리 안의 반사만 가림으로 본다 [m]. 각도 무관 상한.
     double obstacle_max_range_m_;
+
+    // 놓친 흰선의 횡방향 거리 [m]. 각도 의존 상한의 분자다.
+    //
+    // 가림이 성립하려면 반사가 카메라와 그 선 "사이" 에 있어야
+    // 한다. 방위각 theta 에서 선까지의 거리가
+    // lane_lateral / sin(theta) 이므로 그보다 먼 반사는 선을
+    // 가릴 수 없다. 트랙 경계벽은 항상 선 바깥이라 이 조건을
+    // 구조적으로 통과하지 못한다 (근거: CLAUDE.md).
+    //
+    // 0 이하면 각도 의존 상한을 끄고 obstacle_max_range_m 만 쓴다.
+    double obstacle_lane_lateral_m_;
 
     // 단일 빔 노이즈를 배제하기 위한 최소 점 수.
     int obstacle_min_points_;
@@ -954,6 +965,29 @@ private:
     // 양수로 바꿔 상한을 준다.
     double pan_hold_timeout_s_;
 
+    // 재검출 인정에 필요한 최소 창 수 (Searching -> Holding).
+    //
+    // 예전에는 found_count > 0, 즉 창 하나였다. min_pixels 만큼의
+    // 흰 픽셀이 회랑 안에 한 번 잡히면 그 각도에서 멈췄다는 뜻인데
+    // 문제가 셋이었다.
+    //
+    //  (a) detectLaneSlidingWindow 는 found_count >= MIN_VALID_WINDOWS
+    //      (3) 를 넘겨야 detected/valid 로 친다. pan 정지만 그보다
+    //      느슨해서 "차선으로 인정도 안 되는 검출" 에 멈췄다.
+    //  (b) 탐색 시작은 pan_trigger_miss_frames(3) 프레임 연속 소실이
+    //      필요한데 정지는 1프레임이었다. 시작은 어렵고 멈추기는
+    //      쉬운 반대 방향 히스테리시스라 반짝임 하나에 중단됐다.
+    //  (c) 창 하나는 선 끄트머리가 화면 가장자리에 겨우 걸친
+    //      상태다. 거기서 Holding 에 들어가면 경로 품질이
+    //      회복되지 않은 채 유지된다.
+    //
+    // track_step_px 25 기준 6창은 호길이 약 150 px 이다.
+    int pan_found_min_windows_;
+
+    // 위 조건이 연속으로 성립해야 하는 프레임 수.
+    // pan_trigger_miss_frames 와 대칭을 맞추기 위한 것이다.
+    int pan_found_confirm_frames_;
+
 
     PanSearchState pan_state_ = PanSearchState::Idle;
 
@@ -979,6 +1013,10 @@ private:
 
     // Holding 에서 연속으로 직선 판정이 난 프레임 수
     int pan_straight_streak_ = 0;
+
+    // Searching 에서 연속으로 재검출 조건이 선 프레임 수.
+    // Searching 에 들어갈 때 0 으로 되돌린다.
+    int pan_found_streak_ = 0;
 
     // 직전 프레임의 꺾임각 [deg]. 진단 전용 (음수 = 판정 불가).
     // 복귀 판정에는 쓰이지 않는다 — status 의 pbend 로만 나간다.

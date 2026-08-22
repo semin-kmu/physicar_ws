@@ -144,6 +144,18 @@ target_include_directories(object_list PUBLIC
 target_link_libraries(object_list track_roi)
 ament_target_dependencies(object_list kau_msgs builtin_interfaces)
 
+# Diagnostics-only builder of the raw (pre-tracking, pre-smoothing) Object List
+# twin. Kept beside object_list so both frames share one message builder.
+add_library(object_list_diagnostic
+  src/object_list_diagnostic.cpp
+)
+target_include_directories(object_list_diagnostic PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
+target_link_libraries(object_list_diagnostic object_list track_roi)
+ament_target_dependencies(object_list_diagnostic kau_msgs builtin_interfaces)
+
 add_library(start_signal_logic
   src/start_signal_logic.cpp
 )
@@ -183,6 +195,7 @@ target_link_libraries(
   track_roi
   world_pose
   object_list
+  object_list_diagnostic
   object_list_transform
   obstacle_tracker
 )
@@ -234,6 +247,7 @@ install(
     track_roi
     world_pose
     object_list
+    object_list_diagnostic
     object_list_transform
     obstacle_tracker
     start_signal_logic
@@ -348,6 +362,28 @@ if(BUILD_TESTING)
     )
     ament_target_dependencies(
       test_object_list_transform
+      kau_msgs
+      builtin_interfaces
+      sensor_msgs
+    )
+  endif()
+
+  ament_add_gtest(test_object_list_diagnostic
+    test/test_object_list_diagnostic.cpp
+  )
+  if(TARGET test_object_list_diagnostic)
+    target_link_libraries(
+      test_object_list_diagnostic
+      object_list_diagnostic
+      object_list
+      obstacle_tracker
+      track_roi
+      track_geometry
+      cone_occupancy
+      cluster_geometry
+    )
+    ament_target_dependencies(
+      test_object_list_diagnostic
       kau_msgs
       builtin_interfaces
       sensor_msgs

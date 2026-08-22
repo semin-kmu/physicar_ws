@@ -32,6 +32,7 @@
 #include "kau_object_detection/laser_scan_clusterer.hpp"
 #include "kau_object_detection/laser_scan_validator.hpp"
 #include "kau_object_detection/object_list.hpp"
+#include "kau_object_detection/object_list_diagnostic.hpp"
 #include "kau_object_detection/object_list_transform.hpp"
 #include "kau_object_detection/obstacle_tracker.hpp"
 #include "kau_object_detection/track_geometry.hpp"
@@ -124,6 +125,13 @@ public:
     // these parameters only govern the published contract.
     const auto object_list_topic =
       declare_parameter<std::string>("object_list_topic", "/perception/obstacles");
+    // Raw (pre-tracking, pre-smoothing) diagnostic copy of the same frame.
+    // Separate topic, never a second consumer contract: Local Path Planning
+    // stays on object_list_topic above.
+    const auto raw_diagnostic_object_list_topic = declare_parameter<std::string>(
+      "raw_diagnostic_object_list_topic", "/perception/obstacles_raw_diagnostic");
+    raw_diagnostic_object_list_enabled_ =
+      declare_parameter<bool>("raw_diagnostic_object_list_enabled", true);
     object_list_options_.frame_id =
       declare_parameter<std::string>("object_list_frame_id", "map");
     object_list_options_.confidence = static_cast<float>(
@@ -324,6 +332,15 @@ public:
       object_list_topic,
       rclcpp::QoS(rclcpp::KeepLast(1)).best_effort().durability_volatile());
 
+    // Diagnostic twin of the publisher above. Identical QoS so a collector can
+    // subscribe to both with one profile and pair the frames on header.stamp.
+    if (raw_diagnostic_object_list_enabled_) {
+      raw_diagnostic_object_list_publisher_ =
+        create_publisher<kau_msgs::msg::ObstacleCircleArray>(
+        raw_diagnostic_object_list_topic,
+        rclcpp::QoS(rclcpp::KeepLast(1)).best_effort().durability_volatile());
+    }
+
     // Node clock, never a wall timer: the simulator drives /clock and a wall
     // timer would measure the LiDAR gap against the wrong time base.
     last_scan_activity_ = now();
@@ -374,6 +391,14 @@ public:
       watchdog_period_s, watchdog_publish_period_s_,
       object_list_options_.frame_id.c_str(), object_list_transform_timeout_s_);
 
+    RCLCPP_INFO(
+      get_logger(),
+      "raw diagnostic object list enabled=%d topic=%s "
+      "qos=best_effort/keep_last(1)/volatile stage=after_tf2_before_tracking "
+      "header=identical_to_object_list consumer=diagnostics_only",
+      raw_diagnostic_object_list_enabled_ ? 1 : 0,
+      raw_diagnostic_object_list_topic.c_str());
+
     const auto & applied_tracker_options = obstacle_tracker_.options();
     RCLCPP_INFO(
       get_logger(),
@@ -403,6 +428,10 @@ private:
       // counts as the sensor being alive.
       obstacle_tracker_.reset();
       publish_object_list(ObjectListStatus::kLidarUnavailable, {}, scan->header.stamp);
+      // Same stamp, same non-OK status, empty array: the diagnostic stream
+      // never claims a frame the Object List reported as unusable.
+      publish_raw_diagnostic_object_list(
+        ObjectListStatus::kLidarUnavailable, {}, scan->header.stamp);
       return;
     }
 
@@ -487,6 +516,15 @@ private:
     }
 
     publish_object_list(object_list_status, published_candidates, scan->header.stamp);
+
+    // Raw diagnostic twin of the frame just published. It carries the placed
+    // candidates as they entered the tracker - after the tf2 transform, before
+    // association, outlier rejection and EMA smoothing - under the very same
+    // stamp and status. Published after the contract topic so the planner is
+    // never made to wait on a diagnostic, and read-only with respect to
+    // everything above: no tracker state is touched here.
+    publish_raw_diagnostic_object_list(
+      object_list_status, placement.accepted, scan->header.stamp);
 
     ++valid_message_count_since_summary_;
 
@@ -749,6 +787,28 @@ private:
     }
   }
 
+  /// Publishes the raw diagnostic twin of one Object List frame.
+  ///
+  /// Diagnostics only. `pre_tracking_candidates` are the tf2-placed candidates
+  /// as they entered the tracker, so the difference against the Object List
+  /// frame of the same `stamp` is exactly what association, outlier rejection
+  /// and EMA smoothing did. Nothing published here reaches Local Path Planning,
+  /// and nothing read here is retained: the message is rebuilt from the
+  /// arguments every time, so no candidate can survive into a later frame.
+  void publish_raw_diagnostic_object_list(
+    const ObjectListStatus status,
+    const std::vector<WorldCircleCandidate> & pre_tracking_candidates,
+    const builtin_interfaces::msg::Time & stamp)
+  {
+    if (!raw_diagnostic_object_list_publisher_) {
+      return;
+    }
+
+    raw_diagnostic_object_list_publisher_->publish(
+      build_raw_diagnostic_object_list(
+        status, pre_tracking_candidates, stamp, object_list_options_));
+  }
+
   /// Reports the LiDAR as unavailable while no usable scan arrives.
   ///
   /// The scan callback is the only healthy publisher, so this timer exists
@@ -799,7 +859,12 @@ private:
     // the only honest stamp available. The tracker is cleared as well: its
     // tracks are only as good as the scan stream that fed them.
     obstacle_tracker_.reset();
-    publish_object_list(ObjectListStatus::kLidarUnavailable, {}, now());
+    // One stamp read, shared by both topics, so the diagnostic frame can still
+    // be paired with the Object List frame it belongs to.
+    const auto watchdog_stamp = now();
+    publish_object_list(ObjectListStatus::kLidarUnavailable, {}, watchdog_stamp);
+    publish_raw_diagnostic_object_list(
+      ObjectListStatus::kLidarUnavailable, {}, watchdog_stamp);
   }
 
   /// Stores the newest world pose. Called from a Gazebo Transport thread, so
@@ -1014,6 +1079,12 @@ private:
   rclcpp::Time last_object_list_publish_{0, 0U, RCL_ROS_TIME};
   ObjectListStatus last_object_list_status_{ObjectListStatus::kInternalError};
   rclcpp::Publisher<kau_msgs::msg::ObstacleCircleArray>::SharedPtr object_list_publisher_;
+  /// Diagnostics-only stream of the pre-tracking, pre-smoothing candidates.
+  /// Null while the diagnostic is disabled, which is the only thing that can
+  /// switch it off; the Object List publisher above is never affected.
+  bool raw_diagnostic_object_list_enabled_{true};
+  rclcpp::Publisher<kau_msgs::msg::ObstacleCircleArray>::SharedPtr
+    raw_diagnostic_object_list_publisher_;
   rclcpp::TimerBase::SharedPtr watchdog_timer_;
 };
 
