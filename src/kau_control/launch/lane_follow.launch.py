@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """차선 추종 일괄 실행 — 노란 중앙선을 보고 그대로 따라간다.
 
-    kau_lane_detection  --(/lane/center, KauPath, base_link)-->  path_follower
-                                                                      |
-                                                        /speed, /steering
+    kau_lane_detection --(/lane/center, KauPath, base_link)--> speed_controller
+                                                               steer_controller
+                                                                     |
+                                                       /speed, /steering
 
 측위(Cartographer / map -> odom TF)가 **필요 없다.** lane detection 이
-경로를 차량 프레임(base_link)으로 발행하고, path_follower 를
+경로를 차량 프레임(base_link)으로 발행하고, 두 제어 노드를
 pose_source:=identity 로 두면 차량은 그 프레임의 원점이므로 TF 를 볼
 일이 없다. 측위 오차가 결과에 섞이지 않는 것이 이 조합의 장점이다.
 
@@ -22,29 +23,50 @@ pose_source:=identity 로 두면 차량은 그 프레임의 원점이므로 TF �
     # 상수 속도 주행
     ros2 launch kau_control lane_follow.launch.py speed:=0.4
 
-    # 곡률 기반 가감속 (lane 경로는 앞 80cm 만 보므로 아직 미검증)
-    ros2 launch kau_control lane_follow.launch.py adaptive_speed:=true
-
     # 인지는 이미 다른 터미널에서 돌고 있을 때
     ros2 launch kau_control lane_follow.launch.py lane_detection:=false
 
     # s / cte / Ld / steer 를 2 Hz 로 본다
     ros2 launch kau_control lane_follow.launch.py log_level:=debug
 
+    # 차선을 놓치면 카메라를 돌려 찾는다 (실험)
+    ros2 launch kau_control lane_follow.launch.py pan_search:=true speed:=0.3
+
 주요 인자:
 
-    speed:=0.4            상수 속도 [m/s]. 0.0 이면 조향만 (차는 정지)
-    adaptive_speed:=false true 면 곡률 기반 속도 제어를 켠다
+    speed:=0.4            상수 속도 [m/s]. v_min = v_max 로 덮는다.
+                          0.0 이면 조향만 (차는 정지)
     lane_detection:=true  차선 인지도 같이 띄울지
     viewer:=true          웹 뷰어(포트 5000). lane_detection:=true 일 때만
     use_sim_time:=true    실기는 false
     params_file:=...      config/lane_follow.yaml 대체
 
+    pan_search:=false     차선 소실 시 카메라 pan 탐색.
+                          ★ 켜면 탐색/유지/복귀 동안 /lane/center 가
+                            끊기고, 두 제어 노드는 path_timeout(0.5s)
+                            을 넘기면 정지한다. 즉 "차선 하나 놓칠
+                            때마다 차가 잠깐 선다". 의도된 동작이다 —
+                            카메라가 돌아간 프레임의 BEV 좌표는
+                            base_link 와 대응이 깨져 있어서 그 상태로
+                            만든 경로를 따라가면 안 되기 때문이다.
+                            (kau_lane_detection/CLAUDE.md §8 참고)
+
+    pan_hold_timeout:=3.0 재검출 후 복귀를 못 하고 버티는 상한 [s].
+                          ★ 이 launch 의 기본값은 3.0 이다.
+                            인지 단독(lane_detection.launch.py)의
+                            기본값은 0(무한 대기)인데, 주행 중에 그러면
+                            복귀 조건이 성립할 때까지 차가 영영 서
+                            있는다. 주행에서는 반드시 유한값이어야 한다.
+
+곡률 기반 가감속을 켜려면 speed 인자를 주지 말고 lane_follow.yaml 의
+v_min / v_max 를 서로 다르게 둔다 (예: 0.3 / 0.8). lane 경로는 앞 80 cm
+짜리 토막이라 코너를 미리 못 보므로 아직 미검증이다.
+
 안전:
 
-    path_follower 는 어떤 경로로 빠져나가든 /speed 0 을 계속 발행한다
-    (driver 의 cmd_timeout 이 1 초라, 조용히 멈추면 그동안 직전 속도로
-    계속 굴러가기 때문). 차선을 놓치면(0.5 s 무발행) 스스로 선다.
+    두 노드 모두 어떤 경로로 빠져나가든 0 을 계속 발행한다 (driver 의
+    cmd_timeout 이 1 초라, 조용히 멈추면 그동안 직전 명령으로 계속
+    굴러가기 때문). 차선을 놓치면(0.5 s 무발행) 스스로 선다.
 """
 
 from pathlib import Path
@@ -83,9 +105,12 @@ def generate_launch_description():
     use_sim_time = LaunchConfiguration('use_sim_time')
     log_level = LaunchConfiguration('log_level')
     speed = LaunchConfiguration('speed')
-    adaptive_speed = LaunchConfiguration('adaptive_speed')
     lane_detection = LaunchConfiguration('lane_detection')
     viewer = LaunchConfiguration('viewer')
+    pan_search = LaunchConfiguration('pan_search')
+    pan_hold_timeout = LaunchConfiguration('pan_hold_timeout')
+
+    common = ['--ros-args', '--log-level', log_level]
 
     return LaunchDescription([
 
@@ -96,7 +121,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'params_file',
             default_value=default_params,
-            description='경로 추종 parameter yaml',
+            description='제어 parameter yaml (두 노드 섹션이 다 들어 있다)',
         ),
 
         DeclareLaunchArgument(
@@ -115,17 +140,8 @@ def generate_launch_description():
             'speed',
             default_value='0.4',
             description=(
-                '상수 속도 [m/s]. 0.0 이면 조향만 관찰한다 '
-                '(adaptive_speed:=true 이면 무시된다)'
-            ),
-        ),
-
-        DeclareLaunchArgument(
-            'adaptive_speed',
-            default_value='false',
-            description=(
-                '곡률 기반 속도 제어. lane 경로는 앞 80 cm 짜리 토막이라 '
-                '코너를 미리 못 본다 — 미검증'
+                '상수 속도 [m/s]. v_min = v_max 로 덮는다. '
+                '0.0 이면 조향만 관찰한다'
             ),
         ),
 
@@ -133,6 +149,24 @@ def generate_launch_description():
             'lane_detection',
             default_value='true',
             description='차선 인지도 같이 띄울지. 이미 돌고 있으면 false',
+        ),
+
+        DeclareLaunchArgument(
+            'pan_search',
+            default_value='false',
+            description=(
+                '차선 소실 시 카메라 pan 탐색. 켜면 그동안 '
+                '/lane/center 가 끊겨 차가 잠깐씩 선다'
+            ),
+        ),
+
+        DeclareLaunchArgument(
+            'pan_hold_timeout',
+            default_value='3.0',
+            description=(
+                '재검출 후 복귀를 못 하고 버티는 상한 [s]. '
+                '주행 중에는 무한 대기(0)를 쓰면 안 된다'
+            ),
         ),
 
         DeclareLaunchArgument(
@@ -151,12 +185,16 @@ def generate_launch_description():
 
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(detection_launch),
-            launch_arguments={'viewer': viewer}.items(),
+            launch_arguments={
+                'viewer': viewer,
+                'pan_search': pan_search,
+                'pan_hold_timeout': pan_hold_timeout,
+            }.items(),
             condition=IfCondition(lane_detection),
         ),
 
         # ------------------------------------------------------------
-        # 경로 추종
+        # 제어
         #
         # parameter 는 yaml 이 먼저, launch 인자가 나중이다.
         # 뒤에 오는 dict 가 yaml 의 같은 이름을 덮는다.
@@ -164,21 +202,34 @@ def generate_launch_description():
 
         Node(
             package=PACKAGE,
-            executable='path_follower_node',
-            name='path_follower',
+            executable='speed_controller_node',
+            name='speed_controller',
             output='screen',
-            arguments=['--ros-args', '--log-level', log_level],
+            arguments=common,
             parameters=[
                 params_file,
                 {
                     'use_sim_time': ParameterValue(
                         use_sim_time, value_type=bool),
 
-                    'speed.enabled': ParameterValue(
-                        adaptive_speed, value_type=bool),
+                    'speed.v_min': ParameterValue(speed, value_type=float),
 
-                    'speed.constant': ParameterValue(
-                        speed, value_type=float),
+                    'speed.v_max': ParameterValue(speed, value_type=float),
+                },
+            ],
+        ),
+
+        Node(
+            package=PACKAGE,
+            executable='steer_controller_node',
+            name='steer_controller',
+            output='screen',
+            arguments=common,
+            parameters=[
+                params_file,
+                {
+                    'use_sim_time': ParameterValue(
+                        use_sim_time, value_type=bool),
                 },
             ],
         ),

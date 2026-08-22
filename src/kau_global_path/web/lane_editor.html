@@ -73,6 +73,7 @@
     </div>
     <div class="row">
       <label><input type="checkbox" id="chkCurve"> 곡선 미리보기 (B)</label>
+      <label><input type="checkbox" id="chkCtrl"> 제어점 (P)</label>
     </div>
     <div class="note">
       끄면 노드를 직선으로 잇는다. 내보내는 lane_graph.yaml 은 두 모드가 같다 —
@@ -119,6 +120,36 @@
       <span class="note">투명도</span>
       <input type="number" id="trkAlpha" value="0.85" step="0.05" min="0" max="1">
       <button id="btnTrackReset">기본값</button>
+    </div>
+    <div class="row">
+      <span class="note">기준선</span>
+      <select id="cadSrc">
+        <option value="road_center">주행면 중심선 (global path)</option>
+        <option value="lane_outer">바깥 차로 중심 (참고)</option>
+        <option value="lane_inner">안쪽 차로 중심 (참고)</option>
+      </select>
+    </div>
+    <div class="row">
+      <button class="primary" id="btnCadPath">CAD 에서 경로 생성</button>
+      <span class="note">꼭짓점 R</span>
+      <input type="number" id="cadR" value="0.60" step="0.05" min="0.20"><span class="note">m</span>
+    </div>
+    <div class="row">
+      <span class="note">완만한 꼭짓점은 최대</span>
+      <input type="number" id="cadRcap" value="1.5" step="0.5" min="0.2"><span class="note">m 까지</span>
+    </div>
+    <div class="row">
+      <label><input type="checkbox" id="chkCadTrans" checked> 전이 구간 자동 삽입</label>
+      <input type="number" id="cadTrans" value="0.15" step="0.05" min="0.05"><span class="note">m</span>
+    </div>
+    <div class="note">
+      중심선은 <b>매끈한 곡선이 아니라 뾰족한 다각형</b>이다 (꺾임 6~92°).
+      차가 못 도는 각이라 꼭짓점마다 반지름 <b>R</b> 로 둥글린다. 직선이 짧아
+      R 을 못 채우는 자리는 토스트로 알려 준다.
+      <b>0.60 m</b> 면 |κ| 1.809 (한계 1.820 의 99 %) · 차선까지 여유 24 cm ·
+      C² 위반 0 이다. 0.50 은 |κ| 2.000 으로 <span class="bad">한계 초과</span>,
+      0.65 부터는 짧은 직진에서 반지름이 깎여 C² 가 깨진다.
+      생성 결과는 <b>직선 / 원호 세그먼트</b>로 바로 나뉘어 들어간다.
     </div>
     <div class="note">
       <code>map_x = ox − sim_y</code> · <code>map_y = sim_x − oy</code>.
@@ -248,15 +279,44 @@
       Object Detection ROI 는 <b>outer 안쪽 ∩ inner 바깥쪽</b> 고리다.
     </div>
     <div class="row">
-      <label>차로 폭 <input type="number" id="laneWidth" value="0.40" step="0.05" min="0.1"> m</label>
+      <label>주행면 폭 <input type="number" id="roadWidth" value="0.707" step="0.01" min="0.1"> m</label>
+    </div>
+    <div class="note">
+      CAD 실측값이 자동으로 들어온다 (중심선에서 양쪽 0.354 m).
+      <code>center</code> 엣지의 <code>width</code> 로 나간다.
+    </div>
+    <div class="row">
+      <label>차로 폭 <input type="number" id="laneWidth" value="0.354" step="0.05" min="0.1"> m</label>
+    </div>
+    <div class="note">
+      차로를 둘로 나눌 때만 쓴다 (지금 경로에는 안 쓴다). boundary 생성 간격도 이 값이다.
     </div>
     <div class="row">
       <button id="btnBnd">두 중심선에서 boundary 생성</button>
     </div>
 
-    <h2>검사</h2>
+    <h2>검사 — 곡률 한계</h2>
     <div class="row">
-      <label>곡률 경고 <input type="number" id="kappaLimit" value="2.0" step="0.1"> 1/m</label>
+      <span class="note">휠베이스 L</span>
+      <input type="number" id="vehL" value="0.18" step="0.01" min="0.01"><span class="note">m</span>
+      <span class="note">최대 조향 δ</span>
+      <input type="number" id="vehSteer" value="20" step="1" min="1"><span class="note">°</span>
+    </div>
+    <div class="row">
+      <span class="note">마진</span>
+      <input type="number" id="vehMargin" value="0.90" step="0.05" min="0.1" max="1">
+      <button id="btnVehReset">기본값</button>
+    </div>
+    <div class="note" id="vehInfo">—</div>
+    <div class="row">
+      <span class="note">쓰는 한계 κ</span>
+      <input type="number" id="kappaLimit" value="1.8199" step="0.01"><span class="note">1/m</span>
+    </div>
+    <div class="note">
+      kinematic bicycle model, <b>후륜축 중심</b> 기준:
+      <code>R = L / tan δ</code> · <code>κ = tan δ / L</code>.
+      한계를 넘는 세그먼트는 캔버스에서 <span class="bad">빨갛게</span> 그려진다.
+      위 세 값을 바꾸면 한계가 다시 계산되고, 한계 칸을 직접 고치면 그 값이 이긴다.
     </div>
     <div id="check" class="note"></div>
 
@@ -283,12 +343,13 @@
       <tr><td><kbd>Ctrl</kbd>+클릭 · <kbd>C</kbd></td><td>세그먼트 경계 토글</td></tr>
       <tr><td><kbd>Ctrl</kbd>+<kbd>Z</kbd> / <kbd>Y</kbd></td><td>되돌리기 / 다시</td></tr>
       <tr><td><kbd>휠</kbd> · <kbd>우드래그</kbd></td><td>확대 · 이동</td></tr>
-      <tr><td><kbd>1</kbd>~<kbd>4</kbd></td><td>레이어 전환</td></tr>
+      <tr><td><kbd>1</kbd>~<kbd>5</kbd></td><td>레이어 전환</td></tr>
       <tr><td><kbd>G</kbd> <kbd>T</kbd> <kbd>M</kbd></td><td>격자 · 궤적 · 지도 토글</td></tr>
       <tr><td><kbd>K</kbd></td><td>CAD 트랙 표시</td></tr>
       <tr><td><kbd>O</kbd> <kbd>I</kbd></td><td>참조 이미지 표시 · 맞춤 모드</td></tr>
       <tr><td><kbd>[</kbd> <kbd>]</kbd></td><td>참조 이미지 회전 (Shift = 5°)</td></tr>
       <tr><td><kbd>B</kbd></td><td>곡선 미리보기 토글 (끄면 직선)</td></tr>
+      <tr><td><kbd>P</kbd></td><td>제어점 6개 + 제어다각형 표시</td></tr>
     </table>
   </div>
   <div id="stage">
@@ -297,6 +358,6 @@
     <div id="toast"></div>
   </div>
 </div>
-<script src="lane_editor.js?v=20260821d"></script>
+<script src="lane_editor.js?v=20260821n"></script>
 </body>
 </html>

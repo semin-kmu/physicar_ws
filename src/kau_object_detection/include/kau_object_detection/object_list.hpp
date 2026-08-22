@@ -34,8 +34,9 @@ enum class ObjectListStatus : std::uint8_t
   kOk = 0U,
   kLidarUnavailable = 1U,
   kPoseUnavailable = 2U,
-  /// Reserved for the future tf2 based transform. Nothing in this package
-  /// produces it yet; the constant exists so the contract is complete.
+  /// The tf2 lookup of `object_list_frame_id <- scan.header.frame_id` at the
+  /// scan measurement time failed: unknown frame, disconnected tree, the stamp
+  /// is outside the buffer, or the transform itself is unusable.
   kTransformUnavailable = 3U,
   kInternalError = 4U,
 };
@@ -52,7 +53,11 @@ struct ObjectListOptions
   float confidence{1.0F};
 };
 
-/// Picks the status of one frame from the pipeline preconditions.
+/// Picks the status of one frame from the Gazebo world pose preconditions.
+///
+/// Simulator-only diagnostic path. The published Object List is decided by
+/// `decide_object_list_status_from_transform`; this overload is kept so the
+/// Gazebo world pose behaviour stays described and testable.
 ///
 /// The checks are ordered from the most upstream failure to the most
 /// downstream one, so the reported status names the earliest stage that broke.
@@ -65,6 +70,40 @@ ObjectListStatus decide_object_list_status(
   bool world_pose_fresh,
   bool track_ring_valid,
   bool roi_applied);
+
+/// Track-ROI-gated status decision of the tf2 transform path.
+///
+/// Retained, with its tests, for the day the real target-frame track boundaries
+/// are available; `decide_object_list_status_from_placement` below is what the
+/// node publishes on today. It replaces the world
+/// pose freshness check with the outcome of the `object_list_frame_id <-
+/// scan.header.frame_id` lookup at `scan.header.stamp`: without that transform
+/// there is no way to place a candidate in the target frame, and the frame is
+/// reported as `kTransformUnavailable` rather than as an empty observation.
+///
+/// The remaining checks keep the meaning they have above: an unusable track
+/// ring or a ROI stage that failed open is a configuration problem of this
+/// node, so it stays `kInternalError`.
+ObjectListStatus decide_object_list_status_from_transform(
+  bool scan_valid,
+  bool transform_available,
+  bool track_ring_valid,
+  bool roi_applied);
+
+/// Picks the status of one frame published from the tf2 placement path.
+///
+/// This is the decision the node actually publishes on. The track ROI no longer
+/// gates the output, so the track ring plays no part in it: a frame is usable
+/// exactly when the scan validated and the target frame transform was obtained
+/// at the scan measurement time.
+///
+/// `candidates_placed` is the last guard. It is false only when the placement
+/// stage failed open despite a transform it reported as valid, which would be
+/// an internal inconsistency of this node rather than a missing transform.
+ObjectListStatus decide_object_list_status_from_placement(
+  bool scan_valid,
+  bool transform_available,
+  bool candidates_placed);
 
 /// Builds one Object List message.
 ///

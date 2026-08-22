@@ -17,6 +17,10 @@ find_package(sensor_msgs REQUIRED)
 find_package(builtin_interfaces REQUIRED)
 find_package(kau_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
+# tf2 supplies the map <- scan frame transform the Object List is published in.
+find_package(geometry_msgs REQUIRED)
+find_package(tf2 REQUIRED)
+find_package(tf2_ros REQUIRED)
 # Start signal detection only needs core OpenCV plus JPEG decoding and colour
 # conversion. No cv_bridge: the compressed payload goes straight to cv::imdecode.
 find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs)
@@ -112,6 +116,24 @@ target_include_directories(track_roi PUBLIC
 target_link_libraries(track_roi track_geometry cone_occupancy)
 ament_target_dependencies(track_roi sensor_msgs)
 
+add_library(obstacle_tracker
+  src/obstacle_tracker.cpp
+)
+target_include_directories(obstacle_tracker PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
+
+add_library(object_list_transform
+  src/object_list_transform.cpp
+)
+target_include_directories(object_list_transform PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
+target_link_libraries(object_list_transform track_roi)
+ament_target_dependencies(object_list_transform sensor_msgs)
+
 add_library(object_list
   src/object_list.cpp
 )
@@ -161,6 +183,8 @@ target_link_libraries(
   track_roi
   world_pose
   object_list
+  object_list_transform
+  obstacle_tracker
 )
 ament_target_dependencies(
   laser_scan_clusterer_node
@@ -168,6 +192,9 @@ ament_target_dependencies(
   sensor_msgs
   kau_msgs
   builtin_interfaces
+  geometry_msgs
+  tf2
+  tf2_ros
 )
 
 add_executable(start_signal_detector_node
@@ -207,6 +234,8 @@ install(
     track_roi
     world_pose
     object_list
+    object_list_transform
+    obstacle_tracker
     start_signal_logic
     green_lamp_detector
     laser_scan_validator_node
@@ -304,6 +333,34 @@ if(BUILD_TESTING)
     ament_target_dependencies(test_object_list kau_msgs builtin_interfaces sensor_msgs)
   endif()
 
+  ament_add_gtest(test_object_list_transform
+    test/test_object_list_transform.cpp
+  )
+  if(TARGET test_object_list_transform)
+    target_link_libraries(
+      test_object_list_transform
+      object_list_transform
+      object_list
+      track_roi
+      track_geometry
+      cone_occupancy
+      cluster_geometry
+    )
+    ament_target_dependencies(
+      test_object_list_transform
+      kau_msgs
+      builtin_interfaces
+      sensor_msgs
+    )
+  endif()
+
+  ament_add_gtest(test_obstacle_tracker
+    test/test_obstacle_tracker.cpp
+  )
+  if(TARGET test_obstacle_tracker)
+    target_link_libraries(test_obstacle_tracker obstacle_tracker)
+  endif()
+
   ament_add_gtest(test_start_signal_logic
     test/test_start_signal_logic.cpp
   )
@@ -325,6 +382,8 @@ if(BUILD_TESTING)
 endif()
 
 ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)
-ament_export_dependencies(sensor_msgs kau_msgs builtin_interfaces std_msgs OpenCV)
+ament_export_dependencies(
+  sensor_msgs kau_msgs builtin_interfaces std_msgs OpenCV
+  geometry_msgs tf2 tf2_ros)
 
 ament_package()

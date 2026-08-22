@@ -17,7 +17,41 @@ const NCTRL = DEGREE + 1;
 
 // 사이드바 제목 옆에 찍는다. 브라우저가 옛 js 를 캐시하고 있는지
 // 한눈에 구분하려는 것이다. lane_editor.html 의 ?v= 와 같이 올린다.
-const BUILD = '20260821d';
+const BUILD = '20260821n';
+
+// 차량 제원. 곡률 한계는 여기서 유도한다 — 숫자를 손으로 박아 두면 차가 바뀌었을 때
+// 아무도 못 찾는다.
+//
+// kinematic bicycle model 에서 조향각 d 일 때 **후륜축 중심**의 회전반경은
+//
+//     R = L / tan(d),    kappa = tan(d) / L
+//
+// (순간회전중심이 후륜축 연장선 위에 있다. 전륜 중심으로 재면 L/sin(d) 라 더 크다.
+//  제어기 기준점이 후륜축 중심이므로 이쪽을 쓴다.)
+//
+// L = 0.18 m, d = 20 deg  ->  R_min 0.4945 m, kappa_max 2.0221 1/m
+//
+// margin 은 그 기하학적 한계에서 얼마나 물러설지다. 조향 슬랙·명령 포화·추종
+// 오차를 감안하면 한계에 붙여 설계하면 안 된다. 0.90 이면 조향 18.0 deg 에 해당한다.
+const VEH = { wheelbase: 0.18, maxSteerDeg: 20, margin: 0.90 };
+
+function kappaOfSteer(deg) {
+  return Math.tan(deg * Math.PI / 180) / VEH.wheelbase;
+}
+
+function steerOfKappa(k) {
+  return Math.atan(Math.abs(k) * VEH.wheelbase) * 180 / Math.PI;
+}
+
+// 기하학적 최대 곡률 (마진 없음)
+function kappaMax() { return kappaOfSteer(VEH.maxSteerDeg); }
+
+// 설계 한계. 이 값을 넘는 세그먼트는 빨갛게 표시된다.
+function curvLimit() {
+  const el = document.getElementById('kappaLimit');
+  const v = el ? parseFloat(el.value) : NaN;
+  return isNaN(v) || v <= 0 ? kappaMax() * VEH.margin : v;
+}
 
 const MAP_DIR = '../../kau_localization/maps/';
 const MAP_NAME = 'kau_v3';
@@ -26,9 +60,16 @@ const TRACK_JSON = '../config/amet2026_track.json';
 
 // ---------------------------------------------------------------- 상태
 
+// 발행되는 global path 는 **주행면 중심선 하나**다 (2026-08-21 결정, README 4.1.3).
+// 차로를 둘로 나눠 보지 않는다. lane_inner / lane_outer 는 나중에 차로 개념이
+// 필요해질 때를 위해 남겨 둔 것이고 지금 경로에는 안 쓴다.
+// 노드 id 대역. 레이어마다 100 번대로 띄워서 번호만 보고 어느 레이어인지 알게 한다.
+const LAYER_BASE = { center: 0, lane_inner: 100, lane_outer: 200, bnd_outer: 300, bnd_inner: 400 };
+
 const LAYER_DEFS = [
-  { id: 'lane_inner', label: '안쪽 차로 중심선', color: '#4ea3ff', kind: 'lane', lane: 'inner' },
-  { id: 'lane_outer', label: '바깥쪽 차로 중심선', color: '#ffb24e', kind: 'lane', lane: 'outer' },
+  { id: 'center', label: '주행면 중심선 (global path)', color: '#4ea3ff', kind: 'center', route: 'center_loop' },
+  { id: 'lane_inner', label: '안쪽 차로 중심선 (미사용)', color: '#63d0a8', kind: 'lane', lane: 'inner', route: 'inner_loop' },
+  { id: 'lane_outer', label: '바깥쪽 차로 중심선 (미사용)', color: '#ffb24e', kind: 'lane', lane: 'outer', route: 'outer_loop' },
   { id: 'bnd_outer', label: 'outer boundary (ROI)', color: '#5ac878', kind: 'boundary', side: 'outer' },
   { id: 'bnd_inner', label: 'inner boundary (ROI)', color: '#c878e0', kind: 'boundary', side: 'inner' },
 ];
@@ -39,14 +80,15 @@ const S = {
   lapSel: { inner: 'avg', outer: 'avg' }, // 'avg' | 바퀴 index
   lapAvg: { inner: null, outer: null },   // alignLaps 캐시
   layers: {},              // id -> {pts:[[x,y]], closed, visible}
-  active: 'lane_inner',
+  active: 'center',
   view: { scale: 1, tx: 0, ty: 0 },
-  show: { map: true, grid: true, traj: true, curve: false },
+  show: { map: true, grid: true, traj: true, curve: false, ctrl: false },
   undo: [], redo: [],
   hover: null,             // {layer, index}
   drag: null,
   cursor: null,            // [wx, wy]
   check: null,
+  segSel: -1,              // 세부를 펼쳐 볼 세그먼트
 
   // 참조 이미지. kau_v3 지도에는 벽밖에 안 찍힌다 — 차선은 바닥 테이프라
   // LiDAR 에 안 잡히기 때문이다 (README 4.3). 그래서 트랙 도면이나 위에서 찍은
@@ -442,7 +484,12 @@ function buildLayer(L, opts = {}) {
         (i === 0 ? f0 : (i === s.inner.length - 1 ? f1 : f)));
       s.ctrl = [];
       for (let i = 0; i + 1 < fr.length; i++) s.ctrl.push(hermiteToBezier(fr[i], fr[i + 1]));
-    } else if (s.type === 'arc' && s.O && !blend) {
+    } else if (s.type === 'arc' && s.O) {
+      // 평균 강제를 켜도 이 최적화는 그대로 돌린다. 예전에는 blend 일 때 건너뛰었는데,
+      // 그러면 sigma = 현길이 로 떨어져서 원호가 원에서 13 % 부풀고 그만큼 곡률이
+      // 올라간다 (R 0.60 경로에서 |k| 1.809 -> 2.043, 한계 초과 10 개). 평균으로
+      // 양 끝 (theta, kappa) 가 바뀌었더라도 "원에서 가장 덜 벗어나는 sigma" 는
+      // 여전히 쓸 만한 기준이고, 프레임이 안 바뀐 자리에서는 결과가 정확히 같다.
       s.scale = fitArcScale(f0, f1, s.O, s.R);
       s.ctrl = [hermiteToBezier(f0, f1, s.scale)];
     } else {
@@ -1170,11 +1217,37 @@ function pushUndo() {
   S.redo.length = 0;
 }
 
+// 저장본을 현재 레이어 구성에 **맞춰 넣는다.** 통째로 대입하면 안 된다 —
+// 나중에 레이어를 추가했을 때 그 레이어가 아예 없어져서 그리기부터 터진다.
+// (2026-08-21 에 center 레이어를 넣으면서 실제로 그렇게 됐다.)
 function restore(snap) {
   const o = JSON.parse(snap);
-  S.layers = o.layers;
-  S.active = o.active;
+  let src = o.layers || {};
+  let moved = false;
+
+  // 예전 저장본에는 center 가 없고 주행면 중심선이 lane_inner 에 들어 있었다.
+  // 그대로 옮긴다. 양쪽에 남겨 두면 같은 경로가 두 번 내보내진다.
+  if (!src.center && src.lane_inner && (src.lane_inner.pts || []).length) {
+    src = Object.assign({}, src, { center: src.lane_inner, lane_inner: null });
+    moved = true;
+  }
+
+  const next = {};
+  for (const d of LAYER_DEFS) {
+    const L = src[d.id];
+    next[d.id] = (L && Array.isArray(L.pts))
+      ? { pts: L.pts, closed: L.closed !== false, visible: L.visible !== false,
+          brk: Array.isArray(L.brk) ? L.brk : [], link: Array.isArray(L.link) ? L.link : [] }
+      : { pts: [], closed: true, visible: true, brk: [], link: [] };
+  }
+
+  S.layers = next;
+  // 옮겨 왔는데 활성 레이어가 그대로면 빈 lane_inner 를 보게 된다 — 노드가
+  // 사라진 것처럼 보이는 게 딱 이 경우다.
+  S.active = (moved && o.active === 'lane_inner') ? 'center'
+    : (next[o.active] ? o.active : LAYER_DEFS[0].id);
   renderLayers();
+  return moved;
 }
 
 function undo() {
@@ -1264,6 +1337,25 @@ function drawTrack() {
   if (L.inner_line) fillRings(L.inner_line.rings, '#eef2f8');
   if (L.center_line) fillRings(L.center_line.rings, '#ffd166');
   if (L.start_line) fillRings(L.start_line.rings, '#ff5f56');
+
+  // 노드 생성의 기준이 될 중심선을 얇게 덧그린다. 어느 선을 따라가는지
+  // 눈으로 확인하고 나서 생성하라는 뜻이다.
+  const sel = document.getElementById('cadSrc');
+  const cen = T.data.centerlines && sel && T.data.centerlines[sel.value];
+  if (cen && cen.pts) {
+    ctx.strokeStyle = '#54e6c8';
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([3, 3]);
+    ctx.beginPath();
+    cen.pts.forEach((p, i) => {
+      const q = worldToScreen(trackToMap(p));
+      i ? ctx.lineTo(q[0], q[1]) : ctx.moveTo(q[0], q[1]);
+    });
+    ctx.closePath();
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
   ctx.restore();
 }
 
@@ -1393,13 +1485,36 @@ function c2Bad(R) {
 
 const SEG_LABEL = { line: '직선', arc: '원호', link: '전이', free: '보간' };
 
+// 세그먼트 하나의 제어점 6 개를 그대로 펼친다. 현 위 비율과 현에서 벗어난
+// 거리를 같이 적는다 — 직선이면 비율이 0.2 간격으로 딱 떨어지고 벗어남이 0 이다.
+function ctrlRows(sg) {
+  const rows = [];
+  sg.ctrl.forEach((c, ci) => {
+    const A = c[0], Z = c[5];
+    const vx = Z[0] - A[0], vy = Z[1] - A[1];
+    const ch = Math.hypot(vx, vy) || 1;
+    rows.push(`<tr><td></td><td colspan="6" style="color:#ffd166">` +
+      `제어점 6 개${sg.ctrl.length > 1 ? ` (${ci + 1}/${sg.ctrl.length})` : ''} — ` +
+      `P0·P5 는 세그먼트 경계</td></tr>`);
+    c.forEach((q, i) => {
+      const t = ((q[0] - A[0]) * vx + (q[1] - A[1]) * vy) / (ch * ch);
+      const off = Math.abs(vx * (A[1] - q[1]) - (A[0] - q[0]) * vy) / ch;
+      const d = DISP.on ? toDisp(q) : q;
+      rows.push(`<tr><td></td><td colspan="6" style="color:#8b94a4">` +
+        `&nbsp;&nbsp;P${i} (${d[0].toFixed(3)}, ${d[1].toFixed(3)}) ` +
+        `· 현 ${t.toFixed(3)} · 벗어남 ${(off * 1000).toFixed(1)} mm</td></tr>`);
+    });
+  });
+  return rows.join('');
+}
+
 function drawLayer(def) {
   const L = S.layers[def.id];
-  if (!L.visible || !L.pts.length) return;
+  if (!L || !L.visible || !L.pts.length) return;
 
   const isActive = def.id === S.active;
   const R = buildLayer(L, segOpts());
-  const limit = parseFloat(document.getElementById('kappaLimit').value) || Infinity;
+  const limit = curvLimit();
   const brk = brkFlags(L);
   const bad = c2Bad(R);
 
@@ -1435,8 +1550,55 @@ function drawLayer(def) {
     ctx.stroke();
   }
 
+  // 폐곡선이 꺼진 채로 고리를 그리고 있으면, 안 이어진 자리를 빨간 점선으로
+  // 보여 준다. 아무 표시가 없으면 "노드는 다 찍었는데 왜 안 붙지" 가 된다.
+  if (!L.closed && L.pts.length >= 3) {
+    const a = worldToScreen(L.pts[L.pts.length - 1]);
+    const b = worldToScreen(L.pts[0]);
+    ctx.strokeStyle = 'rgba(255,95,86,.85)';
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([5, 4]);
+    ctx.beginPath();
+    ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
   ctx.setLineDash([]);
   ctx.restore();
+
+  // 제어점. 종류가 뭐든 (직선·원호·전이·보간) 발행되는 것은 전부 5차 Bezier 고
+  // 조각마다 제어점이 정확히 6 개다. P0/P5 는 세그먼트 경계와 같은 점이고
+  // P1~P4 는 곡선 위에 있지 않다 — 직선일 때만 우연히 현 위에 놓인다.
+  if (S.show.ctrl && isActive) {
+    ctx.save();
+    for (const sg of R.segs) {
+      for (const c of sg.ctrl) {
+        ctx.strokeStyle = 'rgba(255,209,102,.55)';
+        ctx.lineWidth = 1;
+        ctx.setLineDash([3, 3]);
+        ctx.beginPath();
+        c.forEach((q, i) => {
+          const t = worldToScreen(q);
+          i ? ctx.lineTo(t[0], t[1]) : ctx.moveTo(t[0], t[1]);
+        });
+        ctx.stroke();
+        ctx.setLineDash([]);
+        c.forEach((q, i) => {
+          const t = worldToScreen(q);
+          const edge = (i === 0 || i === 5);
+          ctx.beginPath();
+          ctx.rect(t[0] - 2.5, t[1] - 2.5, 5, 5);
+          ctx.fillStyle = edge ? '#ffd166' : '#14171c';
+          ctx.fill();
+          ctx.strokeStyle = '#ffd166';
+          ctx.lineWidth = 1;
+          ctx.stroke();
+        });
+      }
+    }
+    ctx.restore();
+  }
 
   // 노드. 세그먼트 경계는 사각형, 안쪽 노드는 동그라미다.
   ctx.save();
@@ -1536,11 +1698,13 @@ function updateHud() {
   document.getElementById('hud').textContent =
     `${def.label}\n` +
     `노드 ${L.pts.length}  세그먼트 ${R.legacy ? '—' : R.segs.length}` +
-    `  Bezier ${segs.length}  길이 ${total.toFixed(2)} m\n` +
+    `  Bezier ${segs.length} (제어점 ${segs.length * NCTRL})  길이 ${total.toFixed(2)} m\n` +
     (R.legacy ? '경계 미지정 — 전체를 한 덩어리로 보간 중\n'
               : `C² 위반 경계 ${nBad} / ${R.joints.length}` +
                 (forced ? `  (평균 강제 ${forced})` : '') + '\n') +
-    `max|k| ${kmax.toFixed(3)} 1/m  (R ${kmax > 1e-6 ? (1 / kmax).toFixed(2) : '∞'} m)\n` +
+    `max|k| ${kmax.toFixed(3)} 1/m  (R ${kmax > 1e-6 ? (1 / kmax).toFixed(2) : '∞'} m` +
+    `  δ ${steerOfKappa(kmax).toFixed(1)}°)  한계 ${curvLimit().toFixed(3)}` +
+    `${kmax > curvLimit() ? '  << 초과' : ''}\n` +
     (c ? (DISP.on
       ? `커서 X ${toDisp(c)[0].toFixed(3)}  Y ${toDisp(c)[1].toFixed(3)} m  [구석 기준]\n` +
         `     map (${c[0].toFixed(3)}, ${c[1].toFixed(3)}) m`
@@ -1554,7 +1718,8 @@ function renderLayers() {
   box.innerHTML = '';
 
   LAYER_DEFS.forEach((d, i) => {
-    const L = S.layers[d.id];
+    const L = S.layers[d.id] || (S.layers[d.id] =
+      { pts: [], closed: true, visible: true, brk: [], link: [] });
     const el = document.createElement('div');
     el.className = 'layer' + (d.id === S.active ? ' active' : '');
     el.innerHTML =
@@ -1580,12 +1745,12 @@ function renderLayers() {
 }
 
 function runCheck() {
-  const limit = parseFloat(document.getElementById('kappaLimit').value) || Infinity;
+  const limit = curvLimit();
   const lines = [];
 
   for (const d of LAYER_DEFS) {
     const L = S.layers[d.id];
-    if (L.pts.length < 2) continue;
+    if (!L || L.pts.length < 2) continue;
 
     const R = buildLayer(L, segOpts());
     const segs = [];
@@ -1601,12 +1766,23 @@ function runCheck() {
 
     const nBad = c2Bad(R).size;
     const cls = (bad || nBad) ? 'bad' : 'ok';
+    const kcls = kmax > limit ? 'bad' : 'ok';
     lines.push(
       `<span class="${cls}">${d.label}</span>: ` +
       `${R.legacy ? segs.length + ' seg(경계 미지정)' : R.segs.length + ' 세그먼트'} · ` +
-      `${total.toFixed(2)} m · max|k| ${kmax.toFixed(3)}` +
+      `${total.toFixed(2)} m · ` +
+      `<span class="${kcls}">max|k| ${kmax.toFixed(3)}</span> ` +
+      `(δ ${steerOfKappa(kmax).toFixed(1)}° / 한계 ${steerOfKappa(limit).toFixed(1)}° · ` +
+      `한계의 ${(kmax / limit * 100).toFixed(0)}%)` +
       (bad ? ` · <span class="bad">곡률초과 ${bad}</span>` : '') +
-      (nBad ? ` · <span class="bad">C² 위반 ${nBad}</span>` : ''));
+      (nBad ? ` · <span class="bad">C² 위반 ${nBad}</span>` : '') +
+      // 폐곡선이 꺼져 있으면 마지막 노드와 첫 노드 사이가 아예 안 그려지고
+      // 발행도 안 된다. 화면만 보면 "왜 안 이어지지" 로 보이므로 못 박아 둔다.
+      (!L.closed && L.pts.length >= 3
+        ? `<br>&nbsp;&nbsp;<span class="bad">열린 곡선 — n${L.pts.length - 1} 과 n0 이 안 이어진다 ` +
+          `(간격 ${dist(L.pts[L.pts.length - 1], L.pts[0]).toFixed(3)} m). ` +
+          `폐곡선 체크박스를 켤 것</span>`
+        : ''));
   }
 
   document.getElementById('check').innerHTML =
@@ -1631,7 +1807,7 @@ function renderSegList() {
   }
 
   const tol = c2Tol();
-  const limit = parseFloat(document.getElementById('kappaLimit').value) || Infinity;
+  const limit = curvLimit();
   const rows = [];
 
   R.segs.forEach((sg, j) => {
@@ -1650,11 +1826,13 @@ function renderSegList() {
       `<td>${len.toFixed(2)}m</td>` +
       `<td class="${hot ? 'bad' : ''}">k${kmax.toFixed(2)}</td>` +
       `<td>${sg.dev > 0.001 ? `<span class="bad">Δ${(sg.dev * 100).toFixed(1)}cm</span>` : ''}</td>` +
+      `<td><button data-seg="${j}">P6${sg.ctrl.length > 1 ? `x${sg.ctrl.length}` : ''}</button></td>` +
       `<td>${sg.idx.length === 2
         ? `<button data-link="${sg.idx[0]}">${sg.type === 'link' ? '전이해제' : '전이로'}</button>`
         : ''}</td>` +
       `</tr>` +
-      (jt ? `<tr><td></td><td colspan="5" class="${gap ? 'bad' : 'ok'}">` +
+      (S.segSel === j ? ctrlRows(sg) : '') +
+      (jt ? `<tr><td></td><td colspan="6" class="${gap ? 'bad' : 'ok'}">` +
         `└ 경계 n${jt.node}: Δθ ${(jt.dth * 180 / Math.PI).toFixed(2)}° · ` +
         `Δκ ${jt.dk.toFixed(3)} 1/m` +
         (bad ? ' — C² 아님' : (gap ? ' — 평균으로 강제 (직선이 휜다)' : '')) +
@@ -1662,6 +1840,14 @@ function renderSegList() {
   });
 
   box.innerHTML = `<table class="segs">${rows.join('')}</table>`;
+
+  box.querySelectorAll('button[data-seg]').forEach((b) => {
+    b.onclick = () => {
+      const j = parseInt(b.getAttribute('data-seg'), 10);
+      S.segSel = S.segSel === j ? -1 : j;
+      renderSegList();
+    };
+  });
 
   box.querySelectorAll('button[data-link]').forEach((b) => {
     b.onclick = () => {
@@ -1852,13 +2038,18 @@ window.addEventListener('keydown', (e) => {
 
   if ((e.ctrlKey || e.metaKey) && k === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
   if ((e.ctrlKey || e.metaKey) && k === 'y') { e.preventDefault(); redo(); return; }
-  if (k >= '1' && k <= '4') {
+  if (k >= '1' && k <= '5') {
     S.active = LAYER_DEFS[parseInt(k, 10) - 1].id; renderLayers(); draw(); return;
   }
   if (k === 'g') { S.show.grid = !S.show.grid; draw(); }
   if (k === 't') { S.show.traj = !S.show.traj; draw(); }
   if (k === 'm') { S.show.map = !S.show.map; draw(); }
   if (k === 'b') { setCurvePreview(!S.show.curve); }
+  if (k === 'p') {
+    S.show.ctrl = !S.show.ctrl;
+    document.getElementById('chkCtrl').checked = S.show.ctrl;
+    draw();
+  }
   if (k === 'c' && S.hover) {
     pushUndo();
     const L = S.layers[S.active];
@@ -1903,13 +2094,36 @@ function autosave() {
 function loadAutosave() {
   const s = localStorage.getItem('kau_lane_graph');
   if (!s) return false;
-  try { restore(s); return true; } catch (e) { return false; }
+  try {
+    if (restore(s)) {
+      toast(`예전 자동저장을 옮겨 왔다: lane_inner -> center ` +
+            `(노드 ${S.layers.center.pts.length} 개)`);
+    }
+    return true;
+  } catch (e) {
+    console.warn('자동저장 복원 실패', e);
+    return false;
+  }
 }
 
+// 노드·지도 원점처럼 서로 멀리 떨어진 값. 0.1 mm 면 충분하다.
 function fmt(v) { return v.toFixed(4); }
+
+// **제어점은 훨씬 촘촘하게 적어야 한다.**
+//
+// 곡률은 제어점의 2차 차분에서 나온다. 짧은 조각(전이 0.15 m, 심하면 0.024 m)은
+// 제어점 간격이 3 cm ~ 5 mm 밖에 안 되는데, 거기서 0.1 mm 로 반올림하면 2차
+// 차분이 25 % 씩 흔들린다. 실측으로 kappa 가 최대 0.75 1/m 틀어졌다 —
+// 곡선은 멀쩡한데 파일에 적힌 숫자만 망가지는, 알아채기 제일 어려운 종류다.
+//
+//   소수 4자리 -> kappa 오차 0.754   5자리 -> 0.030   6자리 -> 0.0075   7자리 -> 0.0033
+//
+// 7 자리(0.1 um)로 적는다. 파일이 몇 KB 커질 뿐이다.
+function fmtC(v) { return v.toFixed(7); }
 
 function exportLaneGraph() {
   const width = parseFloat(document.getElementById('laneWidth').value) || 0.4;
+  const roadWidth = parseFloat(document.getElementById('roadWidth').value) || 0.707;
   const lines = [];
 
   lines.push('# kau_global_path lane_graph — lane_editor.html 로 생성');
@@ -1928,7 +2142,7 @@ function exportLaneGraph() {
 
   // 노드 id 는 레이어마다 100 번대로 띄운다. 나중에 lane_change 엣지를 손으로
   // 추가할 때 어느 lane 의 노드인지 번호만 보고 알 수 있어야 한다.
-  const base = { lane_inner: 0, lane_outer: 100, bnd_outer: 200, bnd_inner: 300 };
+  const base = LAYER_BASE;
   const ids = {};
 
   lines.push('  nodes:');
@@ -1949,9 +2163,11 @@ function exportLaneGraph() {
     if (L.pts.length < 2) continue;
     const n = L.pts.length;
     const last = L.closed ? n : n - 1;
-    const tag = d.kind === 'lane'
-      ? `type: lane, lane: ${d.lane}, width: ${width.toFixed(2)}, direction: forward`
-      : `type: boundary, side: ${d.side}`;
+    const tag = d.kind === 'center'
+      ? `type: center, width: ${roadWidth.toFixed(3)}, direction: forward`
+      : (d.kind === 'lane'
+        ? `type: lane, lane: ${d.lane}, width: ${width.toFixed(3)}, direction: forward`
+        : `type: boundary, side: ${d.side}`);
     lines.push(`    # ${d.label}`);
     for (let i = 0; i < last; i++) {
       lines.push(`    - {from: ${ids[d.id][i]}, to: ${ids[d.id][(i + 1) % n]}, ${tag}}`);
@@ -1964,13 +2180,14 @@ function exportLaneGraph() {
   lines.push('  #   - {from: 12, to: 105, type: lane_change}');
   lines.push('');
   lines.push('  routes:');
+  lines.push('  # 기본 경로는 center_loop 다. 차로를 둘로 나눠 보지 않는다 (README 4.1.3).');
   for (const d of LAYER_DEFS) {
-    if (d.kind !== 'lane') continue;
+    if (d.kind !== 'center' && d.kind !== 'lane') continue;
     const L = S.layers[d.id];
     if (L.pts.length < 2) continue;
     const seq = ids[d.id].slice();
     if (L.closed) seq.push(seq[0]);
-    lines.push(`    ${d.lane}_loop: [${seq.join(', ')}]`);
+    lines.push(`    ${d.route}: [${seq.join(', ')}]`);
   }
 
   lines.push('');
@@ -2015,8 +2232,8 @@ function exportLaneGraph() {
       sg.ctrl.forEach((c) => {
         lines.push(`      - {type: ${sg.type}, ` +
           `from: ${base[d.id] + sg.idx[0]}, to: ${base[d.id] + sg.idx[sg.idx.length - 1]}, ` +
-          `length: ${fmt(segLength(c))}, kappa_max: ${fmt(segKappaMax(c))},`);
-        lines.push(`         ctrl: [${c.map((q) => `[${fmt(q[0])}, ${fmt(q[1])}]`).join(', ')}]}`);
+          `length: ${segLength(c).toFixed(6)}, kappa_max: ${segKappaMax(c).toFixed(6)},`);
+        lines.push(`         ctrl: [${c.map((q) => `[${fmtC(q[0])}, ${fmtC(q[1])}]`).join(', ')}]}`);
       });
     });
   }
@@ -2093,6 +2310,11 @@ function exportBoundary() {
 }
 
 // 우리가 쓴 lane_graph.yaml 만 다시 읽는다. 일반 YAML 파서가 아니다.
+//
+// 주의: 2026-08-21 에 id 대역이 바뀌었다. 예전에는 lane_inner 가 0 번대였고 지금은
+// center 가 0 번대다. 그 전에 내보낸 파일을 열면 lane_inner 에 있던 점열이
+// center 로 들어온다 — 우리 경우엔 거기 있던 게 주행면 중심선이라 그게 맞다.
+// 진짜 차로 두 개짜리 옛 파일을 열 일이 생기면 id 를 손으로 100 씩 밀어야 한다.
 function importLaneGraph(text) {
   const nodes = new Map();
   const re = /-\s*\{\s*id:\s*(\d+)\s*,\s*x:\s*([-\d.eE+]+)\s*,\s*y:\s*([-\d.eE+]+)/g;
@@ -2103,7 +2325,7 @@ function importLaneGraph(text) {
   if (!nodes.size) { toast('노드를 못 찾았다'); return; }
 
   pushUndo();
-  const base = { lane_inner: 0, lane_outer: 100, bnd_outer: 200, bnd_inner: 300 };
+  const base = LAYER_BASE;
 
   for (const d of LAYER_DEFS) {
     const pts = [];
@@ -2236,6 +2458,182 @@ function loadOverlayStored() {
   img.src = url;
 }
 
+// ---------------------------------------------------------------- CAD 경로 생성
+
+// CAD 중심선은 매끈한 곡선이 아니다. **곧은 구간과 뾰족한 꼭짓점으로 된 다각형**에
+// 완만한 원호 몇 개가 섞인 모양이고, 꼭짓점 꺾임각이 6 ~ 92 도다. 차는 그걸
+// 그대로 못 돈다 (최소회전반경 0.494 m). 그래서 꼭짓점마다 반지름 Rf 의 원호로
+// 둥글린다 — 토목에서 도로 평면선형 잡는 것과 같은 방식이다.
+//
+// 접선길이 T = Rf * |tan(Δ/2)| 를 양쪽 직선에서 떼어 쓴다. 이웃한 두 꼭짓점의
+// T 합이 사이 직선보다 길면 둘 다 같은 비율로 줄인다 — 한쪽만 줄이면 그 꼭짓점만
+// 유난히 뾰족해진다. 다 줄이고도 모자란 자리는 반지름이 목표에 못 미치니 그대로
+// 보고한다 (숨기면 발행하고 나서 못 도는 코너를 만나게 된다).
+function cadCorner(v, prevOut, nextIn, Rf, gentleDeg, Rcap) {
+  const u = [v[0] - prevOut[0], v[1] - prevOut[1]];
+  const w = [nextIn[0] - v[0], nextIn[1] - v[1]];
+  const nu = Math.hypot(u[0], u[1]);
+  const nw = Math.hypot(w[0], w[1]);
+  if (nu < 1e-9 || nw < 1e-9) return null;
+
+  u[0] /= nu; u[1] /= nu;
+  w[0] /= nw; w[1] /= nw;
+
+  const d = Math.atan2(u[0] * w[1] - u[1] * w[0], u[0] * w[0] + u[1] * w[1]);
+  const tanHalf = Math.abs(Math.tan(d / 2));
+  if (tanHalf < 1e-6) return null;         // 사실상 직선
+
+  // 완만한 꼭짓점은 반지름을 키운다. CAD 의 완만한 곡선(R 1.5 ~ 3.8 m)이
+  // 여기서는 작은 각의 꼭짓점 몇 개로 나타나는데, 전부 Rf 로 둥글리면 원래
+  // 완만하던 자리가 |κ| = 1/Rf 까지 올라간다. 접선길이는 T = R tan(Δ/2) 라
+  // 각이 작으면 R 을 키워도 거의 안 먹는다.
+  const tgt = Math.abs(d) * 180 / Math.PI <= gentleDeg ? Math.max(Rf, Rcap) : Rf;
+  return { v, u, w, d, tanHalf, T: tgt * tanHalf, R: tgt, floor: Rf * tanHalf,
+           runIn: nu, runOut: nw };
+}
+
+function arcThrough(A, B, R, left) {
+  // A 에서 B 로 반지름 R 로 휘어 가는 원호의 중심과 중점.
+  //
+  // 곡률 중심은 **진행 방향의 안쪽**에 있다. 좌회전이면 현 A->B 의 왼쪽,
+  // 우회전이면 오른쪽이다. 부호를 뒤집으면 반지름은 맞는데 코너를 안쪽으로
+  // 자르는 대신 바깥으로 부풀어서, 접선 방향이 통째로 뒤집힌 원호가 나온다.
+  const ux = B[0] - A[0], uy = B[1] - A[1];
+  const c = Math.hypot(ux, uy);
+  if (c < 1e-12 || c > 2 * R) return null;
+  const mx = (A[0] + B[0]) / 2, my = (A[1] + B[1]) / 2;
+  const h = Math.sqrt(Math.max(0, R * R - c * c / 4));
+  const nx = -uy / c, ny = ux / c;              // 현의 왼쪽 법선
+  const sgn = left ? 1 : -1;
+  const cen = [mx + sgn * h * nx, my + sgn * h * ny];
+  const dx = mx - cen[0], dy = my - cen[1];
+  const dn = Math.hypot(dx, dy) || 1;
+  return { cen, mid: [cen[0] + R * dx / dn, cen[1] + R * dy / dn] };
+}
+
+// 골격 -> 노드 + 세그먼트 플래그. 편집기의 세그먼트 모델과 그대로 맞는다.
+//   직선 구간 -> 노드 2 개짜리 line
+//   원호(CAD 본래 것 + 꼭짓점 필렛) -> 노드 3 개짜리 arc
+function buildCadPath(sk, Rf, opts = {}) {
+  const margin = opts.margin ?? 0.02;
+  const n = sk.length;
+  const P = (q) => trackToMap(q);
+  const entry = (it) => P(it.kind === 'arc' ? it.p0 : it.p);
+  const exitp = (it) => P(it.kind === 'arc' ? it.p1 : it.p);
+
+  const gentle = opts.gentleDeg ?? 20;
+  const Rcap = opts.Rcap ?? 1.5;
+
+  const info = sk.map((it, i) => it.kind === 'corner'
+    ? cadCorner(P(it.p), exitp(sk[(i - 1 + n) % n]), entry(sk[(i + 1) % n]), Rf, gentle, Rcap)
+    : null);
+
+  // 접선길이 나눠 쓰기. 이웃한 두 꼭짓점의 T 합이 사이 직선보다 길면 줄인다.
+  // **Rf 위로 키워 놓은 쪽부터 먼저 깎는다** — 비례로 줄이면 급한 코너가
+  // 완만한 코너 때문에 같이 작아져서, 정작 못 도는 자리가 생긴다.
+  for (let pass = 0; pass < 60; pass++) {
+    let changed = false;
+    for (let i = 0; i < n; i++) {
+      const a = info[i];
+      if (!a) continue;
+      const b = info[(i + 1) % n];
+      const avail = a.runOut - margin;
+      let need = a.T + (b ? b.T : 0);
+      if (need <= avail || need <= 1e-9) continue;
+
+      let over = need - avail;
+      for (const x of [a, b].filter(Boolean).sort((p, q) => (q.T - q.floor) - (p.T - p.floor))) {
+        const slack = Math.max(0, x.T - x.floor);
+        const cut = Math.min(over, slack);
+        x.T -= cut; over -= cut;
+      }
+      if (over > 1e-12) {
+        const tot = a.T + (b ? b.T : 0);
+        const f = tot > 1e-12 ? Math.max(0, avail) / tot : 0;
+        a.T *= f;
+        if (b) b.T *= f;
+      }
+      a.R = a.T / a.tanHalf;
+      if (b) b.R = b.T / b.tanHalf;
+      changed = true;
+    }
+    if (!changed) break;
+  }
+
+  // 원호 조각들. 사이는 직선이다.
+  const els = [];
+  let kmax = 0, rmin = Infinity, clamped = 0;
+
+  for (let i = 0; i < n; i++) {
+    const it = sk[i];
+    if (it.kind === 'arc') {
+      els.push({ A: P(it.p0), M: P(it.pm), B: P(it.p1) });
+      kmax = Math.max(kmax, 1 / it.R);
+      rmin = Math.min(rmin, it.R);
+      continue;
+    }
+    const a = info[i];
+    if (!a) continue;
+
+    const A = [a.v[0] - a.u[0] * a.T, a.v[1] - a.u[1] * a.T];
+    const B = [a.v[0] + a.w[0] * a.T, a.v[1] + a.w[1] * a.T];
+    const g = arcThrough(A, B, a.R, a.d > 0);
+    if (!g) continue;
+
+    els.push({ A, M: g.mid, B });
+    kmax = Math.max(kmax, 1 / a.R);
+    rmin = Math.min(rmin, a.R);
+    if (a.R < Rf - 1e-4) clamped++;
+  }
+
+  // 노드로 편다. 원호는 (A, M, B) 세 개, 사이 직선은 B -> 다음 A 다.
+  //
+  // 전이를 켜면 직선 양 끝에서 Lt 씩 떼어 link 세그먼트로 만든다. 직선(κ=0)과
+  // 원호(κ=1/R)는 맞닿는 한 C² 가 안 되므로, 그 사이에서 곡률을 흡수할 구간이
+  // 있어야 조향각이 계단으로 튀지 않는다 (4.4.1).
+  const Lt = opts.transition || 0;
+  const pts = [], brk = [], link = [];
+  const push = (p, b, l) => {
+    if (pts.length && dist(pts[pts.length - 1], p) < 0.002) { brk[brk.length - 1] = brk[brk.length - 1] || b; return; }
+    pts.push(p); brk.push(b); link.push(!!l);
+  };
+
+  const m = els.length;
+  let short = 0, links = 0;
+
+  for (let i = 0; i < m; i++) {
+    const e = els[i];
+    push(e.A, true, false);
+    push(e.M, false, false);
+    push(e.B, true, false);
+
+    if (!Lt) continue;
+
+    const nx = els[(i + 1) % m].A;
+    const Ls = dist(e.B, nx);
+    if (Ls < 0.02) continue;
+
+    const u = [(nx[0] - e.B[0]) / Ls, (nx[1] - e.B[1]) / Ls];
+
+    if (Ls >= 2 * Lt + 0.05) {
+      link[link.length - 1] = true;                       // B -> P1 = 전이
+      push([e.B[0] + u[0] * Lt, e.B[1] + u[1] * Lt], true, false);   // P1 -> P2 = 직선
+      push([nx[0] - u[0] * Lt, nx[1] - u[1] * Lt], true, true);      // P2 -> A' = 전이
+      links += 2;
+    } else {
+      link[link.length - 1] = true;                       // 직선이 짧다. 통째로 전이
+      links++;
+      short++;
+    }
+  }
+
+  if (pts.length > 2 && dist(pts[0], pts[pts.length - 1]) < 0.002) {
+    pts.pop(); brk.pop(); link.pop();
+  }
+
+  return { pts, brk, link, kmax, rmin, clamped, arcs: m, links, shortStraights: short };
+}
+
 function trackInputs() {
   const T = S.track;
   document.getElementById('trkOx').value = T.ox.toFixed(3);
@@ -2274,6 +2672,13 @@ function loadTrackFromServer() {
     return r.json();
   }).then((doc) => {
     S.track.data = doc;
+
+    // 주행면 폭은 CAD 에서 잰 값을 그대로 쓴다. 예전 차로폭 기본값 0.40 을
+    // 남겨 두면 내보낸 파일이 실측과 어긋난다.
+    const rc = doc.centerlines && doc.centerlines.road_center;
+    if (rc && rc.corridor_half_width_m) {
+      document.getElementById('roadWidth').value = (rc.corridor_half_width_m * 2).toFixed(3);
+    }
     // 파일이 들고 있는 기본 정렬값. 사용자가 손댄 적 있으면 그쪽이 이긴다.
     let saved = null;
     try { saved = JSON.parse(localStorage.getItem('kau_track') || 'null'); } catch (e) { /* 무시 */ }
@@ -2312,6 +2717,8 @@ function setCurvePreview(on) {
   document.getElementById('chkCurve').checked = on;
   draw();
 }
+document.getElementById('chkCtrl').checked = S.show.ctrl;
+document.getElementById('chkCtrl').onchange = (e) => { S.show.ctrl = e.target.checked; draw(); };
 document.getElementById('chkCurve').checked = S.show.curve;
 document.getElementById('chkCurve').onchange = (e) => setCurvePreview(e.target.checked);
 
@@ -2348,7 +2755,7 @@ document.getElementById('lapPick').onchange = (e) => {
 
 function seedGuard() {
   const def = LAYER_DEFS.find((d) => d.id === S.active);
-  if (def.kind !== 'lane') { toast('차로 중심선 레이어에서만 쓴다'); return null; }
+  if (def.kind !== 'lane') { toast('주행 기록이 있는 차로 레이어에서만 쓴다 (지금 경로는 CAD 에서 만든다)'); return null; }
   if (!S.laps[def.lane].length) {
     toast(`data/${def.lane}_1.csv 가 없다 — record_trajectory.py 로 먼저 주행`);
     return null;
@@ -2375,7 +2782,7 @@ document.getElementById('btnSeedAdapt').onclick = () => {
 
 document.getElementById('btnSeed').onclick = () => {
   const def = LAYER_DEFS.find((d) => d.id === S.active);
-  if (def.kind !== 'lane') { toast('차로 중심선 레이어에서만 쓴다'); return; }
+  if (def.kind !== 'lane') { toast('주행 기록이 있는 차로 레이어에서만 쓴다 (지금 경로는 CAD 에서 만든다)'); return; }
   if (!S.laps[def.lane].length) {
     toast(`data/${def.lane}_1.csv 가 없다 — record_trajectory.py 로 먼저 주행`);
     return;
@@ -2423,7 +2830,41 @@ document.getElementById('btnBnd').onclick = () => {
   toast('boundary 생성 — 벽/테이프 위치와 대조해서 손으로 다듬을 것');
 };
 
-document.getElementById('kappaLimit').onchange = () => { runCheck(); draw(); };
+// 차량 제원 -> 곡률 한계. 세 값 중 하나라도 바뀌면 다시 계산해서 kappaLimit 에
+// 써 넣는다. kappaLimit 자체도 여전히 손으로 고칠 수 있게 남겨 둔다 — 디버깅할 때
+// 한계만 잠깐 풀어 보고 싶은 경우가 있다.
+function applyVeh(recompute) {
+  VEH.wheelbase = parseFloat(document.getElementById('vehL').value) || 0.18;
+  VEH.maxSteerDeg = parseFloat(document.getElementById('vehSteer').value) || 20;
+  VEH.margin = parseFloat(document.getElementById('vehMargin').value) || 0.9;
+
+  const kmax = kappaMax();
+  const lim = kmax * VEH.margin;
+  if (recompute) document.getElementById('kappaLimit').value = lim.toFixed(4);
+
+  const cur = curvLimit();
+  document.getElementById('vehInfo').innerHTML =
+    `R_min = L/tan δ = ${(1 / kmax).toFixed(4)} m · ` +
+    `κ_max = ${kmax.toFixed(4)} 1/m<br>` +
+    `한계 = κ_max × ${VEH.margin.toFixed(2)} = <b>${lim.toFixed(4)} 1/m</b> ` +
+    `(R ${(1 / lim).toFixed(3)} m · δ ${steerOfKappa(lim).toFixed(1)}°)` +
+    (Math.abs(cur - lim) > 1e-6
+      ? `<br><span class="bad">지금 쓰는 한계는 ${cur.toFixed(4)} — 손으로 덮어썼다</span>` : '');
+
+  runCheck();
+  draw();
+}
+
+document.getElementById('kappaLimit').oninput = () => applyVeh(false);
+for (const id of ['vehL', 'vehSteer', 'vehMargin']) {
+  document.getElementById(id).oninput = () => applyVeh(true);
+}
+document.getElementById('btnVehReset').onclick = () => {
+  document.getElementById('vehL').value = '0.18';
+  document.getElementById('vehSteer').value = '20';
+  document.getElementById('vehMargin').value = '0.90';
+  applyVeh(true);
+};
 document.getElementById('chkBlend').onchange = () => { runCheck(); draw(); autosave(); };
 document.getElementById('c2Theta').onchange = () => { runCheck(); draw(); };
 document.getElementById('c2Kappa').onchange = () => { runCheck(); draw(); };
@@ -2485,6 +2926,43 @@ document.getElementById('chkTrackRoad').onchange = (e) => {
 for (const id of ['trkOx', 'trkOy', 'trkRot', 'trkAlpha']) {
   document.getElementById(id).oninput = trackApply;
 }
+document.getElementById('btnCadPath').onclick = () => {
+  const T = S.track;
+  if (!T.data || !T.data.centerlines) { toast('config/amet2026_track.json 이 없다'); return; }
+
+  const key = document.getElementById('cadSrc').value;
+  const c = T.data.centerlines[key];
+  if (!c || !c.skeleton) { toast(`${key} 골격이 없다 — extract_sim_track.py 를 다시 돌릴 것`); return; }
+
+  // 기준선과 레이어를 사람이 맞추게 두면 반드시 어긋난다. 기준선이 정하게 한다.
+  const target = { road_center: 'center', lane_outer: 'lane_outer', lane_inner: 'lane_inner' }[key];
+  if (target && S.active !== target) S.active = target;
+
+  const Rf = parseFloat(document.getElementById('cadR').value) || 0.60;
+  const Lt = document.getElementById('chkCadTrans').checked
+    ? (parseFloat(document.getElementById('cadTrans').value) || 0) : 0;
+  const Rcap = parseFloat(document.getElementById('cadRcap').value) || Rf;
+  const limit = curvLimit();
+  const r = buildCadPath(c.skeleton, Rf, { transition: Lt, Rcap });
+
+  pushUndo();
+  const L = S.layers[S.active];
+  nodeReset(L, r.pts);
+  L.brk = r.brk;
+  L.link = r.link;
+  L.closed = true;
+  renderLayers(); draw(); autosave();
+
+  const over = r.kmax > limit;
+  toast(`${c.label}: 노드 ${r.pts.length} · 원호 ${r.arcs} · 전이 ${r.links} · ` +
+    `R_min ${r.rmin.toFixed(3)} m (|k| ${r.kmax.toFixed(3)})` +
+    (r.clamped ? ` · 직선이 짧아 R 못 채운 꼭짓점 ${r.clamped}` : '') +
+    (r.shortStraights ? ` · 직선이 짧아 통째로 전이가 된 곳 ${r.shortStraights}` : '') +
+    (over ? ` · 곡률 한계 ${limit} 초과!` : ''));
+};
+
+document.getElementById('cadSrc').onchange = draw;
+
 document.getElementById('btnTrackReset').onclick = () => {
   const d = (S.track.data && S.track.data.sim_to_map) || { ox: 3.68, oy: 1.39, rot_deg: 0 };
   S.track.ox = d.ox; S.track.oy = d.oy; S.track.rot = (d.rot_deg || 0) * Math.PI / 180;
@@ -2563,6 +3041,7 @@ window.addEventListener('drop', async (e) => {
 
 window.addEventListener('resize', resize);
 
+applyVeh(true);
 renderLayers();
 loadAutosave();
 loadOverlayStored();

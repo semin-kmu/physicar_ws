@@ -14,7 +14,8 @@
 --
 -- PhysiCar 2D pure localization 설정.
 --
--- physicar_2d.lua 를 그대로 상속하므로 프레임/토픽/센서 튜닝은 동일하고,
+-- physicar_2d.lua 를 상속한다. 프레임/토픽/센서 튜닝은 동일하고
+-- (스캔매처 회전 가중치 하나만 아래에서 덮어쓴다),
 -- 지도를 새로 키우는 대신 -load_state_filename 으로 읽은 frozen submap 에
 -- 붙어서 위치만 추정한다. 두 파일은 같은 디렉터리에 있어야 include 가 풀린다.
 
@@ -31,7 +32,31 @@ POSE_GRAPH.optimize_every_n_nodes = 20
 
 -- 전역 재측위 샘플링. 초기 pose 를 안 주고 띄웠을 때 스스로 찾아오는 속도를
 -- 좌우한다. 올리면 빨리 찾지만 CPU 를 더 쓴다.
-POSE_GRAPH.global_sampling_ratio = 0.003
-POSE_GRAPH.constraint_builder.sampling_ratio = 0.3
+--
+-- 2026-08-22: cartographer 기본값(0.003 / 0.3)에서 낮췄다. tuning 문서가
+-- pure localization 에서 권하는 것이다 — frozen 궤적(지도)과 현재 궤적 사이에
+-- inter constraint 가 대량으로 생기므로 그걸 상쇄하라는 취지다.
+--   "we strongly decrease global_sampling_ratio and
+--    constraint_builder.sampling_ratio to compensate for the large number
+--    of constraints"  (cartographer_ros docs/source/tuning.rst)
+--
+-- 대가: /initialpose 를 안 주고 띄우면 전역 재탐색이 그만큼 느려진다.
+-- 리셋 대응은 scripts/reset_watcher.py 가 스폰 좌표를 쏘므로 영향이 없다.
+-- 되돌리려면 0.003 / 0.3 으로 되돌리면 된다 (= cartographer 기본값).
+POSE_GRAPH.global_sampling_ratio = 0.001             -- 기본 0.003
+POSE_GRAPH.constraint_builder.sampling_ratio = 0.1   -- 기본 0.3
+
+-- 2026-08-22: 회전 정합이 못 따라온다 (RViz 에서 회전할 때 스캔이 지도보다
+-- 늦게 돈다). 이 가중치는 ceres 비용에서 "prior(= pose extrapolator 가
+-- /odom 으로 외삽한 자세) 에서 얼마나 벗어나면 벌점을 줄지" 다. 높을수록
+-- 스캔이 말하는 회전 보정을 덜 받아들이고 prior 에 붙어 있는다. 낮추면
+-- 매처가 자유롭게 돌 수 있다.
+--
+-- 40 -> 10 (translation_weight 와 같은 수준). 40 은 cartographer 기본값이다.
+-- 매핑(physicar_2d.lua) 은 40 그대로 둔다 — kau_v3 는 그 값으로 만든 지도다.
+--
+-- 너무 낮추면 빈 벽에서 매처가 과하게 돌아 자세가 떨 수 있다. 떨리면
+-- 20 으로 되돌리고, 그래도 느리면 원인이 여기가 아니다 (EKF yaw 를 볼 것).
+TRAJECTORY_BUILDER_2D.ceres_scan_matcher.rotation_weight = 10.   -- 기본 40.
 
 return options

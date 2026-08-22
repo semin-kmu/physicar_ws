@@ -53,6 +53,31 @@ KauLaneDetectionNode::KauLaneDetectionNode()
             )
         );
 
+    // 장애물 가림 판정용 LaserScan. lidar_link 프레임.
+    // SensorDataQoS 로 받아야 발행측(BEST_EFFORT)과 맞는다.
+    scan_subscriber_ =
+        this->create_subscription<sensor_msgs::msg::LaserScan>(
+            "/scan_filtered",
+            rclcpp::SensorDataQoS(),
+            std::bind(
+                &KauLaneDetectionNode::scanCallback,
+                this,
+                std::placeholders::_1
+            )
+        );
+
+    // camera_pan_joint 실측 각도 (Pan 탐색 정착 판정용, 50Hz)
+    joint_state_subscriber_ =
+        this->create_subscription<sensor_msgs::msg::JointState>(
+            "/joint_states",
+            10,
+            std::bind(
+                &KauLaneDetectionNode::jointStateCallback,
+                this,
+                std::placeholders::_1
+            )
+        );
+
 
     // ============================================================
     // Publisher
@@ -67,18 +92,6 @@ KauLaneDetectionNode::KauLaneDetectionNode()
     bev_image_publisher_ =
         this->create_publisher<sensor_msgs::msg::Image>(
             "/kau_lane_detection/bev_image",
-            10
-        );
-
-    hls_binary_publisher_ =
-        this->create_publisher<sensor_msgs::msg::Image>(
-            "/kau_lane_detection/hls_binary",
-            10
-        );
-
-    combined_binary_publisher_ =
-        this->create_publisher<sensor_msgs::msg::Image>(
-            "/kau_lane_detection/combined_binary",
             10
         );
 
@@ -99,6 +112,15 @@ KauLaneDetectionNode::KauLaneDetectionNode()
     roi_overlay_publisher_ =
         this->create_publisher<sensor_msgs::msg::Image>(
             "/kau_lane_detection/bev_roi",
+            10
+        );
+
+
+    // Pan 기반 Lane Lost Recovery 명령 채널.
+    // physicar_driver_node 의 apply_pan() 이 절대각[rad]으로 받는다.
+    camera_pan_publisher_ =
+        this->create_publisher<std_msgs::msg::Float64>(
+            "/camera/pan",
             10
         );
 
@@ -278,7 +300,7 @@ KauLaneDetectionNode::KauLaneDetectionNode()
     yellow_hls_lo_ =
         this->declare_parameter<std::vector<int64_t>>(
             "yellow_hls_lo",
-            {15, 80, 150}
+            {15, 70, 150}
         );
 
     yellow_hls_hi_ =
@@ -290,7 +312,7 @@ KauLaneDetectionNode::KauLaneDetectionNode()
     white_hls_lo_ =
         this->declare_parameter<std::vector<int64_t>>(
             "white_hls_lo",
-            {0, 200, 0}
+            {0, 200, 20}
         );
 
     white_hls_hi_ =
@@ -786,6 +808,207 @@ KauLaneDetectionNode::KauLaneDetectionNode()
     max_lateral_cm_ =
         this->declare_parameter<double>(
             "max_lateral_cm",
+            0.0
+        );
+
+
+    // ============================================================
+    // 장애물 가림 판정 (obstacleOnSide 주석 참고)
+    // ============================================================
+
+    obstacle_pan_block_enable_ =
+        this->declare_parameter<bool>(
+            "obstacle_pan_block_enable",
+            true
+        );
+
+    obstacle_sector_min_deg_ =
+        this->declare_parameter<double>(
+            "obstacle_sector_min_deg",
+            5.0
+        );
+
+    obstacle_sector_max_deg_ =
+        this->declare_parameter<double>(
+            "obstacle_sector_max_deg",
+            60.0
+        );
+
+    obstacle_max_range_m_ =
+        this->declare_parameter<double>(
+            "obstacle_max_range_m",
+            1.5
+        );
+
+    obstacle_min_points_ =
+        static_cast<int>(
+            this->declare_parameter<int>(
+                "obstacle_min_points",
+                2
+            )
+        );
+
+    obstacle_scan_timeout_s_ =
+        this->declare_parameter<double>(
+            "obstacle_scan_timeout_s",
+            0.5
+        );
+
+
+    // ============================================================
+    // 시간축 강건화 (EMA)
+    //
+    // 게이트 하나로는 오탐과 미탐을 동시에 못 잡는다.
+    // 선언부(헤더) 주석에 근거를 적어 두었다.
+    // ============================================================
+
+    path_ema_enable_ =
+        this->declare_parameter<bool>(
+            "path_ema_enable",
+            true
+        );
+
+    // confidence = 1 인 프레임의 혼합 비율.
+    // 0.4 면 시상수가 약 2 프레임(14 Hz 에서 0.15 s)이다.
+    path_ema_alpha_ =
+        this->declare_parameter<double>(
+            "path_ema_alpha",
+            0.4
+        );
+
+    // 제어점 평균거리 기준. 차로 폭(31.25)의 절반쯤을 상한으로 둔다.
+    path_ema_gate_cm_ =
+        this->declare_parameter<double>(
+            "path_ema_gate_cm",
+            15.0
+        );
+
+    path_ema_relock_frames_ =
+        static_cast<int>(
+            this->declare_parameter<int>(
+                "path_ema_relock_frames",
+                5
+            )
+        );
+
+    // 14 Hz 이므로 14 프레임 = 1 초.
+    path_ema_reset_frames_ =
+        static_cast<int>(
+            this->declare_parameter<int>(
+                "path_ema_reset_frames",
+                14
+            )
+        );
+
+
+    // ============================================================
+    // Pan 기반 Lane Lost Recovery (설계 문서 ⑤)
+    //
+    // 한쪽 흰선이 pan_trigger_miss_frames_ 프레임 연속으로 안
+    // 잡히면 그 방향 한계까지 pan_rate_deg_s_ 로 부드럽게 훑고,
+    // 찾는 순간 그 각도에서 멈춘다. 도로가 다시 펴지면 복귀한다.
+    // pan_max_deg_ 까지 못 찾아도 포기하고 복귀한다.
+    // (updatePanSearch 구현부 주석 참고)
+    //
+    // pan_sign_ 은 하드웨어 실측 전까지는 추정값이라, 잘못
+    // 튀어나가는 걸 막기 위해 기본값은 꺼둔다. 첫 실기 테스트에서
+    // 카메라가 명령과 반대로 돌면 pan_sign_ 을 -1.0 으로 뒤집는다.
+    // ============================================================
+
+    pan_search_enable_ =
+        this->declare_parameter<bool>(
+            "pan_search_enable",
+            false
+        );
+
+    // 첫 명령은 여기로 한 번에 간다. 그 뒤 pan_step_deg_ 씩 전진.
+    pan_start_deg_ =
+        this->declare_parameter<double>(
+            "pan_start_deg",
+            15.0
+        );
+
+    // 시작 각도에서 못 찾았을 때의 한 스텝 회전량.
+    pan_step_deg_ =
+        this->declare_parameter<double>(
+            "pan_step_deg",
+            3.0
+        );
+
+    // 서보 하드리밋 ±30도 (physicar_driver_node MAX_PAN,
+    // URDF/SDF limit ±0.5236 rad). 그 안에서 전부 쓴다.
+    pan_max_deg_ =
+        this->declare_parameter<double>(
+            "pan_max_deg",
+            30.0
+        );
+
+    pan_settle_tol_deg_ =
+        this->declare_parameter<double>(
+            "pan_settle_tol_deg",
+            1.0
+        );
+
+    pan_trigger_miss_frames_ =
+        static_cast<int>(
+            this->declare_parameter<int>(
+                "pan_trigger_miss_frames",
+                3
+            )
+        );
+
+    // 실측 전 추정값. 첫 테스트에서 카메라가 명령과 반대로
+    // 돌면 -1.0 으로 바꾼다.
+    pan_sign_ =
+        this->declare_parameter<double>(
+            "pan_sign",
+            1.0
+        );
+
+
+    // 재검출 직후 추가로 더 돌릴 각도 [deg].
+    // 기본 0 = 찾은 그 각도에서 그대로 정지.
+    pan_overshoot_deg_ =
+        this->declare_parameter<double>(
+            "pan_overshoot_deg",
+            0.0
+        );
+
+
+    // 재검출 후 복귀 조건 (Holding). updatePanSearch 주석 참고.
+    // 화면 가장자리 여유 [deg]. 겨우 걸친 선은 "보인다" 로
+    // 치지 않는다 (차가 조금만 움직여도 다시 빠진다).
+    pan_return_fov_margin_deg_ =
+        this->declare_parameter<double>(
+            "pan_return_fov_margin_deg",
+            3.0
+        );
+
+    pan_return_confirm_frames_ =
+        static_cast<int>(
+            this->declare_parameter<int>(
+                "pan_return_confirm_frames",
+                3
+            )
+        );
+
+    // 직선 판정에 필요한 최소 추적점 수.
+    //
+    // 짧은 점열은 어떤 코너에서도 직선으로 보인다. 근거가
+    // 모자라면 "직선이 아니다" 가 아니라 "판정 불가" 로 다뤄
+    // 연속 카운트를 끊는다 (Holding 유지).
+    pan_return_min_points_ =
+        static_cast<int>(
+            this->declare_parameter<int>(
+                "pan_return_min_points",
+                10
+            )
+        );
+
+    // 0 이하 = 무한 대기 (직선을 만날 때까지 복귀하지 않는다).
+    pan_hold_timeout_s_ =
+        this->declare_parameter<double>(
+            "pan_hold_timeout_s",
             0.0
         );
 
@@ -1940,6 +2163,39 @@ void KauLaneDetectionNode::cameraInfoCallback(
         "Distortion coefficients: %zu values",
         msg->d.size()
     );
+}
+
+
+
+
+// ================================================================
+// JointState Callback
+//
+// physicar_driver_node 가 50Hz 로 camera_pan_joint 실측 각도를
+// 낸다 (rad, publish_joint_states 참고). pan 명령을 보냈다고
+// 그 즉시 그 각도에 가 있다고 가정하지 않고, 이 콜백이 채우는
+// actual_pan_deg_ 로 updatePanSearch() 가 정착을 판정한다.
+// ================================================================
+
+void KauLaneDetectionNode::jointStateCallback(
+    const sensor_msgs::msg::JointState::SharedPtr msg)
+{
+    for (
+        std::size_t i = 0;
+        i < msg->name.size() && i < msg->position.size();
+        ++i
+    )
+    {
+        if (msg->name[i] == "camera_pan_joint")
+        {
+            actual_pan_deg_ =
+                msg->position[i] * 180.0 / M_PI;
+
+            joint_state_received_ = true;
+
+            break;
+        }
+    }
 }
 
 
@@ -3326,6 +3582,1028 @@ KauLaneDetectionNode::CenterFix KauLaneDetectionNode::resolveCenterOffset(
 
 
 
+// ================================================================
+// 점열의 꺾임각 [deg]
+//
+// 앞 절반의 현과 뒤 절반의 현이 이루는 각. 점이 모자라거나
+// 현이 퇴화하면 -1 (판정 불가).
+//
+// 호모그래피가 직선을 직선으로 보내므로 BEV 좌표로 재도
+// "직선인가" 는 성립한다. 크기는 보존되지 않는다 (헤더 주석).
+// ================================================================
+
+double KauLaneDetectionNode::trackBendDeg(
+    const std::vector<cv::Point2d> & pts)
+{
+    // 절반씩 갈라 현을 두 개 만들려면 최소 4점.
+    if (pts.size() < 4)
+    {
+        return -1.0;
+    }
+
+
+    const std::size_t mid = pts.size() / 2;
+
+    const cv::Point2d d1 = pts[mid] - pts.front();
+
+    const cv::Point2d d2 = pts.back() - pts[mid];
+
+
+    if (
+        cv::norm(d1) < 1e-6 ||
+        cv::norm(d2) < 1e-6
+    )
+    {
+        return -1.0;
+    }
+
+
+    double diff =
+        std::atan2(d2.y, d2.x) - std::atan2(d1.y, d1.x);
+
+    while (diff > M_PI)
+    {
+        diff -= 2.0 * M_PI;
+    }
+
+    while (diff < -M_PI)
+    {
+        diff += 2.0 * M_PI;
+    }
+
+
+    return std::abs(diff) * 180.0 / M_PI;
+}
+
+
+
+
+// ================================================================
+// pan = 0 으로 되돌렸을 때 화면에 남는 점 수
+//
+// 설계 근거와 기하는 선언부(헤더) 주석 참고.
+// ================================================================
+
+int KauLaneDetectionNode::countVisibleAtZeroPan(
+    const std::vector<cv::Point2d> & track_px,
+    double pan_deg) const
+{
+    if (
+        track_px.empty() ||
+        !camera_calibrated_ ||
+        perspective_matrix_.empty()
+    )
+    {
+        return -1;
+    }
+
+
+    const double fx = camera_matrix_.at<double>(0, 0);
+
+    const double cx = camera_matrix_.at<double>(0, 2);
+
+    if (
+        !std::isfinite(fx) ||
+        fx <= 1e-6
+    )
+    {
+        return -1;
+    }
+
+
+    // BEV -> 원본 영상. 순수 2D 사상이라 pan 과 무관하게 정확하다.
+    cv::Mat inv;
+
+    if (!cv::invert(perspective_matrix_, inv))
+    {
+        return -1;
+    }
+
+
+    std::vector<cv::Point2f> bev;
+
+    bev.reserve(track_px.size());
+
+    for (const cv::Point2d & p : track_px)
+    {
+        bev.emplace_back(
+            static_cast<float>(p.x),
+            static_cast<float>(p.y)
+        );
+    }
+
+
+    std::vector<cv::Point2f> img;
+
+    cv::perspectiveTransform(bev, img, inv);
+
+
+    // 화면 반각. cx 가 곧 화면 중심이므로 그대로 쓴다.
+    const double half_fov = std::atan(cx / fx);
+
+    const double limit =
+        half_fov -
+        pan_return_fov_margin_deg_ * M_PI / 180.0;
+
+    if (limit <= 0.0)
+    {
+        return -1;
+    }
+
+
+    const double theta = pan_deg * M_PI / 180.0;
+
+
+    int visible = 0;
+
+    for (const cv::Point2f & q : img)
+    {
+        // 영상각 (오른쪽 +)
+        const double a =
+            std::atan(
+                (static_cast<double>(q.x) - cx) / fx
+            );
+
+        // pan = 0 일 때의 영상각
+        const double a0 = a - theta;
+
+        if (std::abs(a0) <= limit)
+        {
+            ++visible;
+        }
+    }
+
+
+    return visible;
+}
+
+
+
+
+// ================================================================
+// LaserScan 수신
+//
+// 판정에만 쓰므로 최신 한 장만 들고 있으면 된다. 단일 스레드
+// executor 라 콜백이 직렬화되므로 잠금은 없다.
+// ================================================================
+
+void KauLaneDetectionNode::scanCallback(
+    const sensor_msgs::msg::LaserScan::SharedPtr msg)
+{
+    last_scan_ = msg;
+}
+
+
+
+
+// ================================================================
+// 소실된 쪽에 차선을 가릴 만한 장애물이 있는가
+//
+// 설계 근거는 선언부(헤더) 주석 참고.
+// ================================================================
+
+bool KauLaneDetectionNode::obstacleOnSide(
+    int dir,
+    const rclcpp::Time & frame_stamp) const
+{
+    if (
+        !obstacle_pan_block_enable_ ||
+        !last_scan_ ||
+        dir == 0
+    )
+    {
+        return false;
+    }
+
+
+    // 오래된 scan 으로는 판단하지 않는다 (fail-open).
+    //
+    // 기준은 node clock 이 아니라 지금 처리 중인 영상의 시각이다
+    // (선언부 주석 참고). 영상과 scan 은 스탬프 출처가 같으므로
+    // use_sim_time 설정과 무관하게 성립한다.
+    const double age =
+        (frame_stamp -
+         rclcpp::Time(last_scan_->header.stamp)).seconds();
+
+    if (
+        age < 0.0 ||
+        age > obstacle_scan_timeout_s_
+    )
+    {
+        RCLCPP_WARN_THROTTLE(
+            this->get_logger(),
+            *this->get_clock(),
+            5000,
+            "LaserScan 이 %.2fs 됐다 (상한 %.2f). "
+            "장애물 가림 판정을 건너뛴다.",
+            age,
+            obstacle_scan_timeout_s_
+        );
+
+        return false;
+    }
+
+
+    // 부채꼴 [rad]. 차량 정면 0, 왼쪽(+Z 회전) 이 +.
+    // lidar_link -> base_link 는 rpy 0 0 0 이라 그대로 쓴다.
+    const double lo =
+        std::min(obstacle_sector_min_deg_, obstacle_sector_max_deg_) *
+        M_PI / 180.0;
+
+    const double hi =
+        std::max(obstacle_sector_min_deg_, obstacle_sector_max_deg_) *
+        M_PI / 180.0;
+
+
+    const double range_hi =
+        std::min(
+            static_cast<double>(last_scan_->range_max),
+            obstacle_max_range_m_
+        );
+
+
+    int hits = 0;
+
+    for (
+        std::size_t i = 0;
+        i < last_scan_->ranges.size();
+        ++i
+    )
+    {
+        const double ang =
+            last_scan_->angle_min +
+            static_cast<double>(i) * last_scan_->angle_increment;
+
+        // dir = +1 이면 [lo, hi], -1 이면 [-hi, -lo]
+        const double side_ang = ang * static_cast<double>(dir);
+
+        if (
+            side_ang < lo ||
+            side_ang > hi
+        )
+        {
+            continue;
+        }
+
+
+        const double r = last_scan_->ranges[i];
+
+        if (
+            !std::isfinite(r) ||
+            r < last_scan_->range_min ||
+            r > range_hi
+        )
+        {
+            continue;
+        }
+
+
+        ++hits;
+
+        // 단일 빔 노이즈가 아니라고 판정되는 순간 끝낸다.
+        if (hits >= obstacle_min_points_)
+        {
+            return true;
+        }
+    }
+
+
+    return false;
+}
+
+
+
+
+// ================================================================
+// Pan 명령 발행
+//
+// 상태기계가 이산 스텝으로 각도를 정하고 그대로 발행한다.
+// 한때 목표/발행을 분리해 매 프레임 각속도 제한으로 다가가는
+// 연속 램프를 썼지만, 실기에서 "꺾다 말다" 하는 움직임이 나와
+// 스텝 방식으로 되돌렸다. pan_goal_deg_ 는 표시용으로만 남아
+// 발행값을 그대로 따라간다.
+//
+// physicar_driver_node::apply_pan 은 절대각[rad]을 받아 내부에서
+// ±30도로 한 번 더 클램프한다. 여기서도 pan_max_deg_ 로 먼저
+// 클램프해 설정상의 상한을 지킨다.
+//
+// pan_sign_ 은 하드웨어 배선용 뒤집개다. 탐색 방향(어느 쪽을
+// 볼 것인가)은 pan_search_dir_ 가 정하며 이것과 무관하다.
+// ================================================================
+
+void KauLaneDetectionNode::commandPan(double cmd_deg)
+{
+    pan_cmd_deg_ =
+        std::clamp(
+            cmd_deg,
+            -pan_max_deg_,
+            pan_max_deg_
+        );
+
+
+    // 스텝 방식에서는 목표와 발행값이 같다 (표시 일관성 유지).
+    pan_goal_deg_ = pan_cmd_deg_;
+
+
+    std_msgs::msg::Float64 msg;
+
+    msg.data =
+        pan_sign_ * pan_cmd_deg_ * M_PI / 180.0;
+
+    camera_pan_publisher_->publish(msg);
+}
+
+
+
+
+// ================================================================
+// Pan 탐색 상태 갱신
+//
+// 상태 4개.
+//
+//   Idle      목표 0. 좌/우 흰선 중 한쪽만 pan_trigger_miss_frames_
+//             프레임 연속으로 안 잡히면 그 방향으로 Searching 진입.
+//
+//   Searching 첫 명령은 pan_start_deg_ 로 한 번에 간다 (코너에서
+//             몇 도로는 차선이 다시 안 들어온다). 그 뒤로는
+//             pan_step_deg_ 씩 전진하되, 매 스텝 실제 각도가
+//             정착(settled)할 때까지 기다린다. 정착한 프레임에서
+//             해당 쪽이 잡히면 그 각도에 멈추고 Holding.
+//             pan_max_deg_ 를 넘게 되면 포기하고 Returning.
+//
+//   Holding   찾은 각도를 유지한 채, 정면으로 돌아가도 그 선을
+//             다시 잡을 수 있게 될 때까지 기다린다. 재검출 즉시
+//             복귀하면 그 선을 곧바로 다시 놓치고 pan 이 왕복
+//             하면서 그동안 경로가 계속 끊긴다.
+//
+//             판정은 countVisibleAtZeroPan — 찾은 선의 추적점
+//             중 pan = 0 에서도 화면에 남는 것이
+//             pan_return_min_points_ 개 이상인 프레임이
+//             pan_return_confirm_frames_ 번 연속되면 Returning.
+//
+//             그때까지 복귀하지 않는다 (기본값). pan_hold_timeout_s_
+//             를 양수로 주면 그때만 상한이 생긴다.
+//
+//   Returning pan_step_deg_ 씩 0 으로 되돌아간다. 도착하면 Idle.
+//
+// found_count 는 detectLaneSlidingWindow 가 실제로 픽셀을 잡은
+// 스텝 수이고, 16-c 복원선은 항상 0 이므로 "이번 프레임에 진짜
+// 잡혔는가" 를 그대로 나타낸다.
+//
+// 노란 중앙선까지 없으면 좌/우 어느 쪽이 사라진 건지 판단할
+// 기준이 없으므로 손대지 않는다 (오탐 방지). 둘 다 사라졌을
+// 때도 방향을 고를 근거가 없으므로 마찬가지다.
+//
+// pan != 0 인 프레임의 좌표를 신뢰하지 않는 이유는 이 함수
+// 선언부(헤더) 주석 참고 — 동적 BEV 미구현.
+// ================================================================
+
+void KauLaneDetectionNode::updatePanSearch(
+    const LaneDetectionResult & left,
+    const LaneDetectionResult & yellow,
+    const LaneDetectionResult & right,
+    const rclcpp::Time & frame_stamp)
+{
+    if (!pan_search_enable_)
+    {
+        // 기능이 꺼지는 순간에도 카메라가 돌아간 채로 남지
+        // 않도록 원위치를 보장한다.
+        if (
+            pan_state_ != PanSearchState::Idle ||
+            std::abs(pan_cmd_deg_) > 1e-6
+        )
+        {
+            commandPan(0.0);
+
+            pan_state_ = PanSearchState::Idle;
+
+            pan_search_dir_ = 0;
+        }
+
+        left_miss_streak_ = 0;
+
+        right_miss_streak_ = 0;
+
+        return;
+    }
+
+
+    // 실제 각도가 발행한 각도에 도달했는가.
+    //
+    // /joint_states 를 아직 못 받았으면(드라이버 기동 전 등)
+    // 확인할 방법이 없으므로 명령만 믿는다. 실기 드라이버는
+    // 서보 인코더가 없어 마지막 명령을 되쏘므로 여기서는
+    // 항상 참이 된다 (헤더 주석 참고).
+    const bool settled =
+        !joint_state_received_ ||
+        std::abs(actual_pan_deg_ - pan_cmd_deg_) <=
+            pan_settle_tol_deg_;
+
+
+    switch (pan_state_)
+    {
+        case PanSearchState::Idle:
+        {
+            left_miss_streak_ =
+                (left.found_count == 0)
+                    ? left_miss_streak_ + 1 : 0;
+
+            right_miss_streak_ =
+                (right.found_count == 0)
+                    ? right_miss_streak_ + 1 : 0;
+
+
+            if (yellow.found_count == 0)
+            {
+                break;
+            }
+
+
+            const bool left_missing =
+                left_miss_streak_ >= pan_trigger_miss_frames_;
+
+            const bool right_missing =
+                right_miss_streak_ >= pan_trigger_miss_frames_;
+
+
+            if (left_missing == right_missing)
+            {
+                // 둘 다 정상이거나 둘 다 소실 -> 방향을 고를 근거 없음.
+                break;
+            }
+
+
+            // pan_search_dir_ 은 회전 방향이다 (+1 왼쪽 / -1 오른쪽).
+            //
+            // URDF physicar.urdf.xacro 의 camera_pan_joint 와
+            // 시뮬 model.sdf 의 같은 관절 모두 axis = +Z 이므로
+            // +rad 이 왼쪽(반시계)이다. 따라서 왼쪽 흰선을
+            // 놓쳤으면 +, 오른쪽이면 - 로 돌려야 소실된 쪽을 본다.
+            //
+            // (예전에는 부호가 반대였다. 실기에서 놓친 쪽의
+            //  반대편으로 고개를 돌리는 것을 확인하고 고쳤다.
+            //  pan_sign_ 은 이것과 무관한 하드웨어 배선용
+            //  뒤집개이므로 그쪽으로 덮지 말 것.)
+            pan_search_dir_ = left_missing ? +1 : -1;
+
+
+            // 가려서 안 보이는 것이면 고개를 돌려도 소용없다.
+            // 가린 물체가 같이 따라오기 때문이다. 상한까지
+            // 헛돌면서 경로만 끊길 뿐이므로 탐색을 걸지 않는다.
+            //
+            // 소실 연속 카운트는 리셋하지 않는다. 장애물이
+            // 지나가고 나서도 여전히 안 보이면 그때 곧바로
+            // 탐색이 걸려야 한다.
+            if (obstacleOnSide(pan_search_dir_, frame_stamp))
+            {
+                RCLCPP_INFO_THROTTLE(
+                    this->get_logger(),
+                    *this->get_clock(),
+                    3000,
+                    "%s 흰선이 안 보이지만 그쪽 %.0f~%.0fdeg 안에 "
+                    "장애물이 있다. 가림으로 보고 pan 하지 않는다.",
+                    (pan_search_dir_ > 0) ? "왼쪽" : "오른쪽",
+                    obstacle_sector_min_deg_,
+                    obstacle_sector_max_deg_
+                );
+
+                pan_search_dir_ = 0;
+
+                break;
+            }
+
+
+            pan_state_ = PanSearchState::Searching;
+
+            // 첫 명령은 기어가지 않고 쓸 만한 각도로 바로 뛴다.
+            commandPan(pan_start_deg_ * pan_search_dir_);
+
+            RCLCPP_INFO(
+                this->get_logger(),
+                "Pan 탐색 시작: %s 흰선 %d프레임 연속 소실 -> %+.1fdeg",
+                (pan_search_dir_ > 0) ? "왼쪽" : "오른쪽",
+                pan_trigger_miss_frames_,
+                pan_cmd_deg_
+            );
+
+            break;
+        }
+
+        case PanSearchState::Searching:
+        {
+            // 카메라가 명령을 따라잡기 전 영상으로 판정하면
+            // 아직 도착하지 않은 각도의 시야를 본 것이 된다.
+            if (!settled)
+            {
+                break;
+            }
+
+
+            const bool found =
+                (pan_search_dir_ > 0)
+                    ? (left.found_count > 0)
+                    : (right.found_count > 0);
+
+
+            if (found)
+            {
+                const double at_deg = pan_cmd_deg_;
+
+                // 기본값 0 이면 찾은 그 각도에 그대로 선다.
+                if (pan_overshoot_deg_ > 0.0)
+                {
+                    commandPan(
+                        pan_cmd_deg_ +
+                        pan_overshoot_deg_ * pan_search_dir_
+                    );
+                }
+
+                RCLCPP_INFO(
+                    this->get_logger(),
+                    "Pan 탐색 성공: %+.1fdeg 에서 재검출. "
+                    "%+.1fdeg 에 정지하고 직선 구간까지 유지.",
+                    at_deg,
+                    pan_cmd_deg_
+                );
+
+                pan_state_ = PanSearchState::Holding;
+
+                pan_straight_streak_ = 0;
+
+                pan_hold_start_ = frame_stamp;
+
+                break;
+            }
+
+
+            const double next =
+                pan_cmd_deg_ + pan_step_deg_ * pan_search_dir_;
+
+
+            if (std::abs(next) > pan_max_deg_)
+            {
+                RCLCPP_WARN(
+                    this->get_logger(),
+                    "Pan 탐색 실패: %.1fdeg 까지 돌렸지만 "
+                    "재검출 못 함. 포기하고 복귀.",
+                    pan_max_deg_
+                );
+
+                pan_state_ = PanSearchState::Returning;
+
+                break;
+            }
+
+
+            commandPan(next);
+
+            break;
+        }
+
+        case PanSearchState::Holding:
+        {
+            // 복귀 조건: 정면으로 돌아가도 그 선이 보이는가.
+            //
+            // 예전에는 "도로가 펴졌는가" 를 봤는데, 그건 다른
+            // 명제다. 곧은 구간에서도 그 선이 화면 밖에 있으면
+            // 복귀 -> 즉시 재탐색으로 왕복한다 (실측 15초에 9회,
+            // countVisibleAtZeroPan 선언부 주석 참고).
+            //
+            // 그래서 목적을 직접 잰다 — 찾은 선의 추적점 중
+            // pan = 0 에서도 화면에 남는 것이 검출에 충분한
+            // 개수인가.
+            const int min_pts =
+                std::max(4, pan_return_min_points_);
+
+            const LaneDetectionResult & side =
+                (pan_search_dir_ > 0) ? left : right;
+
+
+            // 꺾임각은 이제 판정에 쓰지 않는다. status 의 pbend
+            // 로만 내보내 튜닝 참고용으로 남긴다.
+            last_bend_deg_ =
+                (side.found_count > 0)
+                    ? trackBendDeg(side.track_px)
+                    : -1.0;
+
+
+            const int visible =
+                (side.found_count > 0)
+                    ? countVisibleAtZeroPan(
+                          side.track_px,
+                          pan_cmd_deg_)
+                    : -1;
+
+            last_visible_at_zero_ = visible;
+
+
+            if (visible < 0)
+            {
+                // 근거 자체가 없다 (그 선을 이번 프레임에 못 봤거나
+                // 캘리브레이션 전). 판정 불가 -> 카운트를 끊는다.
+                pan_straight_streak_ = 0;
+
+                RCLCPP_INFO_THROTTLE(
+                    this->get_logger(),
+                    *this->get_clock(),
+                    3000,
+                    "복귀 판정 보류: %s 흰선 근거 없음. %+.1fdeg 유지.",
+                    (pan_search_dir_ > 0) ? "왼쪽" : "오른쪽",
+                    pan_cmd_deg_
+                );
+
+                break;
+            }
+
+
+            if (visible >= min_pts)
+            {
+                ++pan_straight_streak_;
+            }
+            else
+            {
+                pan_straight_streak_ = 0;
+
+                RCLCPP_INFO_THROTTLE(
+                    this->get_logger(),
+                    *this->get_clock(),
+                    3000,
+                    "복귀 판정 보류: 정면으로 돌아가면 %s 흰선 "
+                    "%d점 중 %d점만 화면에 남는다 (%d점 필요). "
+                    "%+.1fdeg 유지.",
+                    (pan_search_dir_ > 0) ? "왼쪽" : "오른쪽",
+                    side.found_count,
+                    visible,
+                    min_pts,
+                    pan_cmd_deg_
+                );
+            }
+
+
+            if (pan_straight_streak_ >= pan_return_confirm_frames_)
+            {
+                RCLCPP_INFO(
+                    this->get_logger(),
+                    "복귀 가능: 정면에서도 %s 흰선 %d점이 화면에 "
+                    "남는다 (%d프레임 연속). %+.1fdeg 에서 복귀 시작.",
+                    (pan_search_dir_ > 0) ? "왼쪽" : "오른쪽",
+                    visible,
+                    pan_return_confirm_frames_,
+                    pan_cmd_deg_
+                );
+
+                pan_state_ = PanSearchState::Returning;
+
+                break;
+            }
+
+
+            // 0 이하 = 무한 대기. 직선을 만날 때까지 복귀하지 않는다.
+            if (pan_hold_timeout_s_ <= 0.0)
+            {
+                break;
+            }
+
+
+            const double held =
+                (frame_stamp - pan_hold_start_).seconds();
+
+            // 기동 직후 node clock 이 넘어가면 held 가 튄다.
+            if (held < 0.0)
+            {
+                pan_hold_start_ = frame_stamp;
+
+                break;
+            }
+
+            if (held > pan_hold_timeout_s_)
+            {
+                RCLCPP_WARN(
+                    this->get_logger(),
+                    "%.1fs 동안 직선 구간을 못 만났다. "
+                    "%+.1fdeg 에서 그냥 복귀한다.",
+                    held,
+                    pan_cmd_deg_
+                );
+
+                pan_state_ = PanSearchState::Returning;
+            }
+
+            break;
+        }
+
+        case PanSearchState::Returning:
+        {
+            if (!settled)
+            {
+                break;
+            }
+
+
+            if (std::abs(pan_cmd_deg_) <= 1e-6)
+            {
+                pan_state_ = PanSearchState::Idle;
+
+                pan_search_dir_ = 0;
+
+                left_miss_streak_ = 0;
+
+                right_miss_streak_ = 0;
+
+                pan_straight_streak_ = 0;
+
+                break;
+            }
+
+
+            const double step =
+                std::copysign(
+                    std::min(
+                        pan_step_deg_,
+                        std::abs(pan_cmd_deg_)
+                    ),
+                    -pan_cmd_deg_
+                );
+
+            commandPan(pan_cmd_deg_ + step);
+
+            break;
+        }
+    }
+}
+
+
+
+
+// ================================================================
+// 제어점 열 사이의 평균 거리 [cm]
+// ================================================================
+
+double KauLaneDetectionNode::pathDeviationCm(
+    const kau::bezier::Ctrl & a,
+    const kau::bezier::Ctrl & b)
+{
+    if (
+        a.size() != b.size() ||
+        a.empty()
+    )
+    {
+        return -1.0;
+    }
+
+
+    double sum = 0.0;
+
+    for (
+        std::size_t i = 0;
+        i < a.size();
+        ++i
+    )
+    {
+        sum +=
+            std::hypot(
+                a[i].x - b[i].x,
+                a[i].y - b[i].y
+            );
+    }
+
+
+    return sum / static_cast<double>(a.size());
+}
+
+
+
+
+// ================================================================
+// ctrl 이 바뀐 뒤 진단값 재계산
+//
+// buildCenterlinePath 8장과 같은 식이다. EMA 로 섞은 제어점은
+// 관측 당시의 길이/곡률/cte 와 짝이 맞지 않으므로 다시 잰다.
+// valid_length 는 여기서 손대지 않는다 (관측이 어디까지
+// 근거였는지는 기하가 아니라 관측의 성질이라, 부르는 쪽이
+// 따로 EMA 한다).
+// ================================================================
+
+void KauLaneDetectionNode::refreshPathMetrics(LanePath & path)
+{
+    path.length_cm =
+        kau::bezier::segLength(path.ctrl);
+
+    path.kappa_max =
+        kau::bezier::kappaMaxExact(path.ctrl);
+
+
+    const kau::bezier::Nearest near =
+        kau::bezier::nearestOnSeg(
+            path.ctrl,
+            kau::bezier::Point2{0.0, 0.0}
+        );
+
+    const kau::bezier::Point2 foot =
+        kau::bezier::evalSeg(path.ctrl, near.u);
+
+    const double th =
+        kau::bezier::heading(path.ctrl, near.u);
+
+
+    // 좌측 +
+    path.cte_cm =
+        -std::sin(th) * (0.0 - foot.x) +
+         std::cos(th) * (0.0 - foot.y);
+
+    path.heading_err =
+        std::remainder(-th, 2.0 * M_PI);
+}
+
+
+
+
+// ================================================================
+// 시간축 강건화
+//
+// 헤더 선언부 주석에 설계 근거가 있다. 요약하면
+//
+//   관측 없음        상태만 늙힌다. 오래 끊기면 폐기.
+//   첫 관측          그대로 채택하고 추정치를 연다.
+//   추정치와 가까움  alpha = path_ema_alpha_ * confidence 로 섞는다.
+//   추정치와 멀다    섞지 않고 직전 추정치를 내보내되 confidence 를
+//                    떨어뜨린다. 연속되면 재잠금.
+//
+// 게이트(pathGate)를 통과한 경로에만 적용한다. 게이트의 안전
+// 판정을 EMA 가 되살리는 일은 없어야 한다.
+// ================================================================
+
+void KauLaneDetectionNode::robustifyPath(LanePath & path)
+{
+    if (!path_ema_enable_)
+    {
+        return;
+    }
+
+
+    // ------------------------------------------------------------
+    // 관측 없음 — 경로 미생성(pan 탐색 중 등) 또는 게이트 기각
+    // ------------------------------------------------------------
+
+    if (!path.valid)
+    {
+        ++ema_miss_streak_;
+
+        if (
+            path_ema_valid_ &&
+            ema_miss_streak_ > path_ema_reset_frames_
+        )
+        {
+            RCLCPP_INFO(
+                this->get_logger(),
+                "경로 관측이 %d 프레임 끊겼다. EMA 추정치를 버린다.",
+                ema_miss_streak_
+            );
+
+            path_ema_valid_ = false;
+
+            conf_ema_ = 0.0;
+
+            valid_len_ema_ = 0.0;
+
+            path_ema_reject_streak_ = 0;
+        }
+
+        return;
+    }
+
+
+    ema_miss_streak_ = 0;
+
+
+    // ------------------------------------------------------------
+    // 첫 관측 — 비교할 것이 없다. 그대로 채택한다.
+    // ------------------------------------------------------------
+
+    if (!path_ema_valid_)
+    {
+        path_ema_ctrl_ = path.ctrl;
+
+        conf_ema_ = path.confidence;
+
+        valid_len_ema_ = path.valid_length_cm;
+
+        path_ema_valid_ = true;
+
+        path_ema_reject_streak_ = 0;
+
+        return;
+    }
+
+
+    const double dev =
+        pathDeviationCm(path.ctrl, path_ema_ctrl_);
+
+    last_path_dev_cm_ = dev;
+
+
+    const bool outlier =
+        (path_ema_gate_cm_ > 0.0) &&
+        (dev > path_ema_gate_cm_);
+
+
+    if (outlier)
+    {
+        ++path_ema_reject_streak_;
+
+        if (path_ema_reject_streak_ >= path_ema_relock_frames_)
+        {
+            // 같은 주장이 계속 온다. 노이즈가 아니라 실제 변화다.
+            RCLCPP_INFO(
+                this->get_logger(),
+                "새 경로 주장이 %d 프레임 연속 (평균 %.1fcm 차이). "
+                "EMA 추정치를 재잠금한다.",
+                path_ema_reject_streak_,
+                dev
+            );
+
+            path_ema_ctrl_ = path.ctrl;
+
+            conf_ema_ = path.confidence;
+
+            valid_len_ema_ = path.valid_length_cm;
+
+            path_ema_reject_streak_ = 0;
+        }
+        else
+        {
+            // 한두 프레임짜리 튐. 추정치는 그대로 두고 신뢰도만
+            // 떨어뜨린다. 하류가 미끄러지는 confidence 를 보고
+            // 스스로 판단할 수 있어야 한다.
+            conf_ema_ *= (1.0 - path_ema_alpha_);
+
+            RCLCPP_WARN_THROTTLE(
+                this->get_logger(),
+                *this->get_clock(),
+                2000,
+                "관측이 추정치에서 평균 %.1fcm 벗어났다 (상한 %.1f). "
+                "섞지 않고 신뢰도만 %.2f 로 내린다.",
+                dev,
+                path_ema_gate_cm_,
+                conf_ema_
+            );
+        }
+    }
+    else
+    {
+        path_ema_reject_streak_ = 0;
+
+        // 믿기 힘든 프레임은 추정치를 조금밖에 못 움직인다.
+        const double a =
+            std::clamp(
+                path_ema_alpha_ * path.confidence,
+                0.0,
+                1.0
+            );
+
+        for (
+            std::size_t i = 0;
+            i < path_ema_ctrl_.size();
+            ++i
+        )
+        {
+            path_ema_ctrl_[i].x +=
+                a * (path.ctrl[i].x - path_ema_ctrl_[i].x);
+
+            path_ema_ctrl_[i].y +=
+                a * (path.ctrl[i].y - path_ema_ctrl_[i].y);
+        }
+
+        // 신뢰도 자체는 고정 비율로 따라간다. 여기까지 confidence
+        // 로 다시 가중하면 낮은 신뢰도가 스스로를 붙잡아 영영
+        // 올라오지 못한다.
+        conf_ema_ +=
+            path_ema_alpha_ * (path.confidence - conf_ema_);
+
+        valid_len_ema_ +=
+            path_ema_alpha_ *
+            (path.valid_length_cm - valid_len_ema_);
+    }
+
+
+    // ------------------------------------------------------------
+    // 발행 대상은 관측이 아니라 추정치다.
+    // ------------------------------------------------------------
+
+    path.ctrl = path_ema_ctrl_;
+
+    path.confidence = conf_ema_;
+
+    refreshPathMetrics(path);
+
+    // 근거 구간은 기하보다 길 수 없다.
+    path.valid_length_cm =
+        std::min(valid_len_ema_, path.length_cm);
+}
+
+
+
+
 int KauLaneDetectionNode::pathGate(
     const LanePath & path,
     double sx) const
@@ -4126,14 +5404,44 @@ void KauLaneDetectionNode::imageCallback(
         // 2. Camera Undistortion
         // ========================================================
 
+        // cv::undistort() 는 부를 때마다 맵을 새로 만든다.
+        // intrinsic 은 고정이므로 맵은 한 번만 만들고 remap 만 돈다.
+        if (
+            undistort_map1_.empty() ||
+            undistort_map_size_ != frame.size()
+        )
+        {
+            cv::initUndistortRectifyMap(
+                camera_matrix_,
+                distortion_coefficients_,
+                cv::Mat(),
+                camera_matrix_,
+                frame.size(),
+                CV_16SC2,
+                undistort_map1_,
+                undistort_map2_
+            );
+
+            undistort_map_size_ = frame.size();
+
+            RCLCPP_INFO(
+                this->get_logger(),
+                "undistort 맵 생성 (%dx%d). 이후 프레임은 remap 만 돈다.",
+                frame.cols,
+                frame.rows
+            );
+        }
+
+
         cv::Mat undistorted_frame;
 
 
-        cv::undistort(
+        cv::remap(
             frame,
             undistorted_frame,
-            camera_matrix_,
-            distortion_coefficients_
+            undistort_map1_,
+            undistort_map2_,
+            cv::INTER_LINEAR
         );
 
 
@@ -4141,6 +5449,15 @@ void KauLaneDetectionNode::imageCallback(
         // Publish Undistorted Image
         // --------------------------------------------------------
 
+        // 구독자가 없으면 만들지 않는다.
+        //
+        // sensor_msgs/Image 하나를 만드는 데 480x360 BGR8 기준
+        // 518 KB 복사 + 직렬화 + DDS 전송이 든다. 이 노드는
+        // 그런 토픽을 6개 발행하므로 프레임당 약 2.4 MB,
+        // 14 Hz 면 초당 34 MB 다. 아무도 안 보고 있을 때 그
+        // 전부가 순수 낭비였다.
+        if (undistorted_image_publisher_->get_subscription_count() > 0)
+        {
         auto undistorted_msg =
             cv_bridge::CvImage(
                 msg->header,
@@ -4152,6 +5469,7 @@ void KauLaneDetectionNode::imageCallback(
         undistorted_image_publisher_->publish(
             *undistorted_msg
         );
+        }
 
 
         // ========================================================
@@ -4170,7 +5488,10 @@ void KauLaneDetectionNode::imageCallback(
         // 실제 차선과 좌/우 변이 나란한지 눈으로 확인한다.
         // --------------------------------------------------------
 
-        if (publish_roi_overlay_)
+        if (
+            publish_roi_overlay_ &&
+            roi_overlay_publisher_->get_subscription_count() > 0
+        )
         {
             cv::Mat roi_overlay =
                 undistorted_frame.clone();
@@ -4250,6 +5571,8 @@ void KauLaneDetectionNode::imageCallback(
         // Publish BEV
         // --------------------------------------------------------
 
+        if (bev_image_publisher_->get_subscription_count() > 0)
+        {
         auto bev_msg =
             cv_bridge::CvImage(
                 msg->header,
@@ -4261,6 +5584,7 @@ void KauLaneDetectionNode::imageCallback(
         bev_image_publisher_->publish(
             *bev_msg
         );
+        }
 
 
         // ========================================================
@@ -4308,29 +5632,11 @@ void KauLaneDetectionNode::imageCallback(
 
 
         // ========================================================
-        // 7. Combined HLS Binary
-        //
-        // Sobel 제거
-        // Edge 제거
-        //
-        // Yellow + White만 사용
+        // 7. 작은 Noise 제거
         // ========================================================
 
-        cv::Mat combined_binary;
-
-
-        cv::bitwise_or(
-            yellow_mask,
-            white_mask,
-            combined_binary
-        );
-
-
-        // ========================================================
-        // 8. 작은 Noise 제거
-        // ========================================================
-
-        cv::Mat kernel =
+        // 3x3 고정이라 매 프레임 만들 이유가 없다.
+        static const cv::Mat kernel =
             cv::getStructuringElement(
                 cv::MORPH_RECT,
                 cv::Size(
@@ -4341,9 +5647,8 @@ void KauLaneDetectionNode::imageCallback(
 
 
         // --------------------------------------------------------
-        // 예전에는 combined_binary 에만 걸었는데,
-        // 슬라이딩 윈도우가 쓰는 건 yellow_mask / white_mask 라서
-        // 정리 효과가 탐지에 전혀 반영되지 않았다.
+        // 슬라이딩 윈도우가 쓰는 건 yellow_mask / white_mask 이므로
+        // 정리도 그 두 마스크에 직접 건다.
         //
         // OPEN  : 점 노이즈 제거
         // CLOSE : 점선 차선의 작은 끊김 메우기 (곡선 끊김 완화)
@@ -4377,49 +5682,8 @@ void KauLaneDetectionNode::imageCallback(
         }
 
 
-        cv::bitwise_or(
-            yellow_mask,
-            white_mask,
-            combined_binary
-        );
-
-
         // ========================================================
-        // 9. HLS Binary Publish
-        // ========================================================
-
-        auto hls_msg =
-            cv_bridge::CvImage(
-                msg->header,
-                sensor_msgs::image_encodings::MONO8,
-                combined_binary
-            ).toImageMsg();
-
-
-        hls_binary_publisher_->publish(
-            *hls_msg
-        );
-
-
-        // ========================================================
-        // 10. Combined Binary Publish
-        // ========================================================
-
-        auto combined_msg =
-            cv_bridge::CvImage(
-                msg->header,
-                sensor_msgs::image_encodings::MONO8,
-                combined_binary
-            ).toImageMsg();
-
-
-        combined_binary_publisher_->publish(
-            *combined_msg
-        );
-
-
-        // ========================================================
-        // 11. Debug Image
+        // 8. Debug Image
         // ========================================================
 
         cv::Mat debug_image =
@@ -5139,23 +6403,63 @@ void KauLaneDetectionNode::imageCallback(
 
 
         // ========================================================
+        // 16-c-2. Pan 탐색 (설계 문서 ⑤)
+        //
+        // 16-a 정리가 끝난 뒤(즉 이번 프레임에 "진짜" 잡혔는지가
+        // found_count 에 확정된 뒤), 16-c 복원과 무관하게 좌/우
+        // 원본 검출 상태를 본다 (복원선은 found_count 가 항상
+        // 0 이므로 여기서 읽어도 16-c 이전과 같은 값이다).
+        // ========================================================
+
+        updatePanSearch(
+            left_lane,
+            yellow_lane,
+            right_lane,
+            rclcpp::Time(msg->header.stamp)
+        );
+
+
+        // ========================================================
         // 16-d. 중심선 -> quintic Bezier 제어점 (공통 경로 형식)
         //
         // 이 노드의 최종 산출물. 이산 좌표가 아니라 제어점 6개다.
         // 차로를 묻지 않고 중앙선(황색 점선)만 추종한다.
+        //
+        // pan_state_ 가 Idle 이 아니면 카메라 자세가 bevScale() 의
+        // 가정(pan=0)과 어긋나 있으므로 이번 프레임은 새로 짓지
+        // 않는다. lane_path 는 기본값(built=false)으로 남고,
+        // publishLanePath() 가 그 상태에서는 발행을 건너뛰므로
+        // 하류는 직전 /lane/center 값을 그대로 들고 간다.
         // ========================================================
 
         std::vector<cv::Point2d> center_pts_px;
 
-        const LanePath lane_path =
-            buildCenterlinePath(
-                left_lane,
-                yellow_lane,
-                right_lane,
-                bev_frame.cols,
-                bev_frame.rows,
-                center_pts_px
-            );
+        LanePath lane_path;
+
+        if (pan_state_ == PanSearchState::Idle)
+        {
+            lane_path =
+                buildCenterlinePath(
+                    left_lane,
+                    yellow_lane,
+                    right_lane,
+                    bev_frame.cols,
+                    bev_frame.rows,
+                    center_pts_px
+                );
+        }
+
+
+        // ========================================================
+        // 16-d-2. 시간축 강건화 (EMA)
+        //
+        // 게이트를 통과한 관측을 추정치에 섞는다. 여기서
+        // lane_path.ctrl / confidence / valid_length 가 관측값
+        // 에서 추정치로 바뀐다. 아래 발행과 debug 그리기는
+        // 둘 다 이 추정치를 본다.
+        // ========================================================
+
+        robustifyPath(lane_path);
 
 
         // ========================================================
@@ -5449,10 +6753,54 @@ void KauLaneDetectionNode::imageCallback(
         }
 
 
+        // --------------------------------------------------------
+        // Pan 탐색 상태 (설계 문서 ⑤)
+        //
+        // Idle 이 아닌 동안은 16-d 에서 경로를 새로 짓지 않으므로,
+        // 화면에서 "path -- " 가 보이면서 아래 이 줄이 IDLE 이
+        // 아니면 pan 탐색 때문이라는 걸 바로 알 수 있게 한다.
+        // --------------------------------------------------------
+
+        if (pan_search_enable_)
+        {
+            const char * pan_state_name =
+                (pan_state_ == PanSearchState::Searching) ? "SEARCH" :
+                (pan_state_ == PanSearchState::Holding)   ? "HOLD"   :
+                (pan_state_ == PanSearchState::Returning) ? "RETURN" :
+                                                             "IDLE";
+
+            char pan_text[96];
+
+            std::snprintf(
+                pan_text,
+                sizeof(pan_text),
+                "PAN %s goal %+.1f cmd %+.1f actual %+.1fdeg",
+                pan_state_name,
+                pan_goal_deg_,
+                pan_cmd_deg_,
+                actual_pan_deg_
+            );
+
+            cv::putText(
+                debug_image,
+                pan_text,
+                cv::Point(10, 85),
+                cv::FONT_HERSHEY_SIMPLEX,
+                0.45,
+                (pan_state_ == PanSearchState::Idle)
+                    ? cv::Scalar(120, 120, 120)
+                    : cv::Scalar(0, 165, 255),
+                1
+            );
+        }
+
+
         // ========================================================
         // 20. Publish Debug Image
         // ========================================================
 
+        if (debug_image_publisher_->get_subscription_count() > 0)
+        {
         auto debug_msg =
             cv_bridge::CvImage(
                 msg->header,
@@ -5464,6 +6812,7 @@ void KauLaneDetectionNode::imageCallback(
         debug_image_publisher_->publish(
             *debug_msg
         );
+        }
 
 
         // ========================================================
@@ -5519,7 +6868,9 @@ void KauLaneDetectionNode::imageCallback(
                 "lw=%d yw=%d rw=%d lv=%d yv=%d rv=%d "
                 "path=%d gate=%d win=%d band=%.2f "
                 "len=%.1f rad=%.1f maxlat=%.1f cte=%.2f yaw=%.2f "
-                "coff=%.1f csrc=%d",
+                "coff=%.1f csrc=%d "
+                "pan=%d pdeg=%.1f padeg=%.1f "
+                "conf=%.2f edev=%.1f erej=%d pbend=%.1f pvis=%d",
                 left_lane.found_count,
                 yellow_lane.found_count,
                 right_lane.found_count,
@@ -5536,7 +6887,15 @@ void KauLaneDetectionNode::imageCallback(
                 lane_path.cte_cm,
                 lane_path.heading_err * 180.0 / M_PI,
                 center_fix.offset_cm,
-                center_fix.source
+                center_fix.source,
+                static_cast<int>(pan_state_),
+                pan_cmd_deg_,
+                actual_pan_deg_,
+                lane_path.confidence,
+                last_path_dev_cm_,
+                path_ema_reject_streak_,
+                last_bend_deg_,
+                last_visible_at_zero_
             );
 
             std_msgs::msg::String status_msg;

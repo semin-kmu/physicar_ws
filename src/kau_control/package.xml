@@ -3,7 +3,7 @@
 <package format="3">
   <name>kau_control</name>
   <version>0.0.0</version>
-  <description>KAU AMET PhysiCar 경로 추종 제어 (Pure Pursuit). KauPath -> /speed, /steering</description>
+  <description>KAU AMET PhysiCar 주행 제어. speed_controller -> /speed (곡률 기반 목표속도 + PID), steer_controller -> /steering (Pure Pursuit)</description>
   <maintainer email="physicar@todo.todo">physicar</maintainer>
   <license>TODO: License declaration</license>
 

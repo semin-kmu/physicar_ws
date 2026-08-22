@@ -1,0 +1,71 @@
+# 속도 제어 parameter (곡률 기반 목표속도 + PID)
+#
+# 단위: 길이 cm / 곡률 1/cm / 속도 m/s
+#
+#   kappa_win = 전방 window 의 최대 |kappa|
+#   v_ref     = law(kappa_win) -> [v_min, v_max] -> 가감속 제한
+#   /speed    = clamp(v_ref + PID(v_ref - v_meas), 0, v_max)
+#
+# 직선이면 v_max, 곡률이 클수록 낮아진다.
+#
+# **주행 공간이나 차량이 바뀌면 다시 잡아야 한다.**
+
+speed_controller:
+  ros__parameters:
+
+    # --- 인터페이스 (steer_controller.yaml 과 같은 경로를 봐야 한다) ---
+    path_topic: "/path/local"
+    fallback_path_topic: "/path/global"
+    map_frame: "map"
+    base_frame: "base_footprint"
+    pose_source: "tf"
+    path_latched: false
+    fallback_path_latched: true
+
+    control_hz: 100.0
+    tf_timeout: 0.2
+    path_timeout: 1.0
+    cte_abort_cm: 200.0
+    goal_tol_cm: 10.0
+
+    # --- 차량 제원 ---
+    # kappa_max(= 기하 최소회전반경) 계산에 쓴다. steer 쪽과 같은 값일 것.
+    vehicle:
+      wheelbase_cm: 18.0
+      max_steer_deg: 20.0
+      rear_axle_offset_cm: -9.0
+
+    # --- 목표속도 ---
+    speed:
+      v_min: 0.5
+      v_max: 2.0                        # 하드웨어 상한은 3.0
+      look_min_cm: 20.0                 # 곡률 탐색 window 하한
+      look_max_cm: 150.0                # v_max 에서의 window 상한
+      min_span_cm: 20.0                 # window 최소 폭 (저속 퇴화 방지)
+      margin: 0.8                       # v_min 기준 곡률 = margin * kappa_max
+      use_sqrt_law: true                # true: 등횡가속도, false: 선형 보간
+      accel_max: 1.0                    # m/s^2, 목표속도 증가율 상한
+      decel_max: 2.0                    # m/s^2, 감속은 넉넉히 허용
+
+      # --- 속도 피드백 ---
+      # ★ 오도메트리 노드가 아직 없다. 노드가 생기면 아래 topic 만 바꾸고
+      #   require_feedback 을 true 로 올린다 (타입은 nav_msgs/Odometry,
+      #   twist.twist.linear.x 를 읽는다).
+      #
+      # require_feedback
+      #   false : 피드백이 없거나 stale 이면 PID 보정 없이 v_ref 만 발행.
+      #           지금은 이 상태여야 주행 시험을 할 수 있다.
+      #   true  : 피드백이 없으면 즉시 정지. 오도메트리가 붙은 뒤의 운용값.
+      feedback_topic: "/odometry/filtered"
+      feedback_timeout: 0.2             # s, 이보다 오래되면 stale
+      require_feedback: false
+
+    # --- PID ---
+    # v_ref 를 피드포워드로 깔고 오차분만 보정하므로 게인은 작게 시작한다.
+    # 피드백이 붙기 전까지는 이 값들이 쓰이지 않는다.
+    pid:
+      kp: 0.5
+      ki: 0.5
+      kd: 0.0
+      i_max: 0.5                        # 적분항 상한 [m/s]. windup 방지
+      out_max: 0.5                      # 보정량 상한 [m/s]

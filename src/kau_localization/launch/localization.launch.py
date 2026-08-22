@@ -31,6 +31,8 @@ slam.launch.py 로 만들어 /write_state 로 저장한 .pbstream 이 필요하�
     pbstream:=/path/to.pbstream    (필수)
     use_sim_time:=false            실기에서 실행할 때
     initial_pose:=false            /initialpose 릴레이 없이 전역 재탐색만
+    start_pose:="0.23,-0.02,0.0"   시작 위치를 알 때 (m, m, rad). 기동 직후
+                                   그 자리에서 재측위한다 — 전역 재탐색을 안 기다린다
     publish_map:=false             /map 을 안 띄울 때 (nav2 map_server 를 따로 쓸 때)
     rviz:=true                     RViz 동시 실행
 """
@@ -92,6 +94,10 @@ def generate_launch_description():
             'initial_pose', default_value='true',
             description='RViz 2D Pose Estimate(/initialpose) 릴레이 사용 여부.'),
         DeclareLaunchArgument(
+            'start_pose', default_value='',
+            description='시작 위치를 알 때 "x,y,yaw" (m, m, rad). 기동 직후 '
+                        '릴레이가 스스로 재측위한다. 비우면 /initialpose 대기.'),
+        DeclareLaunchArgument(
             'publish_map', default_value='true',
             description='occupancy_grid_node 로 /map 을 발행할지.'),
         DeclareLaunchArgument(
@@ -140,6 +146,7 @@ def generate_launch_description():
             'use_sim_time': use_sim_time,
             'configuration_directory': config_dir,
             'configuration_basename': config_file,
+            'start_pose': LaunchConfiguration('start_pose'),
         }],
         condition=IfCondition(LaunchConfiguration('initial_pose')),
     )

@@ -70,6 +70,11 @@ struct WorldCircleCandidate
   std::size_t last_scan_index{0U};
 };
 
+/// Copies the sensor-frame terms of one occupancy candidate into the carrier
+/// the later stages work on. Nothing about the circle is recomputed; the target
+/// frame fields are left unset for the caller to fill in.
+WorldCircleCandidate carry_sensor_values(const ConeOccupancyCandidate & candidate);
+
 struct TrackRoiResult
 {
   /// False when the world pose was stale or missing, or the ring was not

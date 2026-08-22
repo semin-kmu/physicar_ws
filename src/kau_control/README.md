@@ -1,10 +1,17 @@
 # kau_control
 
-KAU AMET PhysiCar 용 **경로 추종 제어** 패키지. `KauPath` 를 받아 `/speed`, `/steering` 을 발행한다.
+KAU AMET PhysiCar 용 **주행 제어** 패키지. `KauPath` 를 받아 `/speed`, `/steering` 을 발행한다.
+
+노드는 **둘뿐이다.**
+
+| 노드 | 출력 | 알고리즘 |
+|---|---|---|
+| `speed_controller` | `/speed` [m/s] | 전방 곡률 -> 목표속도, PID |
+| `steer_controller` | `/steering` [rad] | Pure Pursuit |
 
 > 상태: **포팅 완료, 실주행 검증 미완.** 아래 "검증 현황" 참고.
 >
-> 최종 갱신: 2026-08-20
+> 최종 갱신: 2026-08-21
 
 ## 1. 무엇인가
 
@@ -12,18 +19,28 @@ KAU AMET PhysiCar 용 **경로 추종 제어** 패키지. `KauPath` 를 받아 `
  /path/local  (kau_msgs/KauPath, 2~10 Hz)
  /path/global (없으면 fallback)
         │
-        ▼
-  ┌─────────────────────────────────────────┐
-  │ 8.3 전역 최근접점 (첫 tick / 복구)       │
-  │ 8.4 국소 window 추적 (매 tick)          │
-  │ 8.5 LookAhead (호길이 기준)              │
-  │ 8.6 구간 max|kappa| -> 목표속도          │
-  │     Pure Pursuit -> 조향각               │
-  └─────────────────────────────────────────┘
-        │                    ▲
-        ▼                    │ TF map -> base_footprint
- /speed [m/s]  /steering [rad]
+        ├──────────────────────────┬───────────────────────────┐
+        ▼                          ▼                           │
+  ┌───────────────────────┐  ┌───────────────────────┐         │
+  │  path_tracker.hpp     │  │  path_tracker.hpp     │  TF map │
+  │  8.3 전역 최근접점     │  │  (두 노드가 각자 하나) │  -> base│
+  │  8.4 국소 window 추적  │  │                       │◀────────┘
+  └───────────┬───────────┘  └───────────┬───────────┘
+              ▼                          ▼
+  ┌───────────────────────┐  ┌───────────────────────┐
+  │  speed_controller     │  │  steer_controller     │
+  │  8.6 구간 max|kappa|   │  │  8.5 LookAhead        │
+  │      -> 목표속도       │  │      Pure Pursuit     │
+  │      + PID            │  │                       │
+  └───────────┬───────────┘  └───────────┬───────────┘
+              ▼                          ▼
+        /speed [m/s]  ────────▶   /steering [rad]
+                        (Ld 계산용)
 ```
+
+**두 노드는 서로를 감시하지 않는다.** 각자 경로를 받고 각자 TF 를 본다
+(`steer` 만 `Ld = k_v * v` 계산용으로 `/speed` 를 읽는다). 한쪽이 죽어도
+다른 쪽은 계속 돈다 — 상호 감시와 deadman 은 `kau_state_machine` 소관이다.
 
 이 패키지는 **경로를 만들지 않는다.** 경로 생성은 `kau_global_path` (global) 와
 local path 담당이 소유한다. 여기는 주어진 경로를 따라가기만 한다.
@@ -37,8 +54,8 @@ local path 담당이 소유한다. 여기는 주어진 경로를 따라가기만
 |---|---|---|
 | `sim_common/curve.py` 의 `Curve` / `TrackState` | `include/kau_control/curve.hpp` | 8.3 / 8.4 / 8.5 / 8.6 |
 | `kau_controller/test/controller.py` | `include/kau_control/pure_pursuit.hpp` | 순수 함수 그대로 |
-| `sim_common/config.py` | `include/kau_control/params.hpp` + `config/path_follower.yaml` | 튜닝값은 YAML |
-| `kau_controller/test/runner.py` 의 `while` 루프 | `src/path_follower_node.cpp` 의 timer callback | 제어 loop |
+| `sim_common/config.py` | `include/kau_control/params.hpp` + `config/speed_controller.yaml` · `config/steer_controller.yaml` | 튜닝값은 YAML |
+| `kau_controller/test/runner.py` 의 `while` 루프 | `src/speed_controller_node.cpp` · `src/steer_controller_node.cpp` 의 timer callback | 제어 loop. 공통부는 `path_tracker.hpp` |
 | `sim_common/vehicle.py` (Kinematic Bicycle + 액추에이터) | **옮기지 않음** | 실차/Gazebo 가 그 역할 |
 | `viewer*.py` / `plots.py` / `scenarios.py` / `noise` | **옮기지 않음** | 시뮬 평가 전용 |
 
@@ -56,14 +73,21 @@ segment **1개** 연산(8.1 최근접점 / 8.5 호길이 / 8.6 곡률 / 8.7 퇴�
 colcon build --symlink-install --packages-select kau_control
 source install/setup.bash
 
-ros2 launch kau_control path_follower.launch.py
-ros2 launch kau_control path_follower.launch.py use_sim_time:=false   # 실기
-ros2 launch kau_control path_follower.launch.py log_level:=debug      # s/cte/Ld/steer 2 Hz 출력
+ros2 launch kau_control control.launch.py                       # 두 노드 동시
+ros2 launch kau_control control.launch.py use_sim_time:=false   # 실기
+ros2 launch kau_control control.launch.py log_level:=debug      # 제어 내부값 2 Hz 출력
 ```
 
 `physicar_bringup` 의 `sim.launch.py` / `real.launch.py` 와
 `kau_localization` 의 `localization.launch.py` 가 떠 있어야 한다.
-**`map -> odom` TF 가 없으면 이 노드는 계속 정지 상태로 남는다** (의도된 동작).
+**`map -> odom` TF 가 없으면 두 노드 모두 계속 0 을 발행한다** (의도된 동작).
+
+한쪽만 띄우고 싶으면 (예: 조향만 붙여 보기):
+
+```bash
+ros2 run kau_control steer_controller_node --ros-args \
+    --params-file src/kau_control/config/steer_controller.yaml
+```
 
 ### Lane Detection 으로 제어기만 검증하기 (권장 · 측위 불필요)
 
@@ -75,20 +99,19 @@ ros2 launch kau_control path_follower.launch.py log_level:=debug      # s/cte/Ld
 잡는다 (후륜축만 `rear_axle_offset` 만큼 뒤).
 
 ```bash
-# 터미널 1
-ros2 launch kau_lane_detection lane_detection.launch.py viewer:=false
+# 조향만 관찰 (차는 안 움직인다). 인지까지 같이 띄운다
+ros2 launch kau_control lane_follow.launch.py speed:=0.0
 
-# 터미널 2 — 속도 0, 조향만 관찰
-ros2 run kau_control path_follower_node --ros-args \
-    -p use_sim_time:=true \
-    -p pose_source:=identity -p base_frame:=base_link \
-    -p path_topic:=/lane/center \
-    -p speed.enabled:=false -p speed.constant:=0.0 \
-    --log-level path_follower:=debug
+# 상수 속도 주행
+ros2 launch kau_control lane_follow.launch.py speed:=0.4
 ```
 
+`speed` 인자는 `speed.v_min` 과 `speed.v_max` 를 같은 값으로 덮는다. 곡률 기반
+가감속을 켜려면 인자를 주지 말고 `config/lane_follow.yaml` 의 두 값을 서로
+다르게 둔다 (예: 0.3 / 0.8).
+
 **교차 검증**: `lane_detection` 은 자체 슬라이딩 윈도우로 구한 `cte` / `yaw` 를
-로그에 찍고, `path_follower` 는 같은 값을 Bezier 제어점에서 독립적으로 구한다.
+로그에 찍고, `steer_controller` 는 같은 값을 Bezier 제어점에서 독립적으로 구한다.
 **둘이 일치하면 제어기 계산이 맞는 것이다.** 2026-08-21 실측:
 
 ```text
@@ -96,9 +119,10 @@ path_follower  : s=0.0 cte=1.4 cm head_err=-0.3 deg Ld=30 steer=-1.1 deg
 lane_detection : path 79cm        cte +1.5cm       yaw   -0.4deg
 ```
 
-주행까지 보려면 `-p speed.enabled:=false -p speed.constant:=0.4` 로 올린다.
+(노드가 갈리기 전 `path_follower` 로 측정한 값이다. 계산식은 그대로 옮겨졌다.)
+
 `/lane/center` 는 `valid_length` 가 80 cm 안팎이라 `ld` 가 거기에 맞춰 잘리고,
-관측 구간이 `ld_min` 보다 짧아지면 자동 정지한다.
+관측 구간이 `ld_min` 보다 짧아지면 `steer_controller` 가 자동 정지한다.
 
 ### 경로 발행자가 아직 없을 때
 
@@ -120,11 +144,27 @@ ros2 run kau_control fake_path.py --shape straight --origin "250,360" --yaw 82
 |---|---|---|---|
 | 입력 | `/path/local` | `kau_msgs/KauPath` | RELIABLE, depth 1 |
 | 입력 | `/path/global` | `kau_msgs/KauPath` | 주 경로 끊기면 fallback |
-| 입력 | TF `map -> base_footprint` | | 이 노드는 TF 를 **발행하지 않는다** |
-| 출력 | `/speed` | `std_msgs/Float64` | m/s |
-| 출력 | `/steering` | `std_msgs/Float64` | **rad** |
-| 출력 | `/viz/path/tracked` | `nav_msgs/Path` | RViz 표시용 |
-| 출력 | `/viz/path/lookahead` | `geometry_msgs/PointStamped` | LookAhead 점 |
+| 입력 | TF `map -> base_footprint` | | 두 노드 모두 TF 를 **발행하지 않는다** |
+| 입력 | `/odometry/filtered` | `nav_msgs/Odometry` | `speed` 만. PID 피드백. **아직 발행자 없음** |
+| 입력 | `/speed` | `std_msgs/Float64` | `steer` 가 `Ld` 계산에 쓴다 |
+| 출력 | `/speed` | `std_msgs/Float64` | `speed_controller`, m/s |
+| 출력 | `/steering` | `std_msgs/Float64` | `steer_controller`, **rad** |
+| 출력 | `/viz/path/tracked` | `nav_msgs/Path` | `steer`. RViz 표시용 |
+| 출력 | `/viz/path/lookahead` | `geometry_msgs/PointStamped` | `steer`. LookAhead 점 |
+
+### 속도 피드백이 아직 없다
+
+PID 는 `speed.feedback_topic` (기본 `/odometry/filtered`, `nav_msgs/Odometry` 의
+`twist.twist.linear.x`) 을 구독한다. **오도메트리 노드가 아직 없으므로 지금은
+아무것도 안 들어온다.** 그때의 동작은 `speed.require_feedback` 이 정한다.
+
+| 값 | 피드백이 없거나 stale 일 때 |
+|---|---|
+| `false` (현재 기본값) | PID 보정을 빼고 `v_ref` 만 발행. 적분기는 리셋 |
+| `true` | 즉시 정지 (0 발행). **오도메트리가 붙은 뒤의 운용값** |
+
+오도메트리 노드가 생기면 `feedback_topic` 을 바꾸고 `require_feedback` 을
+`true` 로 올린다. 그 전까지 PID 게인은 실제로 쓰이지 않는다.
 
 ## 5. 포팅하면서 걸린 것 — 다음 사람이 다시 밟지 않도록
 
@@ -152,6 +192,7 @@ Pure Pursuit 은 **후륜축 중심** 기준인데 PhysiCar URDF 는 `base_link`
 driver 의 `cmd_timeout` 이 1 초라, 갱신을 멈추면 **1 초간 직전 속도로 계속 굴러간다.**
 그래서 어떤 경로로 빠져나가든(`경로 없음` / `TF 끊김` / `발산` / `도착`)
 반드시 `stop()` 으로 0 을 발행한다. 100 Hz timer 가 그 갱신도 겸한다.
+**두 노드 각자가 이 규칙을 지킨다** — `steer` 는 조향 0, `speed` 는 속도 0.
 
 ### 5.4 `tf2::getYaw` 링크 에러
 
@@ -162,8 +203,8 @@ driver 의 `cmd_timeout` 이 1 초라, 갱신을 멈추면 **1 초간 직전 속
 
 ### 5.5 `dt` 를 고정값으로 쓰면 안 된다
 
-시뮬은 `dt = 1/100` 고정이지만 ROS timer 는 밀린다. 속도 EMA 처럼 dt 에 의존하는
-계산은 **실제 경과 시간**을 써야 한다.
+시뮬은 `dt = 1/100` 고정이지만 ROS timer 는 밀린다. 가감속 제한과 PID 처럼
+dt 에 의존하는 계산은 **실제 경과 시간**을 써야 한다.
 
 ### 5.6 폐곡선은 segment 3개 이상
 
@@ -199,7 +240,7 @@ window 추적이 무너진다 (레퍼런스 실측: 전역 탐색 대비 불일�
 
 시뮬 기동 확인:
 
-- 정확히 **100 Hz** 로 `/speed`, `/steering` 발행 (실측 99.998 Hz)
+- 정확히 **100 Hz** 로 `/speed`, `/steering` 발행 (실측 100.1 Hz, 노드 분리 후 재측정)
 - `KauPath` 수신 -> 최근접점 -> cte/heading error -> Pure Pursuit -> 곡률 기반 속도 전 단계 동작
 - 안전 정지 4종(`경로 없음` / `TF 지연` / `cte 발산` / `종점 도달`) 모두 실제로 발화
   (특히 `use_sim_time` 불일치로 TF 가 늦었을 때 **주행을 거부**하는 것을 확인)
@@ -223,6 +264,8 @@ window 추적이 무너진다 (레퍼런스 실측: 전역 탐색 대비 불일�
       `k_v` / `ld_min` / `ld_max` 재튜닝. 시뮬 탐색 범위는
       `k_v` 0.3~1.0 s / `ld_min` 30~60 cm / `ld_max` 150 cm
 - [ ] `kau_global_path` 또는 local path 가 나오면 `fake_path.py` 제거
+- [ ] 오도메트리 노드가 나오면 `speed.feedback_topic` 연결 후
+      `require_feedback: true` 로 올리고 PID 게인 튜닝 (현재 게인은 미검증 초기값)
 - [ ] `confidence` 낮은 경로(lane 기반)에서 감속하는 처리
 - [ ] `bezier.hpp` 를 `kau_bezier` 공용 패키지로 분리 (lane detection 담당자와 합의)
 - [ ] 실기 조향 중립 캘리브레이션 확인 (`driver_params.yaml` 의 `steering_center`)
@@ -236,8 +279,14 @@ window 추적이 무너진다 (레퍼런스 실측: 전역 탐색 대비 불일�
 | `include/kau_control/pure_pursuit.hpp` | Pure Pursuit 순수 함수 |
 | `include/kau_control/params.hpp` | 차량 제원 / 제어기 / 속도 제어 parameter |
 | `include/kau_control/kau_path.hpp` | `KauPath` <-> `Curve` 변환 + 무결성 검사 |
-| `src/path_follower_node.cpp` | ROS 노드. 제어 loop |
-| `config/path_follower.yaml` | 튜닝값 |
-| `launch/path_follower.launch.py` | 노드 기동 |
+| `include/kau_control/path_tracker.hpp` | **두 노드 공통부.** 경로 수신 · pose · 최근접점 추적 |
+| `include/kau_control/pid.hpp` | 속도 PID (적분 clamp) |
+| `src/speed_controller_node.cpp` | 속도 노드. 곡률 -> 목표속도 -> PID -> `/speed` |
+| `src/steer_controller_node.cpp` | 조향 노드. Pure Pursuit -> `/steering` |
+| `config/speed_controller.yaml` | 속도 튜닝값 |
+| `config/steer_controller.yaml` | 조향 튜닝값 |
+| `config/lane_follow.yaml` | 차선 추종 실험용 (두 노드 섹션) |
+| `launch/control.launch.py` | 두 노드 기동 |
+| `launch/lane_follow.launch.py` | 인지 + 두 노드 기동 |
 | `scripts/fake_path.py` | 테스트용 경로 발행자 (**임시**) |
 | `test/test_curve.cpp` | 레퍼런스 대조 단위 테스트 |

@@ -12,7 +12,12 @@
 
 #include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/msg/camera_info.hpp>
+#include <sensor_msgs/msg/joint_state.hpp>
+#include <sensor_msgs/msg/laser_scan.hpp>
 #include <std_msgs/msg/string.hpp>
+
+// Pan 명령 (/camera/pan, 절대각 rad)
+#include <std_msgs/msg/float64.hpp>
 
 // 팀 공용 함수형 경로 (docs/경로_형식.md 9장)
 #include <kau_msgs/msg/kau_path.hpp>
@@ -391,6 +396,205 @@ private:
     double centerOffsetPriorCm() const;
 
 
+    // ================================================================
+    // Pan 기반 Lane Lost Recovery
+    //
+    // 한쪽 흰선이 연속으로 안 잡히면 그 방향으로 카메라를 돌려
+    // 찾고, 찾으면(또는 상한까지 못 찾으면) 0 으로 복귀한다.
+    //
+    // ★ pan != 0 인 프레임의 BEV 좌표는 신뢰하지 않는다.
+    //
+    //   updateBevGeometry() 의 src 사다리꼴은 "카메라가 정면을
+    //   본다" 를 가정한 고정값이다. 카메라가 돌아가면 그 가정이
+    //   깨져 BEV 좌표와 base_link 의 대응이 어긋난다. tf2 로
+    //   base_link <-> camera_optical_frame 을 매 프레임 조회해
+    //   행렬을 다시 세우는 동적 BEV 는 아직 없다.
+    //
+    //   그래서 Idle 이 아닌 동안에는 imageCallback 이 경로를
+    //   새로 짓지 않는다 (/lane/center 가 그동안 끊긴다).
+    // ================================================================
+
+    enum class PanSearchState
+    {
+        Idle,       // pan = 0. 소실 감시만 한다
+        Searching,  // 소실된 쪽으로 전진하며 재검출을 노린다
+        Holding,    // 재검출됨. 직선 구간이 나올 때까지 그 각도를 유지
+        Returning   // 0 으로 복귀 중
+    };
+
+
+    // 순서 있는 점열이 얼마나 휘었는가 [deg]. 판정 불가면 음수.
+    //
+    // 앞 절반의 현(chord)과 뒤 절반의 현이 이루는 각이다.
+    //
+    // BEV 좌표로 재도 된다. 호모그래피는 직선을 직선으로 보내므로
+    // "휘었나 안 휘었나" 는 카메라가 돌아가 BEV 가정이 깨진
+    // 상태에서도 그대로 읽힌다. 다만 각도의 크기는 보존되지
+    // 않으므로(원근에 따라 늘거나 준다) 이 값은 세상의 도(度)가
+    // 아니라 BEV 영상 위의 도다. 임계값은 실측으로 잡을 것.
+    static double trackBendDeg(
+        const std::vector<cv::Point2d> & pts);
+
+
+    // pan 을 0 으로 되돌렸을 때 이 점들 중 몇 개가 여전히
+    // 화면 안에 들어오는가. 계산 불가면 -1.
+    //
+    // ------------------------------------------------------------
+    // 복귀 조건이 왜 "직선 구간" 이 아니라 이것인가
+    //
+    // 예전에는 도로가 펴지면 복귀했다. 그런데 "도로가 곧다" 와
+    // "정면으로 돌아가도 그 선이 보인다" 는 다른 명제다.
+    //
+    // 실측: 정지 상태의 곧은 구간에서 왼쪽 흰선이 화면 밖에
+    // 있었다. 도로는 곧으니 직선 판정은 통과하고, 복귀하면
+    // 그 선은 여전히 안 보이니 즉시 재탐색이 걸렸다. 15초에
+    // 9번 왕복했고 그동안 /lane/center 가 계속 끊겼다.
+    // 직선 임계값을 아무리 조여도 멎지 않는 종류의 문제다.
+    //
+    // 그래서 목적을 직접 잰다 — 복귀해도 그 선을 다시 잡을
+    // 수 있는가.
+    //
+    // ------------------------------------------------------------
+    // 기하
+    //
+    // BEV -> 원본(undistort) 영상 역호모그래피로 추적점의 영상
+    // 열 u 를 복원하면 영상각이 나온다 (오른쪽이 +):
+    //
+    //     a = atan((u - cx) / fx)
+    //
+    // 카메라가 pan 각 theta (왼쪽 +) 로 돌아가 있으므로 그 점의
+    // 차량 기준 방위는 psi = theta - a 이고, pan = 0 일 때의
+    // 영상각은
+    //
+    //     a0 = -psi = a - theta
+    //
+    // 이 값이 화면 반각(여유 제외) 안에 들면 정면에서도 보인다.
+    //
+    // 역호모그래피는 원본 영상과 BEV 사이의 순수 2D 사상이라
+    // pan 때문에 깨진 평면 가정과 무관하게 정확하다. 깨지는
+    // 것은 BEV 좌표의 "미터 해석" 이지 픽셀 대응이 아니다.
+    // ------------------------------------------------------------
+    int countVisibleAtZeroPan(
+        const std::vector<cv::Point2d> & track_px,
+        double pan_deg) const;
+
+
+    // camera_pan_joint 실측 각도 수신 (50 Hz).
+    void jointStateCallback(
+        const sensor_msgs::msg::JointState::SharedPtr msg);
+
+
+    // 최신 LaserScan 보관 (장애물 가림 판정용).
+    void scanCallback(
+        const sensor_msgs::msg::LaserScan::SharedPtr msg);
+
+
+    // 소실된 쪽에 차선을 가릴 만한 장애물이 있는가.
+    //
+    // dir 은 pan_search_dir_ 와 같은 규약 (+1 왼쪽 / -1 오른쪽).
+    //
+    // 차선이 화면에서 사라지는 이유는 두 가지다. 코너를 돌면서
+    // 시야 밖으로 나갔거나, 앞의 장애물에 가렸거나. 앞의 경우는
+    // 고개를 돌리면 다시 보이지만, 뒤의 경우는 아무리 돌려도
+    // 안 보인다 — 가린 물체가 같이 따라오기 때문이다. 그래도
+    // 탐색을 걸면 상한까지 헛돌고 그동안 경로만 끊긴다.
+    //
+    // 라이다는 그 둘을 구분할 수 있다. 소실된 쪽 전방 부채꼴에
+    // 가까운 반사가 있으면 가림으로 보고 탐색을 걸지 않는다.
+    //
+    // /scan_filtered 를 직접 본다. kau_object_detection 의
+    // /perception/obstacles 는 map 프레임이라 map->base_link TF
+    // 가 필요한데, 이 노드는 측위 비의존이 대전제라 쓸 수 없다.
+    // (게다가 그 노드는 Gazebo 참값 pose 에 의존해 실기에서는
+    //  빈 배열을 낸다.) LaserScan 은 lidar_link 프레임이고
+    // lidar_link -> base_link 는 URDF 고정 변환(rpy 0 0 0)이라
+    // 방위각이 그대로 통한다. 종방향 2.7 cm 차이는 부채꼴
+    // 판정에서 무시한다.
+    //
+    // 나이는 node clock 이 아니라 frame_stamp (지금 처리 중인
+    // 영상의 시각) 기준으로 잰다. 영상과 scan 은 같은 출처에서
+    // 스탬프를 받으므로(시뮬은 Gazebo, 실기는 시스템 클록) 이
+    // 비교는 use_sim_time 설정과 무관하게 성립한다. node clock
+    // 으로 재면 use_sim_time=false 인데 센서가 sim time 을 달고
+    // 오는 순간 나이가 1e9 초로 나와 판정이 영영 죽는다.
+    //
+    // scan 이 없거나 오래됐으면 false 를 돌려준다 — 판단 근거가
+    // 없을 때 탐색을 막지는 않는다 (fail-open).
+    bool obstacleOnSide(
+        int dir,
+        const rclcpp::Time & frame_stamp) const;
+
+
+    // 절대각 [deg] 을 pan_max_deg_ 로 클램프해 /camera/pan 에
+    // rad 로 발행하고 pan_cmd_deg_ 를 갱신한다.
+    //
+    // 한때 목표/발행을 분리해 매 프레임 각속도 제한으로 다가가는
+    // 연속 램프를 썼지만, 실기에서 "꺾다 말다" 하는 움직임이
+    // 나와 이산 스텝으로 되돌렸다.
+    void commandPan(double cmd_deg);
+
+
+    // 좌/우 원본 검출 상태를 보고 위 상태기계를 한 프레임 굴린다.
+    // 반드시 흰선 검증(16-a) 뒤, 소실 복원(16-c) 과 무관한 시점에
+    // 부른다 (복원선은 found_count 가 0 이라 어느 쪽이든 같다).
+    // frame_stamp 는 지금 처리 중인 영상의 시각이다. 각속도
+    // 제한의 dt 와 Holding 경과시간, 장애물 판정의 scan 나이를
+    // 전부 이 시계로 잰다. node clock 을 쓰면 use_sim_time 설정과
+    // RTF 에 따라 전부 어긋난다.
+    void updatePanSearch(
+        const LaneDetectionResult & left,
+        const LaneDetectionResult & yellow,
+        const LaneDetectionResult & right,
+        const rclcpp::Time & frame_stamp);
+
+
+    // ================================================================
+    // 시간축 강건화 (EMA)
+    //
+    // 게이트는 프레임 하나만 보고 통과/기각을 정한다. 임계값을
+    // 조이면 멀쩡한 차선이 떨어져 나가고, 풀면 도로 밖 노란
+    // 물체(원경의 그림 등)가 통과한다. 어느 쪽이든 하류
+    // state machine 의 fail-safe 판정이 흔들린다.
+    //
+    // 프레임 하나로 정할 수 없는 문제이므로 시간축을 쓴다.
+    // 게이트를 통과한 관측을 EMA 추정치에 섞되,
+    //
+    //   1. 섞는 양(alpha)을 그 프레임의 confidence 에 비례시킨다.
+    //      믿기 힘든 프레임은 추정치를 조금밖에 못 움직인다.
+    //
+    //   2. 추정치에서 path_ema_gate_cm_ 이상 벗어난 관측은
+    //      아예 섞지 않고, 직전 추정치를 그대로 내보내면서
+    //      confidence 만 떨어뜨린다. 하류는 "경로는 계속 오는데
+    //      신뢰도가 미끄러진다" 를 보고 스스로 판단할 수 있다.
+    //
+    //   3. 같은 주장이 path_ema_relock_frames_ 번 연속 오면
+    //      노이즈가 아니라 실제 변화로 보고 통째로 재잠금한다.
+    //      (그러지 않으면 진짜 차선 변화에 영원히 눈감는다)
+    //
+    // 자기운동 보정은 하지 않는다. 이 노드는 측위 비의존이
+    // 대전제라 odom/TF 를 볼 수 없다. 차선을 따라가는 동안
+    // base_link 기준 경로는 거의 불변이라 편향이 작지만,
+    // 고속에서는 추정치가 뒤로 끌리는 지연이 생긴다.
+    // ================================================================
+
+    // 제어점 열 사이의 평균 거리 [cm]. 크기가 다르면 음수.
+    static double pathDeviationCm(
+        const kau::bezier::Ctrl & a,
+        const kau::bezier::Ctrl & b);
+
+
+    // ctrl 이 바뀐 뒤 진단값(길이/곡률/cte/heading)을 다시 맞춘다.
+    // EMA 로 섞은 제어점은 관측 당시의 진단값과 더 이상 짝이
+    // 맞지 않는다. valid_length 는 하류가 LookAhead 를 자르는
+    // 근거이므로 특히 그대로 두면 안 된다.
+    static void refreshPathMetrics(LanePath & path);
+
+
+    // 관측 경로를 EMA 추정치와 합쳐 발행할 경로로 바꾼다.
+    // path.valid 가 false 면 관측 없음으로 보고 상태만 늙힌다.
+    void robustifyPath(LanePath & path);
+
+
     // 발행 게이트 (docs/경로_형식.md 와 무관한 안전장치).
     // 통과면 0, 아니면 기각 코드.
     int pathGate(const LanePath & path, double sx) const;
@@ -451,6 +655,15 @@ private:
     rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr
         camera_info_subscriber_;
 
+    // camera_pan_joint 실측 각도. 실기 드라이버는 서보 인코더가
+    // 없어 마지막 명령각을 되쏘고, 시뮬은 Gazebo 실측 관절각이다.
+    rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr
+        joint_state_subscriber_;
+
+    // 장애물 가림 판정용. lidar_link 프레임, 실기/시뮬 공통.
+    rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr
+        scan_subscriber_;
+
 
     // ================================================================
     // Publishers
@@ -461,12 +674,6 @@ private:
 
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr
         bev_image_publisher_;
-
-    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr
-        hls_binary_publisher_;
-
-    rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr
-        combined_binary_publisher_;
 
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr
         debug_image_publisher_;
@@ -485,6 +692,11 @@ private:
     // RViz 전용. BEST_EFFORT. 제어 경로는 여기 의존하지 않는다.
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr
         viz_path_publisher_;
+
+    // Pan 명령. physicar_driver_node 의 apply_pan() 이 절대각
+    // [rad] 으로 받아 ±30 deg 로 다시 클램프한다.
+    rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr
+        camera_pan_publisher_;
 
 
     // ================================================================
@@ -615,6 +827,171 @@ private:
     double max_lateral_cm_;
 
 
+    // ================================================================
+    // 시간축 강건화 (EMA) — 파라미터와 상태
+    // ================================================================
+
+    bool path_ema_enable_;
+
+    // confidence = 1 일 때의 혼합 비율. 작을수록 무겁고 느리다.
+    double path_ema_alpha_;
+
+    // 추정치에서 이만큼(제어점 평균거리) 벗어난 관측은 섞지 않는다.
+    // 0 이하면 게이트 없이 순수 EMA.
+    double path_ema_gate_cm_;
+
+    // 기각이 이만큼 연속되면 실제 변화로 보고 재잠금한다.
+    int path_ema_relock_frames_;
+
+    // 관측이 이만큼 연속으로 없으면 추정치를 폐기한다.
+    int path_ema_reset_frames_;
+
+
+    kau::bezier::Ctrl path_ema_ctrl_;
+
+    bool path_ema_valid_ = false;
+
+    double conf_ema_ = 0.0;
+
+    double valid_len_ema_ = 0.0;
+
+    int path_ema_reject_streak_ = 0;
+
+    // 직전 프레임의 관측-추정치 편차 [cm]. 진단 전용
+    // (path_ema_gate_cm 을 실측으로 잡는 근거가 된다).
+    double last_path_dev_cm_ = -1.0;
+
+    int ema_miss_streak_ = 0;
+
+
+    // ================================================================
+    // 장애물 가림 판정 (LaserScan)
+    // ================================================================
+
+    bool obstacle_pan_block_enable_;
+
+    // 소실된 쪽 부채꼴 [deg]. 차량 정면이 0, 왼쪽이 +.
+    //
+    // 흰선은 중앙선에서 31.25 cm 옆이고 카메라는 1 m 안팎을
+    // 본다. 그 선을 가리는 물체의 방위각이 대략 이 범위에 든다.
+    double obstacle_sector_min_deg_;
+
+    double obstacle_sector_max_deg_;
+
+    // 이 거리 안의 반사만 가림으로 본다 [m].
+    double obstacle_max_range_m_;
+
+    // 단일 빔 노이즈를 배제하기 위한 최소 점 수.
+    int obstacle_min_points_;
+
+    // scan 이 이보다 오래되면 판단하지 않는다 [s].
+    double obstacle_scan_timeout_s_;
+
+
+    sensor_msgs::msg::LaserScan::SharedPtr last_scan_;
+
+
+    // ================================================================
+    // Pan 탐색 상태
+    // ================================================================
+
+    bool pan_search_enable_;
+
+    // 탐색 시작 각도 [deg]. 첫 명령은 이 각도로 한 번에 간다.
+    //
+    // 차선이 화면에서 빠지는 상황은 대개 코너라 몇 도로는
+    // 다시 안 들어온다. 3도씩 기어가면 재검출까지 프레임을
+    // 낭비하고 그동안 경로도 끊겨 있다.
+    double pan_start_deg_;
+
+    // 시작 각도에서 못 찾았을 때의 한 스텝 회전량 [deg].
+    double pan_step_deg_;
+
+    double pan_max_deg_;
+
+    // |실측 - 목표| 가 이 안이면 정착으로 보고 다음 스텝으로 간다.
+    double pan_settle_tol_deg_;
+
+    int pan_trigger_miss_frames_;
+
+    // 명령 부호 뒤집개. 카메라가 명령과 반대로 돌면 -1.0.
+    double pan_sign_;
+
+    // 재검출 직후 추가로 더 돌릴 각도 [deg].
+    //
+    // 탐색은 "겨우 보이기 시작한" 지점에서 멈춘다. 그 각도에서는
+    // 찾은 선이 화면 가장자리에 걸쳐 있어, 차가 조금만 움직여도
+    // 다시 빠진다. 한 번 더 꺾어 안쪽으로 당겨 놓는다.
+    // pan_max_deg_ 는 commandPan 이 그대로 지킨다.
+    double pan_overshoot_deg_;
+
+
+    // 재검출 후 복귀 조건 — 직선 구간
+    //
+    // 찾자마자 복귀하면 코너 한복판에서 원위치로 돌아가 그
+    // 선을 곧바로 다시 놓친다. pan 이 왕복하며 그동안 경로가
+    // 계속 끊긴다. 그래서 재검출 뒤에는 각도를 유지한 채
+    // (Holding) 도로가 다시 펴질 때까지 기다렸다 복귀한다.
+    // 화면 가장자리 여유 [deg]. 반각에서 이만큼 뺀 범위만
+    // "보인다" 로 친다. 가장자리에 겨우 걸친 선은 차가 조금만
+    // 움직여도 다시 빠지기 때문이다.
+    double pan_return_fov_margin_deg_;
+
+    int pan_return_confirm_frames_;
+
+    // 직선 판정에 필요한 최소 추적점 수.
+    //
+    // 짧은 점열은 어떤 코너에서도 직선으로 보인다 (구현부
+    // 주석 참고). 근거가 모자라면 "직선 아님" 이 아니라
+    // "판정 불가" 로 다뤄 Holding 을 유지한다.
+    int pan_return_min_points_;
+
+    // 직선이 끝내 안 나올 때의 탈출구 [s].
+    //
+    // 0 이하면 무한 대기 — 직선을 만날 때까지 복귀하지 않는다
+    // (기본값). Holding 동안에는 경로를 짓지 않으므로 그동안
+    // /lane/center 가 계속 끊겨 있다는 뜻이다. 그게 곤란해지면
+    // 양수로 바꿔 상한을 준다.
+    double pan_hold_timeout_s_;
+
+
+    PanSearchState pan_state_ = PanSearchState::Idle;
+
+    // 탐색 회전 방향. +1 왼쪽 / -1 오른쪽 / 0 탐색 중 아님.
+    // camera_pan_joint 는 axis +Z 라 +rad 이 왼쪽이다.
+    int pan_search_dir_ = 0;
+
+    // 표시용. 스텝 방식에서는 발행값을 그대로 따라간다.
+    double pan_goal_deg_ = 0.0;
+
+    // 실제로 /camera/pan 에 발행한 각도 [deg]
+    double pan_cmd_deg_ = 0.0;
+
+    // /joint_states 가 알려준 현재 각도 [deg]
+    double actual_pan_deg_ = 0.0;
+
+    bool joint_state_received_ = false;
+
+    // 좌/우 흰선이 연속으로 안 잡힌 프레임 수
+    int left_miss_streak_ = 0;
+
+    int right_miss_streak_ = 0;
+
+    // Holding 에서 연속으로 직선 판정이 난 프레임 수
+    int pan_straight_streak_ = 0;
+
+    // 직전 프레임의 꺾임각 [deg]. 진단 전용 (음수 = 판정 불가).
+    // 복귀 판정에는 쓰이지 않는다 — status 의 pbend 로만 나간다.
+    double last_bend_deg_ = -1.0;
+
+    // 직전 프레임에 "정면에서도 보인다" 로 센 점 수. 진단 전용.
+    int last_visible_at_zero_ = -1;
+
+    // Holding 진입 시각. 기본 생성 rclcpp::Time 은 SYSTEM_TIME
+    // 이라 node clock(ROS_TIME) 과 빼면 예외가 난다. 명시한다.
+    rclcpp::Time pan_hold_start_{0, 0, RCL_ROS_TIME};
+
+
     std::vector<cv::Point2f> bev_src_points_;
 
     std::vector<cv::Point2f> bev_dst_points_;
@@ -631,6 +1008,20 @@ private:
     cv::Mat distortion_coefficients_;
 
     bool camera_calibrated_;
+
+
+    // undistort 재사용 맵.
+    //
+    // cv::undistort() 는 호출할 때마다 내부에서
+    // initUndistortRectifyMap 을 다시 만든다 (480x360 float 맵
+    // 두 장, 약 1.4 MB). intrinsic 은 CameraInfo 로 한 번 정해지면
+    // 바뀌지 않으므로 맵도 한 번만 만들고 remap 만 돌린다.
+    cv::Mat undistort_map1_;
+
+    cv::Mat undistort_map2_;
+
+    // 맵을 만든 영상 크기. 크기가 바뀌면 다시 만든다.
+    cv::Size undistort_map_size_{0, 0};
 };
 
 #endif  // KAU_LANE_DETECTION__KAU_LANE_DETECTION_NODE_HPP_

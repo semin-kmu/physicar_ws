@@ -1,27 +1,30 @@
-# 경로 추종 제어 parameter
+# 조향 제어 parameter (Pure Pursuit)
 #
-# 단위: 길이 cm / 각도 deg / 속도 m/s   (ROS 경계에서만 m, rad 로 변환)
+# 단위: 길이 cm / 각도 deg   (ROS 경계에서만 m, rad 로 변환)
 #
 # 기본값 출처
 #   차량 제원        대회측 회신 (확정) + physicar driver_params.yaml
 #   Pure Pursuit     KAU_AMET_Test 시뮬 검증본의 레퍼런스 튜닝값
-#   속도 제어        sim_common/config.py SpeedParams
 #
 # **주행 공간이나 차량이 바뀌면 다시 잡아야 한다.**
 
-path_follower:
+steer_controller:
   ros__parameters:
 
     # --- 인터페이스 ---
     path_topic: "/path/local"           # 주 경로 (kau_msgs/KauPath)
     fallback_path_topic: "/path/global" # 주 경로가 끊기면 이걸로 추종
-    map_frame: "map"                    # 경로와 포즈의 기준 프레임
+    map_frame: "map"
     base_frame: "base_footprint"
+    pose_source: "tf"                   # tf | identity
+    path_latched: false                 # 발행측 durability 와 맞출 것
+    fallback_path_latched: true
+    speed_topic: "/speed"               # Ld 계산에 쓸 현재 속도 명령
 
-    control_hz: 100.0                   # 제어 주기. 가이드 기준값
-    tf_timeout: 0.2                     # s, TF 가 이보다 오래되면 정지
+    control_hz: 100.0
+    tf_timeout: 0.2                     # s, TF 가 이보다 오래되면 조향 0
     path_timeout: 1.0                   # s, 주 경로가 이보다 오래되면 fallback
-    cte_abort_cm: 200.0                 # cm, 발산 판정 -> 정지
+    cte_abort_cm: 200.0                 # cm, 발산 판정 -> 조향 0
     goal_tol_cm: 10.0                   # cm, 개곡선 종점 도달 판정
 
     # --- 차량 제원 ---
@@ -30,7 +33,8 @@ path_follower:
       max_steer_deg: 20.0               # 확정. 하드웨어 한계
       # Pure Pursuit 기준점(후륜축)이 base_frame 원점에서 떨어진 종방향 거리.
       # PhysiCar URDF 는 base_footprint 를 휠베이스 중앙에 두므로 -wheelbase/2.
-      # 이 값을 0 으로 두면 코너에서 계속 안쪽으로 파고든다.
+      # 0 으로 두면 코너에서 계속 안쪽으로 파고든다.
+      # speed_controller.yaml 의 같은 값과 반드시 일치시킬 것.
       rear_axle_offset_cm: -9.0
 
     # --- Pure Pursuit ---
@@ -40,20 +44,6 @@ path_follower:
       k_v: 0.5                          # s, Ld = k_v * v
       ld_min_cm: 30.0
       ld_max_cm: 175.0
-
-    # --- 속도 제어 ---
-    # enabled: false 면 constant 를 그대로 쓴다 (제어기 단독 튜닝용).
-    speed:
-      enabled: true
-      constant: 1.0                     # m/s, enabled=false 일 때만 사용
-      v_min: 0.5
-      v_max: 2.0                        # 하드웨어 상한은 3.0
-      look_min_cm: 20.0                 # 곡률 탐색 window 하한
-      look_max_cm: 150.0                # v_max 에서의 window 상한
-      min_span_cm: 20.0                 # window 최소 폭 (저속 퇴화 방지)
-      margin: 0.8                       # v_min 기준 곡률 = margin * kappa_max
-      use_sqrt_law: true                # true: 등횡가속도, false: 선형 보간
-      ema_tau: 0.4                      # s, 목표속도 평활 시상수
 
     # --- 시각화 ---
     # RViz 는 KauPath 를 못 그리므로 nav_msgs/Path 로 분리 발행한다.

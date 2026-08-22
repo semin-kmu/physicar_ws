@@ -25,10 +25,27 @@ const stubEl = () => new Proxy({}, {
   set(t, k, v) { if (k === 'value') t.__v = v; else t[k] = v; return true; },
 });
 
+// 편집기가 기동할 때 DOM 에서 읽는 기본값들. 안 채워 두면 stub 의 '0.4' 가
+// 들어가서 차량 제원이 엉뚱해진다 (곡률 한계가 0.007 이 된다).
 const els = {};
+const DOM_DEFAULTS = {
+  vehL: '0.18', vehSteer: '20', vehMargin: '0.90', kappaLimit: '1.8199',
+  laneWidth: '0.40', bndSpacing: '0.10', seedSpacing: '0.5', seedTol: '0.02',
+  seedMin: '0.15', c2Theta: '1.0', c2Kappa: '0.05',
+  cadR: '0.55', cadRcap: '1.5', cadTrans: '0.15',
+  imgCx: '0', imgCy: '0', imgW: '1', imgRot: '0', imgAlpha: '0.6',
+  trkOx: '3.68', trkOy: '1.39', trkRot: '0', trkAlpha: '0.85',
+  dispOx: '3.68', dispOy: '-1.39',
+};
 const sandbox = {
   document: {
-    getElementById: (id) => (els[id] || (els[id] = stubEl())),
+    getElementById: (id) => {
+      if (!els[id]) {
+        els[id] = stubEl();
+        if (DOM_DEFAULTS[id] !== undefined) els[id].value = DOM_DEFAULTS[id];
+      }
+      return els[id];
+    },
     createElement: () => stubEl(),
     body: stubEl(),
   },
@@ -53,7 +70,11 @@ const { buildSegments, segLength, segKappaMax, knotFrames, offsetPolyline, resam
         splitLaps, alignLaps, resampleClosedFrom, seedFromTrajectory,
         seedAdaptive, distToPolyline, deCasteljau,
         buildLayer, splitSegments, arcFrames, reverseLayer, nodeInsert, nodeRemove,
-        hermiteToBezier } = sandbox;
+        hermiteToBezier, dist,
+        kappaOfSteer, steerOfKappa, kappaMax, curvLimit } = sandbox;
+
+// const 로 선언된 것은 vm 컨텍스트의 globalThis 에 안 올라간다. 따로 꺼낸다.
+const VEH = vm.runInContext('VEH', sandbox);
 
 let failed = 0;
 
@@ -445,6 +466,73 @@ function bowOf(sg) {
     B3.joints.every((j) => j.forced) && bowOf(B3.segs[0]) > 0.01,
     `직선 휨 ${(bowOf(B3.segs[0]) * 1000).toFixed(1)} mm · ` +
     `직선 max|k| ${kmaxOf(B3.segs[0]).toFixed(3)}`);
+
+  // 이미 전이로 C² 를 맞춰 놓은 경로라면 평균낼 것이 없으므로 곡선이 바뀌면 안 된다.
+  // 예전에는 blend 일 때 원호의 sigma 최적화를 건너뛰어서, 아무것도 안 바뀌어야
+  // 하는 자리에서 곡률이 13 % 올라갔다.
+  const a2 = buildLayer(L2, {});
+  const b2 = buildLayer(L2, { blend: true });
+  let same = a2.segs.length === b2.segs.length;
+  let dk = 0;
+  for (let i = 0; same && i < a2.segs.length; i++) {
+    dk = Math.max(dk, Math.abs(kmaxOf(a2.segs[i]) - kmaxOf(b2.segs[i])));
+    for (let c = 0; c < a2.segs[i].ctrl.length; c++) {
+      for (let q = 0; q < 6; q++) {
+        if (dist(a2.segs[i].ctrl[c][q], b2.segs[i].ctrl[c][q]) > 1e-9) same = false;
+      }
+    }
+  }
+  check('이미 C² 인 경로는 평균 강제를 켜도 곡선이 그대로다', same && dk < 1e-9,
+    `제어점 일치 ${same} · max|k| 차이 ${dk.toExponential(1)}`);
+}
+
+{
+  // 팀 약속: **발행되는 모든 조각은 제어점 6 개짜리 5차 Bezier 다.**
+  // 직선도 원호도 전용 도형이 아니라 (theta, kappa) 를 잡는 방식만 다르고,
+  // 나오는 것은 전부 같은 형식이다. 여기서 그게 깨지면 소비자가 못 읽는다.
+  const R0 = 0.6, s3 = R0 * Math.SQRT1_2;
+  const pts = [[0, 0], [2, 0], [2 + s3, R0 - s3], [2 + R0, R0],
+               [2 + R0, R0 + 0.3], [2 + R0, R0 + 1.5]];
+  const L = layer(pts, [0, 1, 3, 4, 5], [4], false);
+  const B = buildLayer(L, {});
+
+  let all6 = true, kinds = {};
+  for (const sg of B.segs) {
+    kinds[sg.type] = (kinds[sg.type] || 0) + 1;
+    for (const c of sg.ctrl) if (c.length !== 6) all6 = false;
+  }
+  check('모든 세그먼트가 제어점 6 개짜리 5차 Bezier',
+    all6 && B.segs.length >= 3,
+    `${JSON.stringify(kinds)} · 차수 ${B.segs[0].ctrl[0].length - 1}`);
+
+  // 직선 세그먼트의 제어점은 현 위에 0.2 간격으로 정확히 놓여야 한다.
+  const line = B.segs.find((x) => x.type === 'line');
+  const c = line.ctrl[0];
+  const A = c[0], Z = c[5];
+  const vx = Z[0] - A[0], vy = Z[1] - A[1];
+  const ch = Math.hypot(vx, vy);
+  let maxOff = 0, maxT = 0;
+  c.forEach((q, i) => {
+    const t = ((q[0] - A[0]) * vx + (q[1] - A[1]) * vy) / (ch * ch);
+    const off = Math.abs(vx * (A[1] - q[1]) - (A[0] - q[0]) * vy) / ch;
+    maxOff = Math.max(maxOff, off);
+    maxT = Math.max(maxT, Math.abs(t - i / 5));
+  });
+  check('직선의 제어점 6 개가 현 위에 0.2 간격으로 균등',
+    maxOff < 1e-12 && maxT < 1e-12,
+    `현에서 벗어남 ${(maxOff * 1000).toExponential(1)} mm · 간격 오차 ${maxT.toExponential(1)}`);
+
+  // 원호 세그먼트도 원이 아니라 Bezier 다. 제어점은 곡선 위에 있지 않다.
+  const arc = B.segs.find((x) => x.type === 'arc');
+  const ac = arc.ctrl[0];
+  const onCurve = [1, 2, 3, 4].map((i) => {
+    let best = Infinity;
+    for (let t = 0; t <= 200; t++) best = Math.min(best, dist(deCasteljau(ac, t / 200), ac[i]));
+    return best;
+  });
+  check('원호의 P1~P4 는 곡선 위의 점이 아니다 (제어점이다)',
+    ac.length === 6 && Math.max(...onCurve) > 0.01,
+    `곡선까지 ${onCurve.map((v) => (v * 1000).toFixed(0) + 'mm').join(' ')}`);
 }
 
 {
@@ -482,6 +570,50 @@ function bowOf(sg) {
   check('진행방향을 뒤집어도 세그먼트 구성이 보존된다',
     before === 'line,link,line' && after === 'line,link,line',
     `${before}  ->  ${after}`);
+}
+
+// ---------------------------------------------------------------- 곡률 한계
+
+console.log('\n[곡률 한계] 차량 제원에서 유도한다 — 숫자를 손으로 박지 않는다');
+
+{
+  // kinematic bicycle model, 후륜축 중심:  R = L/tan(d),  k = tan(d)/L
+  check('차량 제원이 DOM 기본값으로 들어왔다',
+    Math.abs(VEH.wheelbase - 0.18) < 1e-12 && Math.abs(VEH.maxSteerDeg - 20) < 1e-12 &&
+    Math.abs(VEH.margin - 0.9) < 1e-12,
+    `L ${VEH.wheelbase} m · δ ${VEH.maxSteerDeg}° · 마진 ${VEH.margin}`);
+
+  const k = kappaMax();
+  check('L 0.18 m · δ 20° -> κ_max 2.0221 (R_min 0.4945 m)',
+    Math.abs(k - Math.tan(20 * Math.PI / 180) / 0.18) < 1e-12 &&
+    Math.abs(k - 2.022057) < 1e-5 && Math.abs(1 / k - 0.494546) < 1e-5,
+    `κ_max ${k.toFixed(6)} · R_min ${(1 / k).toFixed(6)} m`);
+
+  // 한계 칸을 비워 두면 제원에서 유도한 값을 쓴다.
+  sandbox.document.getElementById('kappaLimit').value = '';
+  const lim = curvLimit();
+  check('한계 칸이 비면 κ_max × 0.90 을 쓴다 (조향 18.14°)',
+    Math.abs(lim - k * 0.9) < 1e-9 && Math.abs(steerOfKappa(lim) - 18.14) < 0.02,
+    `한계 ${lim.toFixed(4)} 1/m · R ${(1 / lim).toFixed(4)} m · δ ${steerOfKappa(lim).toFixed(2)}°`);
+
+  // 손으로 적으면 그 값이 이긴다 — 디버깅할 때 한계를 잠깐 풀 수 있어야 한다.
+  sandbox.document.getElementById('kappaLimit').value = '1.5';
+  check('한계를 손으로 적으면 그 값이 이긴다', Math.abs(curvLimit() - 1.5) < 1e-12,
+    `${curvLimit().toFixed(4)} 1/m`);
+  sandbox.document.getElementById('kappaLimit').value = '';
+
+  // 조향각 <-> 곡률 왕복
+  let worst = 0;
+  for (const deg of [1, 5, 10, 15, 20, 25]) {
+    worst = Math.max(worst, Math.abs(steerOfKappa(kappaOfSteer(deg)) - deg));
+  }
+  check('조향각 <-> 곡률 왕복이 일치', worst < 1e-9, `최대 오차 ${worst.toExponential(1)}°`);
+
+  // 전륜 기준으로 재면 더 크다. 기준점을 헷갈리면 5% 넘게 틀린다.
+  const Rf = 0.18 / Math.sin(20 * Math.PI / 180);
+  check('전륜 기준(L/sin δ)과 구분된다',
+    Math.abs(Rf - 0.526285) < 1e-5 && Rf > 1 / k,
+    `후륜 ${(1 / k).toFixed(4)} m vs 전륜 ${Rf.toFixed(4)} m (${((Rf / (1 / k) - 1) * 100).toFixed(1)}% 차이)`);
 }
 
 function lapLen(p) {

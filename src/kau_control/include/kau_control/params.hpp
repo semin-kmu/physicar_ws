@@ -8,7 +8,7 @@
 //       속도만 m/s 이므로 계산 시 cm/s 로 변환 (CM_PER_M)
 // 좌표계: 2D 직교, yaw 는 +x 축 기준 CCW +, 조향각 좌회전 +
 //
-// 기본값은 시뮬 검증본과 동일. 실제 운용값은 config/path_follower.yaml 에서
+// 기본값은 시뮬 검증본과 동일. 실제 운용값은 config/*_controller.yaml 에서
 // 덮어쓴다 (팀 규칙: 튜닝값은 YAML).
 // ====================================================================
 
@@ -110,7 +110,9 @@ struct ControllerParams
 // 전방 lookahead 구간의 최대 곡률로 목표 속도 결정.
 //
 //     window = [s0 + look_min, s0 + look_k * v]      look_k = look_max / v_max
-//     v      = law(kappa_win) 을 [v_min, v_max] 로 clamp
+//     v_ref  = law(kappa_win) 을 [v_min, v_max] 로 clamp -> 가감속 제한
+//
+// 실제 발행값은 speed_controller 가 v_ref 에 PID 보정을 더해 만든다.
 //
 // 기준점 2 개로 정의
 //     kappa = 0                      -> v_max   (직선)
@@ -138,7 +140,9 @@ struct SpeedParams
 
     bool   use_sqrt = true;   // true: sqrt law, false: linear law
 
-    double ema_tau  = 0.4;    // sec, 목표속도 EMA 시상수
+    double accel_max = 1.0;   // m/s^2, 목표속도 증가율 상한
+
+    double decel_max = 2.0;   // m/s^2, 목표속도 감소율 상한 (감속은 넉넉히)
 
     // cm per (m/s). v_max 에서 look_max 가 되도록.
     double look_k() const
@@ -166,15 +170,14 @@ struct SpeedParams
         hi_out = std::max(look_k() * v_ms, look_min + min_span);
     }
 
-    // EMA 계수. 1 - exp(-dt/tau) (이산 등가).
-    double ema_alpha(double dt) const
+    // 목표속도 급변 방지. prev 에서 want 로 dt 동안 갈 수 있는 만큼만 간다.
+    double rateLimit(double prev, double want, double dt) const
     {
-        if (ema_tau <= 0.0)
-        {
-            return 1.0;
-        }
+        const double up = accel_max * dt;
 
-        return 1.0 - std::exp(-dt / ema_tau);
+        const double dn = decel_max * dt;
+
+        return std::min(std::max(want, prev - dn), prev + up);
     }
 
     // 구간 최대 곡률 [1/cm] -> 목표 속도 [m/s].

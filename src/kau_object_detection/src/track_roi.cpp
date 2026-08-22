@@ -23,6 +23,17 @@ namespace kau_object_detection
 namespace
 {
 
+bool base_pose_is_usable(const BasePose2D & base_pose, const SensorMountOptions & mount)
+{
+  return std::isfinite(base_pose.x_m) &&
+         std::isfinite(base_pose.y_m) &&
+         std::isfinite(base_pose.yaw_rad) &&
+         std::isfinite(mount.lidar_offset_x_m) &&
+         std::isfinite(mount.lidar_offset_y_m);
+}
+
+}  // namespace
+
 WorldCircleCandidate carry_sensor_values(const ConeOccupancyCandidate & candidate)
 {
   WorldCircleCandidate carried;
@@ -35,17 +46,6 @@ WorldCircleCandidate carry_sensor_values(const ConeOccupancyCandidate & candidat
   carried.last_scan_index = candidate.last_scan_index;
   return carried;
 }
-
-bool base_pose_is_usable(const BasePose2D & base_pose, const SensorMountOptions & mount)
-{
-  return std::isfinite(base_pose.x_m) &&
-         std::isfinite(base_pose.y_m) &&
-         std::isfinite(base_pose.yaw_rad) &&
-         std::isfinite(mount.lidar_offset_x_m) &&
-         std::isfinite(mount.lidar_offset_y_m);
-}
-
-}  // namespace
 
 Point2D transform_sensor_point_to_world(
   const Point2D & sensor_point,

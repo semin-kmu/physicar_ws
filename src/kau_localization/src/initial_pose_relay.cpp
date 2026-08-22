@@ -25,6 +25,11 @@
  *         -> /finish_trajectory  (ACTIVE 인 것만)
  *         -> /start_trajectory   (use_initial_pose=true)
  *
+ * 시작 위치를 이미 알고 있으면 (대회처럼) `start_pose` 파라미터로 넣는다.
+ * 기동 직후 스스로 같은 3 단계를 한 번 돌아서 그 자리에 앉는다. 값이 없으면
+ * 예전과 같이 /initialpose 를 기다리기만 한다. 안 주고 띄우면 Cartographer 는
+ * 지도 원점에서 시작해 전역 재탐색으로 스스로 찾아오는데, 그건 느리다.
+ *
  * relative_to_trajectory_id 는 0 으로 고정한다. pbstream 을 frozen 으로 올리면
  * 저장된 지도가 trajectory 0 이 되고, 우리가 찍는 pose 는 그 지도 좌표계
  * (= map 프레임) 기준이기 때문이다.
@@ -35,9 +40,12 @@
  * 응답을 실제로 꺼내주는 쪽은 메인 스레드의 spin 이므로 이 분리가 필요하다.
  */
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstddef>
+#include <cstdio>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -71,6 +79,9 @@ constexpr int32_t kMapTrajectoryId = 0;
 constexpr int32_t kStatusOk = 0;
 
 constexpr std::chrono::seconds kServiceTimeout{10};
+
+// 기동 직후 cartographer_node 가 서비스와 기본 trajectory 를 올릴 때까지.
+constexpr std::chrono::seconds kSeedTimeout{30};
 }  // namespace
 
 class InitialPoseRelay : public rclcpp::Node
@@ -98,9 +109,20 @@ public:
       "/initialpose", 1,
       [this](const PoseWithCovarianceStamped::SharedPtr msg) {onInitialPose(msg);});
 
+    // worker_ 가 뜨기 전에 정해져 있어야 한다. 스레드가 이걸 보고 시작한다.
+    seed_ = parseStartPose(declare_parameter<std::string>("start_pose", ""));
+
     worker_ = std::thread(&InitialPoseRelay::run, this);
 
-    RCLCPP_INFO(get_logger(), "RViz 의 2D Pose Estimate 를 기다린다 (/initialpose).");
+    if (seed_) {
+      RCLCPP_INFO(
+        get_logger(),
+        "start_pose 로 기동 직후 재측위한다: x=%.3f y=%.3f yaw=%.1f deg",
+        seed_->position.x, seed_->position.y,
+        2.0 * std::atan2(seed_->orientation.z, seed_->orientation.w) * 180.0 / M_PI);
+    } else {
+      RCLCPP_INFO(get_logger(), "RViz 의 2D Pose Estimate 를 기다린다 (/initialpose).");
+    }
   }
 
   ~InitialPoseRelay() override
@@ -147,6 +169,11 @@ private:
 
   void run()
   {
+    if (seed_) {
+      seedInitialPose(*seed_);
+      seed_.reset();
+    }
+
     while (true) {
       geometry_msgs::msg::Pose pose;
       {
@@ -169,6 +196,71 @@ private:
     }
   }
 
+  /// "x,y,yaw" (m, m, rad) 를 Pose 로. 빈 문자열이면 사용 안 함.
+  static std::optional<geometry_msgs::msg::Pose> parseStartPose(const std::string & text)
+  {
+    if (text.empty()) {
+      return std::nullopt;
+    }
+
+    double x = 0.0, y = 0.0, yaw = 0.0;
+    if (std::sscanf(text.c_str(), " %lf , %lf , %lf", &x, &y, &yaw) != 3) {
+      RCLCPP_ERROR(
+        rclcpp::get_logger("initial_pose_relay"),
+        "start_pose 형식이 'x,y,yaw' 가 아니다: '%s'. 무시한다.", text.c_str());
+      return std::nullopt;
+    }
+
+    geometry_msgs::msg::Pose pose;
+    pose.position.x = x;
+    pose.position.y = y;
+    pose.orientation.z = std::sin(yaw / 2.0);
+    pose.orientation.w = std::cos(yaw / 2.0);
+    return pose;
+  }
+
+  /// 기동 직후 start_pose 로 한 번 재측위한다.
+  ///
+  /// cartographer_node 는 start_trajectory_with_default_topics 로 이미
+  /// trajectory 를 하나 열어 둔다. **그게 올라온 뒤에** 갈아끼워야 한다.
+  /// 먼저 질러버리면 우리 것과 기본 것이 둘 다 살아서 trajectory 가 둘이 된다.
+  ///
+  /// 대기는 steady_clock 으로 센다. use_sim_time 이 true 라 ROS 시계를 쓰면
+  /// /clock 이 아직 안 흐를 때 여기서 그대로 멈춘다.
+  void seedInitialPose(const geometry_msgs::msg::Pose & pose)
+  {
+    if (!start_->wait_for_service(kSeedTimeout)) {
+      RCLCPP_ERROR(
+        get_logger(),
+        "/start_trajectory 가 안 뜬다. start_pose 를 넣지 못했다. "
+        "cartographer_node 를 확인할 것.");
+      return;
+    }
+
+    const auto deadline = std::chrono::steady_clock::now() + kSeedTimeout;
+    while (rclcpp::ok() && std::chrono::steady_clock::now() < deadline) {
+      const auto states =
+        call(get_states_, std::make_shared<GetTrajectoryStates::Request>());
+
+      if (states) {
+        const auto & t = states->trajectory_states;
+        const bool active = std::any_of(
+          t.trajectory_state.begin(), t.trajectory_state.end(),
+          [](uint8_t s) {return s == TrajectoryStates::ACTIVE;});
+
+        if (active) {
+          relocalize(pose);
+          return;
+        }
+      }
+
+      std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
+
+    RCLCPP_ERROR(
+      get_logger(), "ACTIVE trajectory 가 안 올라왔다. start_pose 를 넣지 못했다.");
+  }
+
   void relocalize(const geometry_msgs::msg::Pose & pose)
   {
     RCLCPP_INFO(
@@ -179,19 +271,46 @@ private:
       return;
     }
 
-    // 지도(trajectory 0, FROZEN)는 건드리면 안 되고,
+    // 지도(trajectory 0)는 건드리면 안 되고,
     // 현재 위치 추정 중인 ACTIVE trajectory 만 닫는다.
+    //
+    // 0 번은 상태가 무엇으로 보이든 절대 닫지 않는다. FROZEN 으로 올렸으면
+    // 애초에 ACTIVE 로 안 보이지만, 한 도메인에 cartographer_node 가 둘 이상
+    // 떠 있으면 서비스 이름이 겹쳐 엉뚱한 인스턴스에 요청이 갈 수 있다
+    // (2026-08-22 실제로 발생: 남의 인스턴스의 지도 trajectory 를 닫아
+    // FROZEN 이 FINISHED 가 됐다 = 최적화에 다시 끌려다니게 됐다).
+    // 지도를 잃는 것보다 재측위를 포기하는 편이 낫다.
     const auto & trajectories = states->trajectory_states;
     for (std::size_t i = 0; i < trajectories.trajectory_id.size(); ++i) {
       if (trajectories.trajectory_state[i] != TrajectoryStates::ACTIVE) {
         continue;
       }
       const int32_t id = trajectories.trajectory_id[i];
+
+      if (id == kMapTrajectoryId) {
+        RCLCPP_ERROR(
+          get_logger(),
+          "지도 trajectory %d 가 ACTIVE 로 보인다. 닫지 않고 재측위를 중단한다. "
+          "pbstream 이 frozen 으로 안 올라왔거나, cartographer_node 가 둘 이상 "
+          "떠 있어 서비스가 겹쳤을 수 있다.", id);
+        return;
+      }
+
       RCLCPP_INFO(get_logger(), "trajectory %d 종료.", id);
 
       auto request = std::make_shared<FinishTrajectory::Request>();
       request->trajectory_id = id;
-      if (!call(finish_, request)) {
+      const auto finished = call(finish_, request);
+      if (!finished) {
+        return;
+      }
+
+      // 응답 코드를 안 보면 실패해도 그냥 다음 단계로 넘어가, 살아있는
+      // trajectory 를 두고 새 trajectory 를 하나 더 여는 꼴이 된다.
+      if (finished->status.code != kStatusOk) {
+        RCLCPP_ERROR(
+          get_logger(), "finish_trajectory(%d) 실패 (%d): %s",
+          id, finished->status.code, finished->status.message.c_str());
         return;
       }
     }
@@ -253,6 +372,9 @@ private:
   rclcpp::Client<FinishTrajectory>::SharedPtr finish_;
   rclcpp::Client<StartTrajectory>::SharedPtr start_;
   rclcpp::Subscription<PoseWithCovarianceStamped>::SharedPtr subscription_;
+
+  // 기동 직후 한 번만 쓰는 초기 pose. worker_ 스레드만 만진다.
+  std::optional<geometry_msgs::msg::Pose> seed_;
 
   std::mutex mutex_;
   std::condition_variable condition_;

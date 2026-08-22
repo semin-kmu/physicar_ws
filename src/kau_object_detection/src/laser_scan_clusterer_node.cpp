@@ -17,6 +17,7 @@
 #include <cmath>
 #include <cstdint>
 #include <functional>
+#include <iomanip>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -24,18 +25,24 @@
 #include <string>
 #include <vector>
 
+#include "geometry_msgs/msg/transform_stamped.hpp"
 #include "kau_msgs/msg/obstacle_circle_array.hpp"
 #include "kau_object_detection/cluster_geometry.hpp"
 #include "kau_object_detection/cone_occupancy.hpp"
 #include "kau_object_detection/laser_scan_clusterer.hpp"
 #include "kau_object_detection/laser_scan_validator.hpp"
 #include "kau_object_detection/object_list.hpp"
+#include "kau_object_detection/object_list_transform.hpp"
+#include "kau_object_detection/obstacle_tracker.hpp"
 #include "kau_object_detection/track_geometry.hpp"
 #include "kau_object_detection/track_roi.hpp"
 #include "kau_object_detection/world_pose.hpp"
 #include "rclcpp/create_timer.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/laser_scan.hpp"
+#include "tf2/exceptions.hpp"
+#include "tf2_ros/buffer.hpp"
+#include "tf2_ros/transform_listener.hpp"
 
 #ifdef KAU_OBJECT_DETECTION_WITH_GZ_TRANSPORT
 #include <gz/msgs/pose_v.pb.h>
@@ -125,10 +132,31 @@ public:
       declare_parameter<double>("object_list_pose_timeout_s", 0.3);
     object_list_scan_timeout_s_ =
       declare_parameter<double>("object_list_scan_timeout_s", 0.3);
+    // How long the Object List transform lookup may wait for a TF that covers
+    // the scan measurement time. Only a short wait is useful: a scan whose
+    // transform never arrives has to be reported, not held.
+    object_list_transform_timeout_s_ =
+      declare_parameter<double>("object_list_transform_timeout_s", 0.05);
     const auto watchdog_period_s =
       declare_parameter<double>("object_list_watchdog_period_s", 0.1);
     watchdog_publish_period_s_ =
       declare_parameter<double>("object_list_watchdog_publish_period_s", 0.2);
+
+    // Temporal tracking. Runs on the map-frame circle candidates only; nothing
+    // upstream of the track ROI stage is affected by these values.
+    temporal_tracking_enabled_ =
+      declare_parameter<bool>("temporal_tracking_enabled", true);
+    ObstacleTrackerOptions tracker_options;
+    tracker_options.association_distance_m =
+      declare_parameter<double>("association_distance_m", 0.30);
+    tracker_options.outlier_distance_m =
+      declare_parameter<double>("outlier_distance_m", 0.20);
+    tracker_options.smoothing_alpha =
+      declare_parameter<double>("smoothing_alpha", 0.4);
+    const auto minimum_confirmation_frames =
+      declare_parameter<std::int64_t>("minimum_confirmation_frames", 2);
+    tracker_options.track_timeout_s =
+      declare_parameter<double>("track_timeout_s", 0.7);
 
     if (minimum_sample_count < 2) {
       throw std::invalid_argument("minimum_sample_count must be at least 2");
@@ -181,6 +209,12 @@ public:
     if (!std::isfinite(object_list_scan_timeout_s_) || object_list_scan_timeout_s_ <= 0.0) {
       throw std::invalid_argument("object_list_scan_timeout_s must be finite and positive");
     }
+    if (!std::isfinite(object_list_transform_timeout_s_) ||
+      object_list_transform_timeout_s_ < 0.0)
+    {
+      throw std::invalid_argument(
+              "object_list_transform_timeout_s must be finite and non-negative");
+    }
     if (!std::isfinite(watchdog_period_s) || watchdog_period_s <= 0.0) {
       throw std::invalid_argument("object_list_watchdog_period_s must be finite and positive");
     }
@@ -201,17 +235,55 @@ public:
               "object_list_watchdog_publish_period_s must stay below "
               "object_list_scan_timeout_s so a consumer sees the state in time");
     }
-    // The ROI stage keeps its own, looser freshness rule so its behaviour is
-    // unchanged. The Object List is only ever allowed to be stricter: a pose
-    // the ROI still trusts may already be too old to publish as STATUS_OK.
+    // Both freshness rules belong to the simulator-only Gazebo diagnostic now
+    // that tf2 places the published circles. The stricter Object List rule is
+    // still reported next to the looser ROI one so the two stay comparable.
     if (object_list_pose_timeout_s_ > world_pose_timeout_s_) {
       RCLCPP_WARN(
         get_logger(),
         "object_list_pose_timeout_s=%.3f exceeds world_pose_timeout_s=%.3f; "
-        "the track ROI fails open before the Object List reports a stale pose, "
-        "so STATUS_OK frames would be gated on roi_applied alone",
+        "the simulator world pose diagnostic reports the ROI as applied while "
+        "already calling the same pose too old for the Object List",
         object_list_pose_timeout_s_, world_pose_timeout_s_);
     }
+
+    if (!std::isfinite(tracker_options.association_distance_m) ||
+      tracker_options.association_distance_m <= 0.0)
+    {
+      throw std::invalid_argument("association_distance_m must be finite and positive");
+    }
+    if (!std::isfinite(tracker_options.outlier_distance_m) ||
+      tracker_options.outlier_distance_m <= 0.0)
+    {
+      throw std::invalid_argument("outlier_distance_m must be finite and positive");
+    }
+    if (!std::isfinite(tracker_options.smoothing_alpha) ||
+      tracker_options.smoothing_alpha <= 0.0 || tracker_options.smoothing_alpha > 1.0)
+    {
+      throw std::invalid_argument("smoothing_alpha must be within (0, 1]");
+    }
+    if (minimum_confirmation_frames < 1) {
+      throw std::invalid_argument("minimum_confirmation_frames must be at least 1");
+    }
+    if (!std::isfinite(tracker_options.track_timeout_s) ||
+      tracker_options.track_timeout_s <= 0.0)
+    {
+      throw std::invalid_argument("track_timeout_s must be finite and positive");
+    }
+    // The two gates answer different questions, so neither implies the other.
+    // An outlier gate at or above the association gate can never fire, which
+    // silently disables the outlier rejection instead of tuning it.
+    if (tracker_options.outlier_distance_m >= tracker_options.association_distance_m) {
+      RCLCPP_WARN(
+        get_logger(),
+        "outlier_distance_m=%.3f is not below association_distance_m=%.3f; "
+        "every associated measurement passes the outlier gate, so momentary "
+        "outliers are smoothed in instead of being rejected",
+        tracker_options.outlier_distance_m, tracker_options.association_distance_m);
+    }
+    tracker_options.minimum_confirmation_frames =
+      static_cast<std::size_t>(minimum_confirmation_frames);
+    obstacle_tracker_ = ObstacleTracker(tracker_options);
 
     // An unconfigured or malformed track leaves the ring invalid, which makes
     // the ROI stage fail open instead of dropping obstacles.
@@ -235,6 +307,11 @@ public:
       static_cast<std::size_t>(minimum_support_neighbors);
     geometry_log_cluster_count_ =
       static_cast<std::size_t>(geometry_log_cluster_count);
+
+    // Final Object List coordinate source. The listener runs its own thread, so
+    // the bounded lookup wait inside the scan callback is actually serviced.
+    tf_buffer_ = std::make_unique<tf2_ros::Buffer>(get_clock());
+    tf_listener_ = std::make_unique<tf2_ros::TransformListener>(*tf_buffer_, this, true);
 
     scan_subscription_ = create_subscription<sensor_msgs::msg::LaserScan>(
       input_topic,
@@ -288,11 +365,27 @@ public:
       get_logger(),
       "object list topic=%s frame_id=%s qos=best_effort/keep_last(1)/volatile "
       "confidence=%.2f pose_timeout_s=%.3f scan_timeout_s=%.3f "
-      "watchdog_period_s=%.3f watchdog_publish_period_s=%.3f",
+      "watchdog_period_s=%.3f watchdog_publish_period_s=%.3f "
+      "transform=tf2 target_frame=%s source_frame=scan.header.frame_id "
+      "transform_time=scan.header.stamp transform_timeout_s=%.3f",
       object_list_topic.c_str(), object_list_options_.frame_id.c_str(),
       static_cast<double>(object_list_options_.confidence),
       object_list_pose_timeout_s_, object_list_scan_timeout_s_,
-      watchdog_period_s, watchdog_publish_period_s_);
+      watchdog_period_s, watchdog_publish_period_s_,
+      object_list_options_.frame_id.c_str(), object_list_transform_timeout_s_);
+
+    const auto & applied_tracker_options = obstacle_tracker_.options();
+    RCLCPP_INFO(
+      get_logger(),
+      "temporal tracking enabled=%d association_distance_m=%.3f "
+      "outlier_distance_m=%.3f smoothing_alpha=%.2f "
+      "minimum_confirmation_frames=%zu track_timeout_s=%.3f",
+      temporal_tracking_enabled_ ? 1 : 0,
+      applied_tracker_options.association_distance_m,
+      applied_tracker_options.outlier_distance_m,
+      applied_tracker_options.smoothing_alpha,
+      applied_tracker_options.minimum_confirmation_frames,
+      applied_tracker_options.track_timeout_s);
   }
 
 private:
@@ -308,6 +401,7 @@ private:
       // A structurally broken scan is a LiDAR failure, not an empty world. The
       // watchdog clock is deliberately not refreshed here: only a usable scan
       // counts as the sensor being alive.
+      obstacle_tracker_.reset();
       publish_object_list(ObjectListStatus::kLidarUnavailable, {}, scan->header.stamp);
       return;
     }
@@ -330,29 +424,69 @@ private:
     const auto circle_candidates =
       compute_all_cone_occupancy_candidates(geometries, occupancy_options_);
 
-    // Track ROI. The sensor-frame circles above are never recomputed here; the
-    // stage only transforms their centres and drops the ones off the track.
-    const double now_monotonic_s = monotonic_now_s();
-    WorldPoseSample world_pose;
-    {
-      const std::lock_guard<std::mutex> lock(world_pose_mutex_);
-      world_pose = latest_world_pose_;
-    }
-    const bool world_pose_available =
-      world_pose_is_fresh(world_pose, now_monotonic_s, world_pose_timeout_s_);
-    const auto roi = apply_track_roi(
-      circle_candidates, track_ring_, world_pose_available,
-      BasePose2D{world_pose.x_m, world_pose.y_m, world_pose.yaw_rad},
-      mount_options_, roi_options_);
+    // --- Final Object List coordinate path ---------------------------------
+    // tf2 is the single source of the published coordinates from here on. The
+    // Gazebo world pose below is diagnostics only and never reaches this path.
+    const auto transform_lookup = lookup_object_list_transform(*scan);
+
+    // Placement in the target frame. The sensor-frame circles above are never
+    // recomputed here; the stage only places their centres.
+    //
+    // The track ROI is not a rejection rule on this path. Its boundary polygons
+    // are simulator world coordinates and do not describe the target frame, so
+    // gating on them would drop every candidate. Off-track objects are not an
+    // avoidance target for now, and what stops walls and fences from becoming
+    // circles is the cluster width / max-extent gate and the cone occupancy
+    // gate upstream, both untouched. The ring is still evaluated per candidate
+    // as a read-only annotation.
+    const auto placement = place_candidates_in_target_frame(
+      circle_candidates, transform_lookup.transform, track_ring_, roi_options_);
 
     // Object List output. This runs before the diagnostic summary below, which
     // returns early on its own period; publishing after it would throttle the
     // contract down to the summary rate.
-    const bool object_list_pose_fresh =
-      world_pose_is_fresh(world_pose, now_monotonic_s, object_list_pose_timeout_s_);
-    const auto object_list_status = decide_object_list_status(
-      true, object_list_pose_fresh, track_ring_.valid, roi.applied);
-    publish_object_list(object_list_status, roi.accepted, scan->header.stamp);
+    const auto object_list_status = decide_object_list_status_from_placement(
+      true, transform_lookup.transform.valid, placement.applied);
+
+    // Temporal tracking. Only placed candidates with a resolved target-frame
+    // centre are handed over, and only on a STATUS_OK frame. On any other
+    // status the map coordinates cannot be trusted, so the tracker is cleared
+    // instead of being carried across the gap; that also keeps the contract
+    // that a non-OK frame never republishes an earlier result.
+    ObstacleTrackerUpdate tracker_update;
+    std::vector<WorldCircleCandidate> published_candidates;
+    if (!temporal_tracking_enabled_) {
+      published_candidates = placement.accepted;
+    } else if (object_list_status != ObjectListStatus::kOk) {
+      obstacle_tracker_.reset();
+    } else {
+      std::vector<ObstacleMeasurement> measurements;
+      std::vector<const WorldCircleCandidate *> measurement_sources;
+      measurements.reserve(placement.accepted.size());
+      measurement_sources.reserve(placement.accepted.size());
+      for (const auto & candidate : placement.accepted) {
+        if (!candidate.world_center_valid) {
+          continue;
+        }
+        measurements.push_back(
+          ObstacleMeasurement{candidate.world_x_m, candidate.world_y_m, candidate.radius_m});
+        measurement_sources.push_back(&candidate);
+      }
+
+      tracker_update = obstacle_tracker_.update(measurements, scan_timestamp_s(*scan));
+
+      published_candidates.reserve(tracker_update.obstacles.size());
+      for (const auto & obstacle : tracker_update.obstacles) {
+        // The candidate keeps its radius, validity and provenance verbatim.
+        // Only the map centre is replaced by the smoothed estimate.
+        WorldCircleCandidate candidate = *measurement_sources[obstacle.measurement_index];
+        candidate.world_x_m = obstacle.x_m;
+        candidate.world_y_m = obstacle.y_m;
+        published_candidates.push_back(candidate);
+      }
+    }
+
+    publish_object_list(object_list_status, published_candidates, scan->header.stamp);
 
     ++valid_message_count_since_summary_;
 
@@ -385,48 +519,211 @@ private:
     const double measured_rate =
       static_cast<double>(valid_message_count_since_summary_) / elapsed_seconds;
 
+    // --- Simulator-only Gazebo world pose diagnostics ----------------------
+    // Everything from here to the end of this block is read-only reporting. The
+    // frame published above was placed by tf2 alone; the Gazebo ground truth is
+    // sampled and transformed again here purely so the two can be compared, and
+    // at the summary period rather than on every scan.
+    const double now_monotonic_s = monotonic_now_s();
+    WorldPoseSample world_pose;
     std::size_t world_pose_messages = 0U;
     {
       const std::lock_guard<std::mutex> lock(world_pose_mutex_);
+      world_pose = latest_world_pose_;
       world_pose_messages = world_pose_message_count_since_summary_;
       world_pose_message_count_since_summary_ = 0U;
     }
+    const bool world_pose_available =
+      world_pose_is_fresh(world_pose, now_monotonic_s, world_pose_timeout_s_);
+    const bool object_list_pose_fresh =
+      world_pose_is_fresh(world_pose, now_monotonic_s, object_list_pose_timeout_s_);
+    // Ground-truth ROI. Same stage, fed by the Gazebo pose and the measured
+    // mount offset instead of by tf2. Its result is logged and then discarded.
+    const auto simulator_roi = apply_track_roi(
+      circle_candidates, track_ring_, world_pose_available,
+      BasePose2D{world_pose.x_m, world_pose.y_m, world_pose.yaw_rad},
+      mount_options_, roi_options_);
     const double world_pose_age_seconds = world_pose_age_s(world_pose, now_monotonic_s);
     const double world_pose_rate =
       static_cast<double>(world_pose_messages) / elapsed_seconds;
+
+    // How many published candidates the track ROI would have dropped if its
+    // polygons described the target frame. Read-only: it is the number that
+    // says whether the ring can be put back in front of the publisher once the
+    // real target-frame boundaries land.
+    std::size_t off_track_ring_candidates = 0U;
+    if (track_ring_.valid) {
+      for (const auto & candidate : placement.accepted) {
+        if (!candidate.inside_track_ring) {
+          ++off_track_ring_candidates;
+        }
+      }
+    }
+
+    // Read-only pose/scan alignment diagnostic. Nothing here selects,
+    // interpolates or rejects a pose; the value is reported and never acted on.
+    const double scan_stamp_seconds = scan_timestamp_s(*scan);
+    const bool scan_stamp_usable = simulation_stamp_is_usable(scan_stamp_seconds);
+    const bool world_pose_stamp_usable = simulation_stamp_is_usable(world_pose.stamp_s);
+    const std::string scan_stamp_text =
+      format_diagnostic_stamp(scan_stamp_seconds, scan_stamp_usable, 3);
+    const std::string world_pose_stamp_text =
+      format_diagnostic_stamp(world_pose.stamp_s, world_pose_stamp_usable, 3);
+    // Both stamps come from the simulation clock, so the difference is only
+    // meaningful when each of them is a real measurement.
+    const std::string world_pose_minus_scan_text = format_diagnostic_stamp(
+      1000.0 * (world_pose.stamp_s - scan_stamp_seconds),
+      world_pose_stamp_usable && scan_stamp_usable, 1);
 
     RCLCPP_INFO(
       get_logger(),
       "scan frame=%s usable_points=%zu speckle_removed_points=%zu raw_clusters=%zu "
       "accepted_candidates=%zu clustered_points=%zu "
       "cluster_sizes=%s rate_hz=%.2f invalid_messages=%zu invalid_geometry=%zu "
-      "world_pose_available=%d world_pose_age_s=%.3f world_base_x_m=%.3f "
-      "world_base_y_m=%.3f world_base_yaw_deg=%.2f world_pose_rate_hz=%.2f "
-      "track_roi_applied=%d circle_candidates_before_roi=%zu "
-      "circle_candidates_after_roi=%zu track_roi_rejected_candidates=%zu",
+      "object_list_transform_available=%d object_list_target_frame=%s "
+      "object_list_transform_x_m=%.3f object_list_transform_y_m=%.3f "
+      "object_list_transform_yaw_deg=%.2f object_list_transform_failure=%s "
+      "object_list_valid_occupancy_candidates=%zu "
+      "object_list_candidates_before_tracking=%zu "
+      "object_list_non_finite_rejected=%zu "
+      "track_roi_final_output_applied=0 track_roi_would_reject_candidates=%zu "
+      "raw_circle_candidates=%zu tracker_enabled=%d tracker_active_tracks=%zu "
+      "tracker_confirmed_observations=%zu tracker_rejected_outliers=%zu "
+      "smoothed_output_candidates=%zu "
+      "sim_world_pose_available=%d sim_world_pose_age_s=%.3f sim_world_base_x_m=%.3f "
+      "sim_world_base_y_m=%.3f sim_world_base_yaw_deg=%.2f sim_world_pose_rate_hz=%.2f "
+      "sim_object_list_pose_fresh=%d sim_track_roi_diagnostic_applied=%d "
+      "sim_circle_candidates_after_roi=%zu sim_track_roi_rejected_candidates=%zu "
+      "scan_stamp_s=%s sim_world_pose_stamp_s=%s sim_world_pose_minus_scan_ms=%s",
       scan->header.frame_id.c_str(), validation.usable_indices.size(),
       filtered.removed_speckle_count, raw_clusters.size(), clusters.size(),
       clustered_point_count, cluster_sizes.str().c_str(), measured_rate,
       invalid_message_count_, invalid_geometry_count_,
+      transform_lookup.transform.valid ? 1 : 0, object_list_options_.frame_id.c_str(),
+      transform_lookup.transform.x_m, transform_lookup.transform.y_m,
+      radians_to_degrees(transform_lookup.transform.yaw_rad),
+      transform_lookup.transform.valid ? "none" : transform_lookup.failure_reason.c_str(),
+      placement.candidates_before, placement.candidates_after, placement.rejected,
+      off_track_ring_candidates,
+      circle_candidates.size(), temporal_tracking_enabled_ ? 1 : 0,
+      tracker_update.active_tracks, tracker_update.confirmed_observations,
+      tracker_update.rejected_outliers, published_candidates.size(),
       world_pose_available ? 1 : 0,
       std::isfinite(world_pose_age_seconds) ? world_pose_age_seconds : -1.0,
       world_pose_available ? world_pose.x_m : 0.0,
       world_pose_available ? world_pose.y_m : 0.0,
       world_pose_available ? radians_to_degrees(world_pose.yaw_rad) : 0.0,
-      world_pose_rate,
-      roi.applied ? 1 : 0, roi.candidates_before, roi.candidates_after, roi.rejected);
+      world_pose_rate, object_list_pose_fresh ? 1 : 0,
+      simulator_roi.applied ? 1 : 0, simulator_roi.candidates_after, simulator_roi.rejected,
+      scan_stamp_text.c_str(), world_pose_stamp_text.c_str(),
+      world_pose_minus_scan_text.c_str());
 
     log_nearest_cluster_geometry(geometries);
-    log_nearest_circle_candidates(roi.accepted);
+    log_nearest_circle_candidates(placement.accepted);
 
     valid_message_count_since_summary_ = 0U;
     last_summary_time_ = now;
+  }
+
+  /// Outcome of one Object List transform lookup. `failure_reason` is
+  /// diagnostics only; the published contract is decided by
+  /// `transform.valid` alone.
+  struct ObjectListTransformLookup
+  {
+    SensorToTargetTransform transform;
+    std::string failure_reason;
+  };
+
+  /// Looks up `object_list_frame_id <- scan.header.frame_id` at the scan
+  /// measurement time.
+  ///
+  /// The source frame is whatever the scan itself declares, so no sensor frame
+  /// name is hard coded here, and the target frame is the configured Object
+  /// List frame. The lookup time is always `scan.header.stamp`: asking for the
+  /// latest transform would place this frame's beams with the pose the vehicle
+  /// had at some other moment.
+  ///
+  /// Every tf2 failure - unknown frame, disconnected tree, a stamp the buffer
+  /// cannot serve, extrapolation, or a lookup that timed out - leaves the
+  /// transform invalid. The caller turns that into STATUS_TRANSFORM_UNAVAILABLE
+  /// with an empty obstacle array; no earlier frame is ever reused.
+  ObjectListTransformLookup lookup_object_list_transform(
+    const sensor_msgs::msg::LaserScan & scan)
+  {
+    ObjectListTransformLookup lookup;
+
+    if (scan.header.frame_id.empty()) {
+      lookup.failure_reason = "scan header carries no frame_id";
+    } else {
+      try {
+        const auto transform_message = tf_buffer_->lookupTransform(
+          object_list_options_.frame_id, scan.header.frame_id,
+          rclcpp::Time(scan.header.stamp, RCL_ROS_TIME),
+          rclcpp::Duration::from_seconds(object_list_transform_timeout_s_));
+        lookup.transform = make_sensor_to_target_transform(
+          transform_message.transform.translation.x,
+          transform_message.transform.translation.y,
+          transform_message.transform.rotation.x,
+          transform_message.transform.rotation.y,
+          transform_message.transform.rotation.z,
+          transform_message.transform.rotation.w);
+        if (!lookup.transform.valid) {
+          lookup.failure_reason = "transform has no usable planar part";
+        }
+      } catch (const tf2::TransformException & exception) {
+        lookup.failure_reason = exception.what();
+      }
+    }
+
+    if (!lookup.transform.valid) {
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 2000,
+        "no %s <- %s transform at scan stamp %d.%09u: %s; "
+        "publishing STATUS_TRANSFORM_UNAVAILABLE",
+        object_list_options_.frame_id.c_str(), scan.header.frame_id.c_str(),
+        scan.header.stamp.sec, scan.header.stamp.nanosec,
+        lookup.failure_reason.c_str());
+    }
+
+    return lookup;
+  }
+
+  /// Measurement time of one scan, in seconds. The tracker orders its frames
+  /// on this value, so it must be the sensor stamp and never a node clock read.
+  static double scan_timestamp_s(const sensor_msgs::msg::LaserScan & scan)
+  {
+    return static_cast<double>(scan.header.stamp.sec) +
+           (static_cast<double>(scan.header.stamp.nanosec) * 1e-9);
   }
 
   static double monotonic_now_s()
   {
     return std::chrono::duration<double>(
       std::chrono::steady_clock::now().time_since_epoch()).count();
+  }
+
+  /// True when a simulation timestamp can be reported as a measured value. A
+  /// stamp of zero is the unset default on both the scan header and the world
+  /// pose sample, so it is treated as absent rather than as time zero.
+  static bool simulation_stamp_is_usable(const double stamp_s)
+  {
+    return std::isfinite(stamp_s) && stamp_s > 0.0;
+  }
+
+  /// Renders one diagnostic timestamp field. An absent or unusable stamp is
+  /// reported as `n/a`, never as a zero, so a log reader can never mistake a
+  /// missing value for a measured one.
+  static std::string format_diagnostic_stamp(
+    const double value,
+    const bool usable,
+    const int precision)
+  {
+    if (!usable) {
+      return std::string("n/a");
+    }
+    std::ostringstream stream;
+    stream << std::fixed << std::setprecision(precision) << value;
+    return stream.str();
   }
 
   /// Builds and publishes one Object List frame. The message is rebuilt from
@@ -499,7 +796,9 @@ private:
       scan_age_s, object_list_scan_timeout_s_);
 
     // No scan means no measurement timestamp to speak for, so the node clock is
-    // the only honest stamp available.
+    // the only honest stamp available. The tracker is cleared as well: its
+    // tracks are only as good as the scan stream that fed them.
+    obstacle_tracker_.reset();
     publish_object_list(ObjectListStatus::kLidarUnavailable, {}, now());
   }
 
@@ -698,9 +997,17 @@ private:
   std::chrono::steady_clock::time_point last_summary_time_;
   rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr scan_subscription_;
 
+  bool temporal_tracking_enabled_{true};
+  ObstacleTracker obstacle_tracker_;
+
   ObjectListOptions object_list_options_;
+  /// Simulator-only Gazebo pose freshness rule. Diagnostics only.
   double object_list_pose_timeout_s_{0.3};
   double object_list_scan_timeout_s_{0.3};
+  double object_list_transform_timeout_s_{0.05};
+  /// tf2 source of the published Object List coordinates.
+  std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
+  std::unique_ptr<tf2_ros::TransformListener> tf_listener_;
   double watchdog_publish_period_s_{0.2};
   /// Node clock, so the watchdog follows simulation time.
   rclcpp::Time last_scan_activity_{0, 0U, RCL_ROS_TIME};

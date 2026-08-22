@@ -1,0 +1,294 @@
+// ====================================================================
+// steer_controller_node.cpp
+//
+// 조향 제어. 경로를 보고 Pure Pursuit 로 /steering [rad] 을 낸다.
+//
+//     Ld  = clamp(k_v * v, ld_min, ld_max)         v 는 /speed 구독
+//     tgt = 최근접점에서 Ld 앞의 경로점
+//     delta = atan(2 * L * sin(alpha) / Ld)  ->  ±max_steer clamp
+//
+// 속도는 speed_controller 가 따로 낸다. 이 노드는 조향만 책임진다.
+// 단위: 내부 cm / deg, 발행 직전에만 rad.
+// ====================================================================
+
+#include <algorithm>
+#include <cmath>
+#include <memory>
+#include <string>
+#include <vector>
+
+#include <rclcpp/rclcpp.hpp>
+
+#include <geometry_msgs/msg/point_stamped.hpp>
+#include <nav_msgs/msg/path.hpp>
+#include <std_msgs/msg/float64.hpp>
+
+#include "kau_control/params.hpp"
+#include "kau_control/path_tracker.hpp"
+#include "kau_control/pure_pursuit.hpp"
+
+
+namespace kau
+{
+namespace control
+{
+
+class SteerController : public rclcpp::Node
+{
+public:
+    SteerController()
+    : rclcpp::Node("steer_controller"),
+      tracker_(this)
+    {
+        declare_parameter<double>("control_hz", 100.0);
+        declare_parameter<double>("vehicle.wheelbase_cm", 18.0);
+        declare_parameter<double>("vehicle.max_steer_deg", 20.0);
+        declare_parameter<double>("controller.k_v", 0.5);
+        declare_parameter<double>("controller.ld_min_cm", 30.0);
+        declare_parameter<double>("controller.ld_max_cm", 175.0);
+        declare_parameter<std::string>("speed_topic", "/speed");
+        declare_parameter<bool>("viz.enabled", true);
+        declare_parameter<int>("viz.samples_per_seg", 20);
+
+        load();
+
+
+        steer_pub_ = create_publisher<std_msgs::msg::Float64>("/steering", 10);
+
+        // RViz 는 KauPath 를 못 그린다 -> 시각화는 별도 topic 으로 분리 발행
+        viz_path_pub_ =
+            create_publisher<nav_msgs::msg::Path>("/viz/path/tracked", 1);
+
+        viz_target_pub_ =
+            create_publisher<geometry_msgs::msg::PointStamped>(
+                "/viz/path/lookahead", 1);
+
+        // Ld 가 속도에 비례하므로 현재 속도 명령을 본다.
+        // 첫 메시지 전에는 v=0 -> Ld=ld_min 이라 안전한 쪽으로 붙는다.
+        speed_sub_ = create_subscription<std_msgs::msg::Float64>(
+            get_parameter("speed_topic").as_string(), 10,
+            [this](std_msgs::msg::Float64::SharedPtr m)
+            {
+                v_ = m->data;
+            });
+
+
+        const auto period = std::chrono::duration<double>(
+            1.0 / get_parameter("control_hz").as_double());
+
+        timer_ = create_wall_timer(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(period),
+            [this]()
+            {
+                onTimer();
+            });
+
+        // ros2 param set 으로 튜닝값을 바꾸면 즉시 반영한다.
+        // topic / control_hz 는 굳었으므로 바꾸려면 노드를 다시 띄운다.
+        param_cb_ = add_on_set_parameters_callback(
+            [this](const std::vector<rclcpp::Parameter> &)
+            {
+                rcl_interfaces::msg::SetParametersResult r;
+
+                r.successful = true;
+
+                load();
+
+                tracker_.load();
+
+                return r;
+            });
+
+        RCLCPP_INFO(
+            get_logger(), "steer_controller 시작. Ld=%.0f~%.0f cm k_v=%.2f",
+            ctrl_.ld_min, ctrl_.ld_max, ctrl_.k_v);
+    }
+
+private:
+    void load()
+    {
+        vehicle_.wheelbase =
+            get_parameter("vehicle.wheelbase_cm").as_double();
+        vehicle_.max_steer =
+            get_parameter("vehicle.max_steer_deg").as_double();
+
+        ctrl_.k_v    = get_parameter("controller.k_v").as_double();
+        ctrl_.ld_min = get_parameter("controller.ld_min_cm").as_double();
+        ctrl_.ld_max = get_parameter("controller.ld_max_cm").as_double();
+
+        viz_enabled_ = get_parameter("viz.enabled").as_bool();
+        viz_samples_ =
+            static_cast<int>(get_parameter("viz.samples_per_seg").as_int());
+    }
+
+    void onTimer()
+    {
+        const TrackResult r = tracker_.update();
+
+        if (!r.ok || r.goal)
+        {
+            stop(r.reason);
+
+            return;
+        }
+
+        publishVizPath();
+
+
+        double ld = pure_pursuit::lookaheadDistance(v_, ctrl_);
+
+        // Lane Detection 은 실제로 본 구간까지만 valid_length 로 알려준다.
+        // 그 너머는 외삽이므로 LookAhead 점을 거기 두면 안 된다.
+        // (그 외 source 는 valid_length = 0 이라 이 절이 걸리지 않는다)
+        const double vl = tracker_.validLength();
+
+        if (vl > 0.0)
+        {
+            const double usable = vl - r.s - LD_VALID_MARGIN_CM;
+
+            if (usable < ctrl_.ld_min)
+            {
+                stop("관측 구간이 짧아 LookAhead 를 둘 곳이 없다");
+
+                return;
+            }
+
+            ld = std::min(ld, usable);
+        }
+
+
+        const Curve & cv = *tracker_.curve();
+
+        const Point2 tgt = cv.point(cv.lookahead(r.s, ld));
+
+        const double deg = std::clamp(
+            pure_pursuit::steerCommand(
+                r.x, r.y, r.yaw, tgt.x, tgt.y, ld, vehicle_),
+            -vehicle_.max_steer, vehicle_.max_steer);
+
+        publishSteering(deg2rad(deg));
+
+        publishVizTarget(tgt);
+
+        RCLCPP_DEBUG_THROTTLE(
+            get_logger(), *get_clock(), 500,
+            "s=%.1f cte=%.1f cm Ld=%.0f steer=%.1f deg (v=%.2f)",
+            r.s, r.cte, ld, deg, v_);
+    }
+
+    // 어떤 경로로 빠져나가든 0 을 발행한다. 조용히 return 하면 차량이
+    // 직전 조향각을 그대로 물고 간다.
+    void stop(const std::string & reason)
+    {
+        publishSteering(0.0);
+
+        if (!reason.empty())
+        {
+            RCLCPP_WARN_THROTTLE(
+                get_logger(), *get_clock(), 2000, "조향 0: %s",
+                reason.c_str());
+        }
+    }
+
+    void publishSteering(double rad)
+    {
+        std_msgs::msg::Float64 m;
+
+        m.data = rad;
+
+        steer_pub_->publish(m);
+    }
+
+    // 경로가 바뀔 때만 다시 그린다 (100 Hz 로 Path 를 쏘면 낭비다).
+    void publishVizPath()
+    {
+        if (!viz_enabled_ || viz_id_ == tracker_.pathId())
+        {
+            return;
+        }
+
+        viz_id_ = tracker_.pathId();
+
+        nav_msgs::msg::Path p;
+
+        p.header.frame_id = tracker_.frame();
+
+        p.header.stamp = now();
+
+        for (const Point2 & q : tracker_.curve()->sample(viz_samples_))
+        {
+            geometry_msgs::msg::PoseStamped ps;
+
+            ps.header = p.header;
+
+            ps.pose.position.x = q.x / CM_PER_M;
+
+            ps.pose.position.y = q.y / CM_PER_M;
+
+            ps.pose.orientation.w = 1.0;
+
+            p.poses.push_back(ps);
+        }
+
+        viz_path_pub_->publish(p);
+    }
+
+    void publishVizTarget(const Point2 & tgt)
+    {
+        if (!viz_enabled_)
+        {
+            return;
+        }
+
+        geometry_msgs::msg::PointStamped m;
+
+        m.header.frame_id = tracker_.frame();
+
+        m.header.stamp = now();
+
+        m.point.x = tgt.x / CM_PER_M;
+
+        m.point.y = tgt.y / CM_PER_M;
+
+        viz_target_pub_->publish(m);
+    }
+
+
+    static constexpr double LD_VALID_MARGIN_CM = 5.0;
+
+    PathTracker      tracker_;
+    VehicleParams    vehicle_;
+    ControllerParams ctrl_;
+
+    double   v_           = 0.0;   // m/s, /speed 로 받은 현재 명령
+    bool     viz_enabled_ = true;
+    int      viz_samples_ = 20;
+    uint32_t viz_id_      = 0;
+
+    rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr steer_pub_;
+    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr    viz_path_pub_;
+    rclcpp::Publisher<geometry_msgs::msg::PointStamped>::SharedPtr
+        viz_target_pub_;
+
+    rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr speed_sub_;
+
+    rclcpp::TimerBase::SharedPtr timer_;
+
+    rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr
+        param_cb_;
+};
+
+}  // namespace control
+}  // namespace kau
+
+
+int main(int argc, char ** argv)
+{
+    rclcpp::init(argc, argv);
+
+    rclcpp::spin(std::make_shared<kau::control::SteerController>());
+
+    rclcpp::shutdown();
+
+    return 0;
+}

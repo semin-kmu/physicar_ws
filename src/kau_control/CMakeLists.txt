@@ -30,27 +30,33 @@ target_include_directories(kau_control_core INTERFACE
 )
 target_link_libraries(kau_control_core INTERFACE Eigen3::Eigen)
 
-add_executable(path_follower_node src/path_follower_node.cpp)
-# tf2::getYaw 는 tf2_geometry_msgs 의 fromMsg 를 끌어온다.
-# ament_target_dependencies 만으로는 링크가 안 되므로 target 을 명시한다.
-target_link_libraries(path_follower_node
-  kau_control_core
-  tf2_geometry_msgs::tf2_geometry_msgs
-)
-ament_target_dependencies(path_follower_node
-  rclcpp
-  geometry_msgs
-  nav_msgs
-  std_msgs
-  tf2
-  tf2_ros
-  tf2_geometry_msgs
-  kau_msgs
-)
+# 노드는 둘뿐이다. speed_controller 가 /speed, steer_controller 가 /steering.
+# 공통부(경로 수신 · pose · 최근접점 추적)는 path_tracker.hpp 가 갖고 있고
+# 두 노드가 각자 하나씩 인스턴스화한다. 서로를 구독하지 않는다.
+foreach(node speed_controller steer_controller)
+  add_executable(${node}_node src/${node}_node.cpp)
 
-install(TARGETS path_follower_node
-  DESTINATION lib/${PROJECT_NAME}
-)
+  # tf2::getYaw 는 tf2_geometry_msgs 의 fromMsg 를 끌어온다.
+  # ament_target_dependencies 만으로는 링크가 안 되므로 target 을 명시한다.
+  target_link_libraries(${node}_node
+    kau_control_core
+    tf2_geometry_msgs::tf2_geometry_msgs
+  )
+  ament_target_dependencies(${node}_node
+    rclcpp
+    geometry_msgs
+    nav_msgs
+    std_msgs
+    tf2
+    tf2_ros
+    tf2_geometry_msgs
+    kau_msgs
+  )
+
+  install(TARGETS ${node}_node
+    DESTINATION lib/${PROJECT_NAME}
+  )
+endforeach()
 
 install(DIRECTORY include/
   DESTINATION include

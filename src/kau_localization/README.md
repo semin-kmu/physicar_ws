@@ -96,6 +96,72 @@ ros2 run cartographer_ros cartographer_pbstream_to_ros_map \
 이때 `map_server` 는 TF 를 발행하지 않게 두고, `map -> odom` 은 계속
 `localization.launch.py` 가 담당하게 한다. `amcl` 은 끈다.
 
+### 4. 리셋 / 재시작 버튼에 자동으로 대응 (장기 검증용)
+
+```bash
+source install/setup.bash
+./src/kau_localization/scripts/reset_watcher.py
+```
+
+PhysiCar 앱의 **리셋** / **재시작** 버튼을 감지해서 localization 을 알아서
+이어붙인다. 오래 돌리면서 위치 추정이 계속 살아있는지 볼 때 쓴다. 버튼을
+누를 때마다 손으로 launch 를 다시 칠 필요가 없다.
+
+띄우면 `localization.launch.py` (RViz 포함) 를 먼저 기동하고, 이미 떠 있으면
+그걸 물려받는다. `Ctrl-C` 로 끄면 자기가 띄운 것도 같이 정리한다.
+
+**두 버튼은 성격이 달라서 대응이 다르다.**
+
+| 버튼 | sim 시계 | 대응 | RViz |
+|---|---|---|---|
+| 리셋 | 계속 흐름 | `/initialpose` 만 스폰 좌표로 주입 | 안 끊김 |
+| 재시작 | **0 으로 되감김** | 내렸다가 재런치 + `/initialpose` | 새로 뜸 |
+
+리셋은 차량 pose 만 순간이동하는 것이라 재런치하면 trajectory 와 드리프트
+이력이 날아가 장기 검증 자체가 끊긴다. 그래서 `initial_pose_relay` 로
+trajectory 만 갈아끼운다. 재시작은 `/clock` 이 되감기므로 그대로 두면 TF 버퍼에
+미래 stamp 가 남아 스스로 복구하지 못한다 — 반드시 재런치해야 한다.
+
+**감지 방법.** 버튼은 원격 앱(`sim.physicar.ai`)에 있고 눌리면 `sim_api` 로
+HTTP 요청만 간다. ROS 로는 토픽도 이벤트도 나오지 않으므로 (`/events` SSE 에도
+없다) `sim_api` 로그(`/tmp/sim_api.log`)를 tail 해서 잡는다.
+
+| 로그 줄 | 의미 |
+|---|---|
+| `light reset done` | 리셋 |
+| `starting sim:` | 재시작 시작 — 여기서 즉시 내린다 |
+| `physicar spawned, starting gz-launch` | 재시작 준비 완료 — 여기서 띄운다 |
+
+`sim_api.py` 는 updater 가 덮어쓰는 벤더 파일이라 거기엔 훅을 심지 않았다.
+
+**시계가 어긋나도 버틴다.** 감시 스크립트 자체는 벽시계로 돈다
+(`use_sim_time=false`) — sim 시계가 멈추거나 되감겨도 감시 로직은 얼지 않는다.
+TF 는 stamp 를 지정하지 않고 항상 latest 로만 조회하고, 되감김을 감지하면 TF
+버퍼를 비운다. 재시작 뒤에는 `/status` 의 `running` · 시계가 실제로 전진하는지 ·
+`/scan` 과 `/odom` 퍼블리셔 복귀를 모두 확인한 뒤에야 띄운다.
+`/initialpose` 의 header stamp 는 `initial_pose_relay` 가 보지 않으므로 무관하다.
+
+**좌표 보정.** 스폰 좌표는 gz 월드 좌표계로 나오고 `/initialpose` 는 map
+프레임이라 둘 사이의 고정 변환이 필요하다. 처음 한 번, 수렴된 상태에서 Enter 를
+누르면 역산해서 `~/.ros/kau_reset_watcher_offset.json` 에 저장하고 다음
+실행부터 재사용한다. 저장된 오프셋은 지도 이름을 같이 기록하므로 `pbstream` 이
+바뀌면 자동으로 무효가 되고 다시 묻는다.
+
+**드리프트 기록.** gz 실측 대비 추정 오차를 1 Hz 로
+`~/physicar_logs/localization_drift_*.csv` 에 남기고 10 초마다 콘솔에 찍는다.
+리셋 / 재시작 이벤트도 같은 CSV 에 이벤트 행으로 들어가서 나중에 상관 확인이
+된다. `--no-monitor` 로 끈다.
+
+| 인자 | 설명 |
+|---|---|
+| `--pbstream` | 지도 지정. 생략하면 `maps/` 의 최신 `kau_vN.pbstream` |
+| `--no-rviz` | RViz 없이 |
+| `--relaunch-on-reset` | 리셋에도 `/initialpose` 대신 통째로 재런치 |
+| `--spawn-pose x,y,yaw` | map 프레임 스폰 pose 를 직접 지정 (보정 생략) |
+| `--offset x,y,yaw` | map <- gz world 오프셋을 직접 지정 |
+| `--recalibrate` | 저장된 오프셋을 무시하고 다시 잡는다 |
+| `--no-monitor`, `--csv` | 드리프트 기록 끄기 / 경로 지정 |
+
 ## 파일
 
 | 경로 | 설명 |
@@ -109,6 +175,7 @@ ros2 run cartographer_ros cartographer_pbstream_to_ros_map \
 | `scripts/save_map.py` | 매핑 종료 후 최적화 + `kau_vN` 자동 버전 저장 + pgm 변환 + 품질 검사 |
 | `scripts/check_constraints.py` | 매핑 중 루프 클로저 constraint 길이 분포 확인 (아래 주의 참고) |
 | `scripts/view_map.py` | 저장된 지도 확인. ROS 불필요. 검사 + ASCII + 벽 정밀측정 + PNG |
+| `scripts/reset_watcher.py` | 앱의 리셋/재시작 버튼 감지 -> localization 자동 유지 + 드리프트 기록 (사용법 4) |
 | `maps/kau_vN.pbstream` | 저장된 KAU 지도. localization.launch.py 의 `pbstream:=` 대상 |
 | `maps/kau_vN.pgm`, `maps/kau_vN.yaml` | 위 pbstream 을 변환한 Nav2 용 정적 지도 |
 

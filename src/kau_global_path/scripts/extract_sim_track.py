@@ -406,6 +406,105 @@ def primitives(ring, tol):
     return out
 
 
+# ---------------------------------------------------------------- 골격
+
+# 중심선은 매끈한 곡선이 아니다. **곧은 구간과 뾰족한 꼭짓점으로 된 다각형**에
+# 완만한 원호 몇 개가 섞인 모양이다. 실측한 꼭짓점 꺾임각은 17 ~ 90 도다.
+# 차(최소회전반경 0.494 m)는 그 꼭짓점을 그대로 못 돈다 — 반드시 둥글려야 한다.
+#
+# 그래서 조각 목록을 그대로 내보내지 않고 **골격**으로 정리한다.
+#   corner : 뾰족한 꼭짓점. 위치와 꺾임각만 준다. 둥글리는 반지름은 소비자가 정한다.
+#   arc    : 진짜 원호 구간. 양 끝과 가운데 점, 반지름.
+# 둘 사이는 직선이다 (따로 안 적는다).
+
+CORNER_MIN_R = 0.25       # 이보다 반지름이 작은 '원호' 는 사실 꼭짓점이다
+CORNER_MIN_DEG = 2.0      # 이보다 작은 꺾임은 무시한다
+
+
+def line_fit(pts):
+    """최소제곱 직선. (지나는 점, 단위 방향)."""
+    n = len(pts)
+    mx = sum(q[0] for q in pts) / n
+    my = sum(q[1] for q in pts) / n
+    sxx = syy = sxy = 0.0
+    for x, y in pts:
+        dx, dy = x - mx, y - my
+        sxx += dx * dx
+        syy += dy * dy
+        sxy += dx * dy
+    th = 0.5 * math.atan2(2 * sxy, sxx - syy)
+    ux, uy = math.cos(th), math.sin(th)
+    # 진행 방향과 같은 쪽을 보게 뒤집는다
+    if (pts[-1][0] - pts[0][0]) * ux + (pts[-1][1] - pts[0][1]) * uy < 0:
+        ux, uy = -ux, -uy
+    return (mx, my), (ux, uy)
+
+
+def line_isect(a, ua, b, ub):
+    """두 직선의 교점. 평행이면 None."""
+    den = ua[0] * ub[1] - ua[1] * ub[0]
+    if abs(den) < 1e-9:
+        return None
+    t = ((b[0] - a[0]) * ub[1] - (b[1] - a[1]) * ub[0]) / den
+    return (a[0] + t * ua[0], a[1] + t * ua[1])
+
+
+def project_line(a, u, p):
+    t = (p[0] - a[0]) * u[0] + (p[1] - a[1]) * u[1]
+    return (a[0] + t * u[0], a[1] + t * u[1])
+
+
+def skeleton(ring, prims):
+    """조각 목록 -> 꼭짓점 나열 (다각형).
+
+    **중심선은 곡선이 아니라 다각형이다.** 조각 맞춤이 뱉는 '원호' 는 거의 다
+    10 cm 간격으로 샘플된 꼭짓점을 원으로 오인한 것이다 — 실제로 이웃 직선에
+    접하지도 않는다 (중심-직선 거리가 R 보다 20 ~ 125 cm 작다). 그래서 원호는
+    버리고 **직선 조각들의 교점**만 남긴다. 직선 맞춤은 잔차가 1 mm 아래라
+    믿을 만하고, 교점이 곧 진짜 꼭짓점이다.
+
+    소비자는 이 꼭짓점을 원하는 반지름으로 둥글리면 된다. 그러면 직선과 원호가
+    **접선 연속으로** 이어진다 — 여기서 원호를 억지로 남기면 그게 안 된다.
+    """
+    n = len(ring)
+    get = lambda i: ring[i % n]
+
+    lines = []
+    for pr in prims:
+        if pr['type'] != 'line':
+            continue
+        pts = [get(pr['i0'] + t) for t in range(pr['n'])]
+        a, u = line_fit(pts)
+        lines.append((a, u))
+
+    if len(lines) < 3:
+        return []
+
+    verts = []
+    m = len(lines)
+    for i in range(m):
+        a, u = lines[i]
+        b, w = lines[(i + 1) % m]
+        turn = math.degrees(math.atan2(u[0] * w[1] - u[1] * w[0], u[0] * w[0] + u[1] * w[1]))
+        if abs(turn) < CORNER_MIN_DEG:
+            continue
+        v = line_isect(a, u, b, w)
+        if v is None:
+            continue
+        verts.append({'kind': 'corner', 'p': v, 'turn_deg': round(turn, 3)})
+
+    # 이웃 꼭짓점까지의 거리. 둥글릴 때 접선길이를 얼마나 쓸 수 있는지가 여기서 정해진다.
+    q = len(verts)
+    for i, it in enumerate(verts):
+        nxt = verts[(i + 1) % q]['p']
+        prv = verts[(i - 1) % q]['p']
+        it['run_out_m'] = round(math.hypot(nxt[0] - it['p'][0], nxt[1] - it['p'][1]), 4)
+        it['run_in_m'] = round(math.hypot(it['p'][0] - prv[0], it['p'][1] - prv[1]), 4)
+        it['p'] = [round(it['p'][0], 4), round(it['p'][1], 4)]
+
+    return verts
+
+
 def ring_length(ring):
     total = 0.0
     for i in range(len(ring)):
@@ -501,10 +600,18 @@ def main(argv=None):
                 'corridor_half_width_m': round(width / 2, 4),
                 'primitives': prims,
             }
+            centers[key]['skeleton'] = skeleton(pts, prims)
             nline = sum(1 for q in prims if q['type'] == 'line')
             print(f'  {key:11s} {poly_length(pts):6.3f} m  반폭 {width/2:.3f} m  '
                   f'직선 {nline} + 원호 {len(prims) - nline}  '
                   f'|k|max {kmax:.3f} (R {1 / kmax if kmax else float("inf"):.3f} m)')
+            sk = centers[key]['skeleton']
+            ncor = sum(1 for it in sk if it['kind'] == 'corner')
+            narc = len(sk) - ncor
+            turns = sorted((abs(it['turn_deg']) for it in sk if it['kind'] == 'corner'),
+                           reverse=True)
+            print(f'{"":14s}골격: 꼭짓점 {ncor} + 원호 {narc}  '
+                  f'꺾임각 {turns[0]:.1f}° ~ {turns[-1]:.1f}°' if turns else '')
 
         centers['primary'] = 'road_center'
     else:

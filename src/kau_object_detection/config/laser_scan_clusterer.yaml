@@ -80,3 +80,37 @@ laser_scan_clusterer:
     # object_list_scan_timeout_s so a consumer sees the state inside its own
     # 0.3 s discard window without being spammed at the full tick rate.
     object_list_watchdog_publish_period_s: 0.2
+    # --- Temporal tracking of the map-frame circle candidates ----------------
+    # Runs after the track ROI stage on candidates that already carry a valid
+    # map centre. It only stabilises the published centre; radius, confidence,
+    # status handling and the raw candidate pipeline are untouched. No pose /
+    # LiDAR time synchronisation is performed at this stage.
+    temporal_tracking_enabled: true
+    # Metres. Largest map-frame distance at which this frame's candidate is
+    # accepted as the same obstacle as an existing track. Sized above the
+    # measured high-speed P95 position error (0.193 m) so a fast lap keeps its
+    # tracks, and far below the smallest cone-to-cone spacing on the track so
+    # two obstacles never collapse into one track.
+    association_distance_m: 0.30
+    # Metres. Applied after association, against the previous smoothed estimate.
+    # A linked candidate farther away than this is a momentary outlier and is
+    # dropped from the update instead of being averaged in. Sized just above the
+    # high-speed P95 error so a genuine fast-lap measurement still counts, while
+    # the 0.20-0.30 m band that association still admits is treated as a jump.
+    # Deliberately smaller than association_distance_m: the two gates answer
+    # different questions and are evaluated in separate stages.
+    outlier_distance_m: 0.20
+    # Weight of the newest measurement in the exponential moving average:
+    # estimate = alpha * measurement + (1 - alpha) * previous_estimate.
+    # 0.4 halves the small frame-to-frame jitter within roughly two frames while
+    # still following a real correction quickly at the 10 Hz publish rate.
+    smoothing_alpha: 0.4
+    # Consecutive accepted observations a new track needs before it may be
+    # published. 2 costs one extra frame (about 0.1 s at 10 Hz) and removes the
+    # single-frame ghost candidate.
+    minimum_confirmation_frames: 2
+    # Seconds a track survives without an accepted observation before it is
+    # deleted. About seven frames at 10 Hz, so a short occlusion keeps the track
+    # identity. A track that is not observed in the current frame is still never
+    # published: this only governs the internal store.
+    track_timeout_s: 0.7

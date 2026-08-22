@@ -42,6 +42,53 @@ ObjectListStatus decide_object_list_status(
   return ObjectListStatus::kOk;
 }
 
+ObjectListStatus decide_object_list_status_from_transform(
+  const bool scan_valid,
+  const bool transform_available,
+  const bool track_ring_valid,
+  const bool roi_applied)
+{
+  if (!scan_valid) {
+    return ObjectListStatus::kLidarUnavailable;
+  }
+  // The tf2 lookup is the only source of the target-frame coordinates on this
+  // path, so its failure is reported for what it is instead of being folded
+  // into the pose status of the simulator path.
+  if (!transform_available) {
+    return ObjectListStatus::kTransformUnavailable;
+  }
+  if (!track_ring_valid) {
+    return ObjectListStatus::kInternalError;
+  }
+  // The transform was available and the ring is usable, yet the ROI stage still
+  // failed open. That leaves this node's own configuration as the cause.
+  if (!roi_applied) {
+    return ObjectListStatus::kInternalError;
+  }
+  return ObjectListStatus::kOk;
+}
+
+ObjectListStatus decide_object_list_status_from_placement(
+  const bool scan_valid,
+  const bool transform_available,
+  const bool candidates_placed)
+{
+  if (!scan_valid) {
+    return ObjectListStatus::kLidarUnavailable;
+  }
+  // The tf2 lookup is the only source of the target-frame coordinates, so its
+  // failure is reported for what it is and never as an empty observation.
+  if (!transform_available) {
+    return ObjectListStatus::kTransformUnavailable;
+  }
+  // The transform was usable, yet the placement stage still failed open. That
+  // leaves this node itself as the cause.
+  if (!candidates_placed) {
+    return ObjectListStatus::kInternalError;
+  }
+  return ObjectListStatus::kOk;
+}
+
 kau_msgs::msg::ObstacleCircleArray build_object_list(
   const ObjectListStatus status,
   const std::vector<WorldCircleCandidate> & candidates,

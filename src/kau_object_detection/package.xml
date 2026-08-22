@@ -16,6 +16,11 @@
   <depend>kau_msgs</depend>
   <depend>builtin_interfaces</depend>
 
+  <!-- tf2 lookup of the Object List target frame from the scan frame. -->
+  <depend>geometry_msgs</depend>
+  <depend>tf2</depend>
+  <depend>tf2_ros</depend>
+
   <!-- Start signal detection. The camera is used for the one-time start
        traffic light only. The compressed payload is decoded with cv::imdecode,
        so OpenCV alone is enough and no cv_bridge is needed. -->
