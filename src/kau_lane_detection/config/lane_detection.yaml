@@ -523,8 +523,19 @@ kau_lane_detection_node:
     #             +rad = 왼쪽(반시계), -rad = 오른쪽. 한계 ±0.5236 rad.
     # --------------------------------------------------------
 
-    # 기본 꺼둠. 주행(kau_control) 과 같이 켜지 말 것 — 위 참고.
-    pan_search_enable: false
+    # 기본 켜둠.
+    #
+    # 탐색/유지/복귀 동안(pan_state != Idle)에는 카메라 자세가
+    # bevScale() 의 전제(pan=0)와 어긋나므로 그 프레임의 경로를
+    # 새로 짓지 않는다. publishLanePath 가 발행을 건너뛰므로
+    # 하류는 직전 /lane/center 를 그대로 들고 간다.
+    #
+    # 즉 "경로가 끊긴다" 가 아니라 "경로가 낡는다" 이다. 다만
+    # pan_hold_timeout_s 가 0(무한 대기)이면 직선 구간을 만날
+    # 때까지 Holding 이 계속되므로 낡는 시간에 상한이 없다.
+    # 주행 중 그게 곤란하면 pan_hold_timeout_s 에 값을 주거나
+    # launch 에서 pan_search:=false 로 끈다.
+    pan_search_enable: true
 
     # 탐색 시작 각도 [deg]. 첫 명령은 여기로 한 번에 간다.
     #

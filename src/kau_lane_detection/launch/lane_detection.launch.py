@@ -30,12 +30,16 @@ ROS 쪽에는 image_raw 만 bridge 되어 있어서 camera_info 가 비어 있�
     image_bridge:=true          image_raw 도 직접 bridge 해야 할 때
     viewer:=false               웹 뷰어(포트 5000) 없이 노드만
     params_file:=/path/to.yaml  다른 파라미터 파일로 교체
-    pan_search:=true            차선 소실 시 카메라 pan 탐색 (기본 꺼짐)
+    pan_search:=false           카메라 pan 탐색 끄기 (기본 켜짐)
 
 pan_search 는 노드가 생성자에서 한 번만 읽는 값이라
-ros2 param set 으로는 켜지지 않는다. 기동 시점에 넣어야 한다.
-켜면 pan != 0 인 동안 /lane/center 발행이 멈추므로 (BEV 가
-카메라 정면을 가정한다) kau_control 주행과 같이 켜지 말 것.
+ros2 param set 으로는 바꿀 수 없다. 기동 시점에 넣어야 한다.
+
+기본 켜짐이다. 탐색/유지/복귀 동안에는 카메라 자세가 BEV 의
+전제(pan=0)와 어긋나므로 그 사이 /lane/center 를 새로 짓지 않고
+건너뛴다 — 하류는 직전 값을 그대로 들고 간다. 주행 중 한쪽 흰선을
+오래 놓치면 경로가 그만큼 낡는다는 뜻이므로, 그게 곤란하면
+pan_search:=false 로 끄거나 pan_hold_timeout_s 에 상한을 준다.
 """
 
 from pathlib import Path
@@ -116,10 +120,11 @@ def generate_launch_description():
 
         DeclareLaunchArgument(
             'pan_search',
-            default_value='false',
+            default_value='true',
             description=(
-                '차선 소실 시 카메라 pan 탐색. 켜면 탐색/복귀 동안 '
-                '/lane/center 가 끊긴다 (주행과 같이 켜지 말 것)'
+                '차선 소실 시 카메라 pan 탐색 (기본 켜짐). '
+                '탐색/유지/복귀 동안 /lane/center 가 갱신되지 않고 '
+                '직전 값이 유지된다'
             ),
         ),
 

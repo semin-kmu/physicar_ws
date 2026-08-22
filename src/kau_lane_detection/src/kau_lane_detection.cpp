@@ -2095,6 +2095,94 @@ void KauLaneDetectionNode::cameraInfoCallback(
     const sensor_msgs::msg::CameraInfo::SharedPtr msg)
 {
     // ------------------------------------------------------------
+    // 유효성 검사 — 캘리브레이션이 실제로 되어 있는가
+    //
+    // 실차의 camera_ros(libcamera) 는 캘리브 파일
+    // ~/.ros/camera_info/$NAME.yaml 이 없으면 경고 한 줄만 내고
+    // 0 으로 채운 intrinsic 을 그대로 발행한다 (그쪽 README 의
+    // "Calibration" 절에 명시되어 있다).
+    //
+    // 그걸 그대로 받으면 어디서도 예외가 나지 않는다:
+    //   - camera_calibrated_ 가 서므로 "Waiting for CameraInfo"
+    //     경고가 사라져 정상처럼 보인다
+    //   - deriveScale 은 fx 가드에 걸려 조용히 false 를 반환하고
+    //     축척은 자리표시값에 머문다
+    //   - initUndistortRectifyMap 은 특이행렬을 받아 inf/nan 맵을
+    //     만들고, remap 결과가 통째로 깨진다
+    //   - countVisibleAtZeroPan 의 atan(cx/fx) 는 0 으로 나눈다
+    //
+    // 즉 "영상만 안 나오는데 로그는 멀쩡한" 상태가 된다. 그래서
+    // 여기서 막는다. 이미 받아 둔 정상 intrinsic 이 있으면 그것을
+    // 유지한다 (뒤늦게 온 불량 메시지가 덮어쓰지 못하게).
+    // ------------------------------------------------------------
+
+    const double k_fx = msg->k[0];
+
+    const double k_fy = msg->k[4];
+
+    const double k_cx = msg->k[2];
+
+    const double k_cy = msg->k[5];
+
+
+    const bool intrinsic_ok =
+        std::isfinite(k_fx) && std::isfinite(k_fy) &&
+        std::isfinite(k_cx) && std::isfinite(k_cy) &&
+        // 초점거리가 1 px 미만인 카메라는 없다. 0 초기화를 잡는다.
+        k_fx > 1.0 && k_fy > 1.0 &&
+        msg->width > 0 && msg->height > 0 &&
+        // 주점은 영상 안에 있어야 한다.
+        k_cx > 0.0 && k_cx < static_cast<double>(msg->width) &&
+        k_cy > 0.0 && k_cy < static_cast<double>(msg->height);
+
+
+    if (!intrinsic_ok)
+    {
+        RCLCPP_ERROR_THROTTLE(
+            this->get_logger(),
+            *this->get_clock(),
+            5000,
+            "CameraInfo 의 intrinsic 이 유효하지 않습니다 "
+            "(fx=%.3f fy=%.3f cx=%.3f cy=%.3f, 영상 %ux%u). "
+            "카메라 캘리브레이션 파일이 없어 드라이버가 0 을 "
+            "발행하고 있을 가능성이 큽니다 — "
+            "~/.ros/camera_info/ 를 확인하고 camera_calibration "
+            "으로 캘리브하십시오. 이 메시지는 무시합니다.",
+            k_fx,
+            k_fy,
+            k_cx,
+            k_cy,
+            msg->width,
+            msg->height
+        );
+
+        return;
+    }
+
+
+    // 왜곡 모델 확인.
+    //
+    // 아래 undistort 는 cv::initUndistortRectifyMap 을 쓴다.
+    // 이것은 Brown-Conrady(plumb_bob 계열) 전제다. 광각 렌즈를
+    // equidistant/fisheye 로 캘리브했다면 cv::fisheye 쪽을 써야
+    // 하고, 그대로 두면 가장자리가 크게 어긋난다.
+    if (
+        !msg->distortion_model.empty() &&
+        msg->distortion_model != "plumb_bob" &&
+        msg->distortion_model != "rational_polynomial"
+    )
+    {
+        RCLCPP_WARN_ONCE(
+            this->get_logger(),
+            "왜곡 모델이 '%s' 입니다. undistort 는 Brown-Conrady "
+            "(plumb_bob / rational_polynomial) 전제로 짜여 있어 "
+            "이 모델에는 맞지 않습니다. 영상 가장자리가 어긋납니다.",
+            msg->distortion_model.c_str()
+        );
+    }
+
+
+    // ------------------------------------------------------------
     // Camera Matrix K
     // ------------------------------------------------------------
 
@@ -6884,21 +6972,7 @@ void KauLaneDetectionNode::imageCallback(
 
 
         // ========================================================
-        // 21. Log
-        // ========================================================
-
-        RCLCPP_INFO_THROTTLE(
-            this->get_logger(),
-            *this->get_clock(),
-            1000,
-            "Sliding Window | %s | %s",
-            status.c_str(),
-            path_text
-        );
-
-
-        // ========================================================
-        // 21-b. 상태 토픽
+        // 21. 상태 토픽
         //
         // 로그 파싱 대신 기계가 읽을 수 있는 형태로 낸다.
         //   lw/yw/rw : 실제로 픽셀을 잡은 창 수 (복원선은 0)
@@ -6974,46 +7048,6 @@ void KauLaneDetectionNode::imageCallback(
         }
 
 
-        // ========================================================
-        // 22. 제어점 로그
-        //
-        // 발행 대상 그 자체. 소비자가 받는 값과 동일하다.
-        // ========================================================
-
-        if (lane_path.valid)
-        {
-            std::string ctrl_text;
-
-
-            for (
-                std::size_t i = 0;
-                i < lane_path.ctrl.size();
-                ++i
-            )
-            {
-                char one[64];
-
-                std::snprintf(
-                    one,
-                    sizeof(one),
-                    "%s(%.1f, %.1f)",
-                    i ? " " : "",
-                    lane_path.ctrl[i].x,
-                    lane_path.ctrl[i].y
-                );
-
-                ctrl_text += one;
-            }
-
-
-            RCLCPP_INFO_THROTTLE(
-                this->get_logger(),
-                *this->get_clock(),
-                1000,
-                "quintic Bezier ctrl [cm] %s",
-                ctrl_text.c_str()
-            );
-        }
     }
 
 
