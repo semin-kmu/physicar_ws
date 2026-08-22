@@ -21,28 +21,31 @@ find_package(kau_control REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(yaml-cpp REQUIRED)
 
-# reference_fusion / candidate_generator / path_evaluator / collision_checker /
-# boundary_checker / local_planner 는 kau_control 과 동일하게 header-only 로
-# 짜고, 이 INTERFACE 라이브러리로 노드/테스트가 공용 include 경로와 Eigen 을
-# 얻는다 (kau_control/CMakeLists.txt 의 kau_control_core 패턴을 그대로 따름).
-add_library(kau_local_path_planner_core INTERFACE)
-target_include_directories(kau_local_path_planner_core INTERFACE
-  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-  $<INSTALL_INTERFACE:include>
-)
-target_link_libraries(kau_local_path_planner_core INTERFACE Eigen3::Eigen)
-
-add_executable(local_planner_node
-  src/local_planner_node.cpp
-  src/local_planner.cpp
+# 알고리즘 구현 (ROS 의존성 없음) 을 실제 라이브러리로 묶는다 -- node 와
+# gtest 실행파일이 둘 다 같은 컴파일 결과물을 링크해야 하므로, 소스를
+# add_executable 안에 직접 넣으면 (이전 실수) 실행파일끼리 심볼을
+# 공유하지 못해 테스트 링크가 전부 실패한다.
+add_library(kau_local_path_planner_impl STATIC
   src/reference_fusion.cpp
   src/candidate_generator.cpp
   src/path_evaluator.cpp
   src/collision_checker.cpp
   src/boundary_checker.cpp
+  src/local_planner.cpp
 )
+target_include_directories(kau_local_path_planner_impl PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
+target_link_libraries(kau_local_path_planner_impl PUBLIC Eigen3::Eigen)
+ament_target_dependencies(kau_local_path_planner_impl PUBLIC
+  kau_msgs
+  kau_control
+)
+
+add_executable(local_planner_node src/local_planner_node.cpp)
 target_link_libraries(local_planner_node
-  kau_local_path_planner_core
+  kau_local_path_planner_impl
   tf2_geometry_msgs::tf2_geometry_msgs
   ${YAML_CPP_LIBRARIES}
 )
@@ -85,12 +88,17 @@ if(BUILD_TESTING)
   set(ament_cmake_uncrustify_FOUND TRUE)
   ament_lint_auto_find_test_dependencies()
 
-  foreach(test_name test_candidate_generator test_collision_checker
-                     test_boundary_checker test_path_evaluator
-                     test_local_planner_scenarios)
+  set(kau_local_path_planner_test_names
+    test_candidate_generator
+    test_collision_checker
+    test_boundary_checker
+    test_path_evaluator
+    test_local_planner_scenarios
+  )
+  foreach(test_name ${kau_local_path_planner_test_names})
     ament_add_gtest(${test_name} test/${test_name}.cpp)
     if(TARGET ${test_name})
-      target_link_libraries(${test_name} kau_local_path_planner_core)
+      target_link_libraries(${test_name} kau_local_path_planner_impl)
       ament_target_dependencies(${test_name} kau_control kau_msgs)
     endif()
   endforeach()

@@ -160,13 +160,37 @@ double marginAlongNormal(
         return 0.0;
     }
 
-    if (at(max_search_cm) >= 0.0)
+    // 단순 이분탐색은 clearance(t) 가 단조라고 가정하는데, inner 가 원형
+    // 섬이 아니라 도로 폭보다 좁은 "구멍" 모양이면 안전 -> 위반 -> 안전으로
+    // 두 번 부호가 바뀔 수 있다. 그 경우 이분탐색은 가까운 위반을 건너뛰고
+    // 더 먼 경계를 오탐할 수 있다 (실제 gtest 로 발견). 그래서 먼저 성긴
+    // step 으로 훑어 "가장 가까운" 부호 반전 구간을 찾고, 그 구간 안에서만
+    // 이분탐색으로 정밀화한다 -- 이러면 단조 여부와 무관하게 항상 가장
+    // 가까운 위반 지점을 찾는다.
+    constexpr double kScanStep = 2.0;   // cm, 정밀도와 비용의 절충
+    double prev_t = 0.0;
+    double prev_clear = at(0.0);
+    double lo = -1.0;
+    double hi = -1.0;
+    for (double t = kScanStep; t <= max_search_cm; t += kScanStep)
+    {
+        const double clear = at(t);
+        if (clear < 0.0)
+        {
+            lo = prev_t;
+            hi = t;
+            break;
+        }
+        prev_t = t;
+        prev_clear = clear;
+    }
+    (void)prev_clear;
+
+    if (lo < 0.0)
     {
         return max_search_cm;   // 탐색 범위 안에서 위반 없음 -> 사실상 무제한
     }
 
-    double lo = 0.0;
-    double hi = max_search_cm;
     for (int it = 0; it < 24; ++it)
     {
         const double mid = 0.5 * (lo + hi);

@@ -129,7 +129,7 @@ def build_path(knots, closed):
 
 
 def to_kaupath(segs, closed, source, frame_id, stamp, confidence=1.0,
-              valid_length=0.0):
+               valid_length=0.0):
     msg = KauPath()
     msg.header.frame_id = frame_id
     msg.header.stamp = stamp
