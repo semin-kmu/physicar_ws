@@ -37,7 +37,8 @@ public:
         Curve global_path, RoadBoundary boundary,
         std::vector<Obstacle> obstacles, PlannerParams params,
         double kappa_max_vehicle, double body_radius_cm,
-        VehicleFootprint body_footprint = VehicleFootprint{});
+        VehicleFootprint body_footprint = VehicleFootprint{},
+        WheelFootprint wheels = WheelFootprint{});
 
     // ref_fusion_/candidate_gen_ 이 이 객체 자신의 멤버(global_path_ 등)를
     // 참조로 들고 있으므로, 복사/이동하면 그 참조가 원본을 계속 가리켜
@@ -60,6 +61,11 @@ public:
         const Curve * lane_curve, float lane_confidence);
 
 private:
+    // 채택된 경로의 도로 이탈 진단을 PlanResult 에 채운다 (전 구간 / committed
+    // 구간 / 처음 나간 호길이). status 만으로는 "어디서부터 나갔는지" 를 알 수
+    // 없어서 튜닝 근거가 없었다.
+    void fillRoadDiag(PlanResult & result, const Curve & cv) const;
+
     Curve global_path_;
     RoadBoundary boundary_;
     std::vector<Obstacle> obstacles_;
@@ -68,7 +74,8 @@ private:
     double kappa_lim_;
     double kappa_max_vehicle_;
     double body_radius_cm_;
-    VehicleFootprint body_footprint_;
+    VehicleFootprint body_footprint_;   // 장애물 충돌 판정 (범퍼 포함)
+    WheelFootprint   wheels_;           // 도로 이탈 판정 (바퀴 4개)
 
     ReferenceFusion ref_fusion_;
     CandidateGenerator candidate_gen_;

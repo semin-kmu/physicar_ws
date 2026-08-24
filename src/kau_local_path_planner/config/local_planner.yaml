@@ -31,6 +31,25 @@ local_planner_node:
     half_width_cm: 10.0              # body_width / 2
     wheelbase_cm: 18.0
 
+    # 2026-08-24: 앵커 보정. body_* 치수는 후륜축 기준인데 경로 점과 TF 는
+    # base_footprint 다. PhysiCar URDF(physicar.urdf.xacro) 는 base_footprint 를
+    # 휠베이스 **중앙** 에 둔다 (바퀴 x = ±wheelbase/2). 이 보정 없이 치수를
+    # 그대로 얹으면 판정 사각형이 9cm 앞으로 밀린다.
+    # kau_control VehicleParams::rear_axle_offset 과 같은 값이다.
+    rear_axle_offset_cm: -9.0
+
+    # 도로 이탈(감점) 판정용 바퀴 제원. 출처: physicar.urdf.xacro
+    # (track_width 0.16 "measured", wheel_width 0.035).
+    #
+    # 대회 규정: 흰 실선은 밟아도 되고 (선의 바깥 모서리가 곧 아스팔트 끝이라
+    # track 폴리곤과 일치한다), 네 바퀴가 전부 노면 밖으로 나가야 감점이다.
+    # 그래서 이탈 판정 대상은 차체가 아니라 바퀴이고, hard reject 기준은
+    # min_wheels_on=1 (규정 그대로) 이다. 더 보수적으로 몰고 싶으면 4 로 올린다.
+    # 규정보다 약한 이탈은 아래 w_road 비용이 흡수한다.
+    track_width_cm: 16.0
+    wheel_width_cm: 3.5
+    min_wheels_on: 1
+
     # sim world -> map 변환 (kau_global_path 확인값, 회전 없음)
     sim_to_map_ox: 3.68
     sim_to_map_oy: 1.39
@@ -40,7 +59,13 @@ local_planner_node:
     l_plan: 300.0                    # cm. 400 이상은 2-segment 고정 구조와
                                       # 충돌해 오히려 악화됨 (실측, 늘리지 말 것)
     ref_mode: "fuse"
-    w_lane: 1.0                      # 실측: 0~1.0 스윕해도 결과 불변, 원인 아님
+    # 2026-08-24: 0 으로 내렸다. /lane/center 는 카메라가 잡은 노란 중앙선이고,
+    # w_lane>0 이면 기준 프레임(위치/heading/곡률)이 그 관측으로 사실상 완전히
+    # 대체된다 (w=1.0*confidence). lane_gate 가 60cm 로 도로 반폭(35cm)보다
+    # 넓어서, 검출기가 흰선을 중앙선으로 오인해도(31.25cm 오차) 그대로 통과했다.
+    # 기준 프레임을 인지 비의존(global path + localization)으로 두기 위해 0.
+    # 되돌리려면 이 값만 올리면 된다 -- 코드 경로는 그대로 살아 있다.
+    w_lane: 0.0
 
     kappa_margin: 0.95
     bound_depth: 2
@@ -58,6 +83,23 @@ local_planner_node:
     w_continuity: 10.0               # 스윕 결과 10 근방 최적. 20+ 부터
                                       # 회피 반응 지연으로 안전 악화
     w_path_preview: 2.0
+
+    # 바퀴가 노면 밖인 구간의 비율 [0,1] 에 붙는 비용.
+    #
+    # hard reject 가 "네 바퀴 전부 밖" (규정) 이라 거의 걸리지 않는다. 그것만
+    # 두면 도로 제약이 사실상 사라져 잔디 위로 세 바퀴 걸친 경로가 정상 후보가
+    # 된다. 이탈을 벽이 아니라 트레이드오프로 두려고 비용으로 넣는다 -- 평소엔
+    # 노면 안으로 붙고, 그럴 만한 이유가 있을 때만 물고 나간다.
+    # 흰선을 밟기만 하는 것은 0 이다 (규정상 감점이 아니므로).
+    #
+    # 크기 근거 (스윕 전 초기값): 장애물 회피보다는 싸고 횡오프셋 선호보다는
+    # 확실히 비싸야 한다.
+    #   장애물 항 최대 w_obstacle*1.0 = 4.0   (충돌 회피가 항상 이겨야 함)
+    #   오프셋 항 d=20cm 에서 약 1.6
+    #   "경로의 10% 를 두 바퀴 이탈" = ratio 0.05 -> 1.5 가 되게
+    #   => 0.05 * w_road = 1.5, w_road = 30
+    # 아직 실측 스윕 전이다. 1-lap 로그의 off= 필드를 보고 조정할 것.
+    w_road: 30.0
 
     clear_target: 15.0
     d_scale: 18.0

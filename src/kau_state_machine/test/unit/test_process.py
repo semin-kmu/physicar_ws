@@ -130,3 +130,29 @@ def test_node_params_override_use_sim_time(fake_resolve):
 def test_use_sim_time_not_injected_for_plain_process(fake_resolve):
     spec = NodeSpec(name='n', package='p', executable='e', ros=False, args=('x',))
     assert process.build_argv(spec, True)[1:] == ['x']
+
+
+def _gate_child(tmp_path, code, sleep_sec=0.0):
+    """즉시 끝나는 관문 프로세스 하나. 종료 코드를 지정한다."""
+    script = f'import time,sys; time.sleep({sleep_sec}); sys.exit({code})'
+    log = open(tmp_path / 'gate.out', 'ab')
+    proc = subprocess.Popen([sys.executable, '-c', script],
+                            start_new_session=True, stdout=log,
+                            stderr=subprocess.STDOUT)
+    return process.Child(name='gate', proc=proc, log=log)
+
+
+def test_wait_gate_passes(tmp_path):
+    assert process.wait_gate(_gate_child(tmp_path, 0), 10.0) == 0
+
+
+def test_wait_gate_reports_failure(tmp_path):
+    assert process.wait_gate(_gate_child(tmp_path, 1), 10.0) == 1
+
+
+def test_wait_gate_kills_on_timeout(tmp_path):
+    child = _gate_child(tmp_path, 0, sleep_sec=30.0)
+    pgid = os.getpgid(child.pid)
+    assert process.wait_gate(child, 0.5) is None
+    time.sleep(0.3)
+    assert not _alive(pgid)

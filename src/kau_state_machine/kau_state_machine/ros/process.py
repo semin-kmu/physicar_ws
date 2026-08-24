@@ -131,3 +131,19 @@ def kill(child: Child, grace: float = 3.0):
             pass
     child.log.close()
     return proc.returncode
+
+
+def wait_gate(child: Child, timeout: float):
+    """관문 프로세스가 끝나기를 기다린다. 종료 코드를, 타임아웃이면 None 을 준다.
+
+    관문은 조건이 서면 스스로 빠지는 프로세스다 (clock_gate.py). 자기 타임아웃을
+    이미 갖고 있지만, 그게 고장 나면 기동 전체가 조용히 멈춘다 -- 관문이 없애려던
+    바로 그 증상이다. 그래서 여기서 한 겹 더 덮는다.
+    """
+    try:
+        code = child.proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        kill(child)
+        return None
+    child.log.close()
+    return code

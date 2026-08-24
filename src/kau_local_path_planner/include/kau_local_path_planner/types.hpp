@@ -53,6 +53,22 @@ struct PlannerParams
     double w_continuity   = 10.0;   // 스윕 결과 10 근방 최적, 20+ 부터 안전 악화
     double w_path_preview = 2.0;
 
+    // 2026-08-24: 바퀴가 노면 밖인 구간의 비율에 붙는 비용.
+    //
+    // 규정상 hard reject 는 "네 바퀴 전부 밖" 이라 사실상 거의 걸리지 않는다.
+    // 그것만 두면 도로 제약이 사라져 잔디 위로 세 바퀴 걸친 경로가 정상 후보가
+    // 된다. 그래서 이탈을 벽이 아니라 **비용**으로 둔다 -- 평소엔 노면 안으로
+    // 붙고, 그럴 만한 이유(장애물/곡률)가 있을 때만 물고 나간다.
+    // 선을 밟기만 하는 것에는 페널티가 0 이다 (규정상 감점이 아니므로).
+    //
+    // 크기 근거 (스윕 전 초기값): 이 항은 "장애물 회피보다는 싸고, 횡오프셋
+    // 선호보다는 확실히 비싸야" 한다.
+    //   - 장애물 항 최대 = w_obstacle * 1.0 = 4.0  (충돌 회피가 항상 이겨야 함)
+    //   - 오프셋 항 = w_ref*|d|/18 + w_end*0.8|d|/18, d=20cm 에서 약 1.6
+    //   - "경로의 10% 를 두 바퀴 이탈" = ratio 0.05 -> 이게 1.5 쯤 되게
+    // -> 0.05 * w_road = 1.5, w_road = 30.
+    double w_road = 30.0;
+
     double clear_target = 15.0;     // cm, 이 이상 여유면 장애물 항 0
 
     double d_scale = 18.0;          // cm, 후보 offset 정규화 기준 (L_plan 무관 고정값)
@@ -74,6 +90,59 @@ struct VehicleFootprint
     double body_front_cm    = 23.0;   // 후륜축 -> 전단
     double rear_overhang_cm = 5.0;    // 후륜축 -> 후단
     double half_width_cm    = 10.0;
+
+    // 2026-08-24: 위 치수는 **후륜축** 기준인데, 경로 점(및 TF 로 받는 자차
+    // 위치)은 base_footprint 다. PhysiCar URDF 는 base_footprint 를 휠베이스
+    // **중앙**에 둔다 (physicar.urdf.xacro: 바퀴 x = ±wheelbase/2). 따라서
+    // 치수를 경로 점 위에 그대로 얹으면 사각형이 9cm 앞으로 밀린다.
+    // kau_control VehicleParams::rear_axle_offset (-9.0) 과 같은 보정이며,
+    // 그쪽 주석도 "빼먹으면 9cm 앞을 후륜축으로 착각한다" 고 경고한다.
+    //
+    // 기본값 0 은 "치수가 이미 경로 점 기준" 이라는 뜻이다 (기하 단위테스트가
+    // 쓰는 중립값). 실차/실사용 값은 노드 파라미터 rear_axle_offset_cm 이 준다.
+    double rear_axle_offset_cm = 0.0;
+
+    // 경로 점 기준 사각형 종방향 범위 [뒤, 앞].
+    double rearEdge() const { return rear_axle_offset_cm - rear_overhang_cm; }
+    double frontEdge() const { return rear_axle_offset_cm + body_front_cm; }
+};
+
+// ====================================================================
+// WheelFootprint -- 도로 이탈(감점) 판정 전용 바퀴 4점, 2026-08-24.
+//
+// 대회 규정: 흰 실선은 밟아도 되고 (선의 바깥 모서리가 곧 아스팔트 끝이라
+// track 폴리곤과 일치한다), 네 바퀴가 전부 노면 밖으로 나가야 감점이다.
+// 즉 이탈 판정의 대상은 차체가 아니라 바퀴다 -- 범퍼가 잔디 위로 넘어가는
+// 것은 이탈이 아니다.
+//
+// 차체 사각형으로 판정하면 코너에서 실제보다 훨씬 바깥을 본다
+// (base_footprint 기준 앞모서리 25.1cm vs 앞바퀴 외측 13.3cm, 약 12cm 차이).
+// 그만큼 후보가 과도하게 탈락해 leastViolation 으로 떨어진다.
+//
+// 치수 출처: physicar.urdf.xacro (wheelbase 0.18, track_width 0.16 "measured",
+// wheel_width 0.035).
+// ====================================================================
+
+struct WheelFootprint
+{
+    double rear_axle_offset_cm = 0.0;   // 경로 점 -> 후륜축 (VehicleFootprint 와 같은 규약)
+    double wheelbase_cm   = 18.0;
+    double track_width_cm = 16.0;       // 좌우 바퀴 **중심** 간 거리
+    double wheel_width_cm = 3.5;
+
+    // 노면 위에 남은 바퀴가 이보다 적어지면 hard reject. 규정이 "한 바퀴만
+    // 안에 있으면 감점 없음" 이므로 1 이 규정 그대로다. 더 보수적으로 몰고
+    // 싶으면 4 (네 바퀴 모두 안) 로 올린다.
+    int min_wheels_on = 1;
+
+    double rearAxleX() const { return rear_axle_offset_cm; }
+    double frontAxleX() const { return rear_axle_offset_cm + wheelbase_cm; }
+    double outerY() const { return 0.5 * (track_width_cm + wheel_width_cm); }
+    double innerY() const
+    {
+        const double y = 0.5 * (track_width_cm - wheel_width_cm);
+        return y > 0.0 ? y : 0.0;
+    }
 };
 
 // ====================================================================
@@ -115,6 +184,17 @@ struct PlanResult
     double                s0            = 0.0;   // reference 투영 호길이
     int                   alive         = 0;     // 제약 통과 후보 수 (진단용)
     bool                  lane_used     = false;
+
+    // --- 도로 이탈 진단 (2026-08-24). 채택된 경로에 대해서만 채운다. ---
+    //
+    // 지금까지는 status 만 나와서 "정말 노면 밖으로 나갔는지, 어디서부터
+    // 나갔는지" 를 알 수 없었다. 특히 committed horizon 완화 때문에 앞
+    // 구간만 검증되고 뒤가 무검증인데, 그 사실이 status 에 드러나지 않는다.
+    int    min_wheels_on        = 4;     // 전 구간에서 가장 적게 남은 "노면 위" 바퀴 수
+    double road_clear_full      = 0.0;   // cm, 전 구간 바퀴 최소 여유 (음수 = 경계 물음)
+    double road_clear_committed = 0.0;   // cm, committed 구간만 같은 값
+    double road_viol_s          = -1.0;  // cm, 바퀴가 처음 완전히 나간 호길이 (없으면 음수)
+    double road_off_len         = 0.0;   // cm, 이탈 적분값 (w_road 가 쓰는 값과 동일)
 };
 
 }  // namespace local_path_planner

@@ -48,6 +48,7 @@ using kau::local_path_planner::Point2;
 using kau::local_path_planner::RoadBoundary;
 using kau::local_path_planner::SimToMap;
 using kau::local_path_planner::VehicleFootprint;
+using kau::local_path_planner::WheelFootprint;
 
 // Python: config.END_RATIO -- Curve -> KauPath 발행 시에는 쓰지 않지만
 // 다른 상수들과 나란히 두어 출처를 분명히 한다.
@@ -240,6 +241,16 @@ private:
         declare_parameter<double>("half_width_cm", 10.0);
         declare_parameter<double>("wheelbase_cm", 18.0);
 
+        // 2026-08-24: 도로 이탈(감점) 판정용 바퀴 4점 + 앵커 보정.
+        //
+        // 위 body_* 치수는 후륜축 기준인데 경로 점/TF 는 base_footprint 다.
+        // PhysiCar URDF 는 base_footprint 를 휠베이스 중앙에 두므로 -9cm
+        // (kau_control VehicleParams::rear_axle_offset 과 같은 값).
+        declare_parameter<double>("rear_axle_offset_cm", -9.0);
+        declare_parameter<double>("track_width_cm", 16.0);
+        declare_parameter<double>("wheel_width_cm", 3.5);
+        declare_parameter<int>("min_wheels_on", 1);
+
         // PlannerParams -- KAU_AMET_Test 세션 최종 튜닝값.
         declare_parameter<double>("l_plan", 300.0);
         declare_parameter<std::string>("ref_mode", "fuse");
@@ -256,6 +267,7 @@ private:
         declare_parameter<double>("w_end", 0.6);
         declare_parameter<double>("w_continuity", 10.0);
         declare_parameter<double>("w_path_preview", 2.0);
+        declare_parameter<double>("w_road", 6.0);
         declare_parameter<double>("clear_target", 15.0);
         declare_parameter<double>("d_scale", 18.0);
     }
@@ -278,6 +290,7 @@ private:
         p.w_end = get_parameter("w_end").as_double();
         p.w_continuity = get_parameter("w_continuity").as_double();
         p.w_path_preview = get_parameter("w_path_preview").as_double();
+        p.w_road = get_parameter("w_road").as_double();
         p.clear_target = get_parameter("clear_target").as_double();
         p.d_scale = get_parameter("d_scale").as_double();
         return p;
@@ -329,14 +342,26 @@ private:
         }
 
         kau::control::Curve global_path = kau::control::curveFromKauPath(*msg);
+        const double rear_axle_offset =
+            get_parameter("rear_axle_offset_cm").as_double();
+
         VehicleFootprint body_footprint{
             get_parameter("body_front_cm").as_double(),
             get_parameter("rear_overhang_cm").as_double(),
-            get_parameter("half_width_cm").as_double()};
+            get_parameter("half_width_cm").as_double(),
+            rear_axle_offset};
+
+        WheelFootprint wheels{
+            rear_axle_offset,
+            get_parameter("wheelbase_cm").as_double(),
+            get_parameter("track_width_cm").as_double(),
+            get_parameter("wheel_width_cm").as_double(),
+            static_cast<int>(get_parameter("min_wheels_on").as_int())};
+
         planner_ = std::make_unique<LocalPlanner>(
             std::move(global_path), boundary_, std::vector<Obstacle>{},
             loadPlannerParams(), get_parameter("kappa_max_vehicle").as_double(),
-            get_parameter("body_radius_cm").as_double(), body_footprint);
+            get_parameter("body_radius_cm").as_double(), body_footprint, wheels);
         RCLCPP_INFO(get_logger(),
             "/path/global 수신, LocalPlanner 생성 완료 (nseg=%d, length=%.1fcm)",
             static_cast<int>(msg->seg_length.size()), msg->total_length);
@@ -441,6 +466,25 @@ private:
                 *result.path, map_frame_, msg.header.stamp, viz_spacing_cm_));
         }
 
+        // 2026-08-24 진단: status 만으로는 "정말 노면 밖으로 나갔는지, 어디
+        // 서부터인지" 를 알 수 없었다. road_cmt 는 멀쩡한데 road_full 이 음수
+        // 라면 committed horizon 이후(무검증 구간) 때문이라는 뜻이다.
+        RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000,
+            "plan st=%d d=%+.1f kmax=%.5f obs=%+.1f wheels_on=%d "
+            "road_full=%+.1f road_cmt=%+.1f viol_s=%.0f off=%.1f "
+            "alive=%d lane=%d %.1fms",
+            static_cast<int>(result.status), result.chosen_offset,
+            result.kappa_max, result.clearance, result.min_wheels_on,
+            result.road_clear_full, result.road_clear_committed,
+            result.road_viol_s, result.road_off_len, result.alive,
+            result.lane_used ? 1 : 0, result.calc_ms);
+
+        if (result.min_wheels_on < 4)
+        {
+            RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
+                "바퀴 노면 이탈: %d/4 남음, 처음 이탈 s=%.0fcm, 이탈 적분 %.1fcm",
+                result.min_wheels_on, result.road_viol_s, result.road_off_len);
+        }
         if (result.status != PlanStatus::kOk)
         {
             RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,

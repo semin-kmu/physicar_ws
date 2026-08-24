@@ -257,7 +257,7 @@ double roadClearanceRect(
             const double heading = std::atan2(tangent.y, tangent.x);
             const double ch = std::cos(heading);
             const double sh = std::sin(heading);
-            for (double dx : {-body.rear_overhang_cm, body.body_front_cm})
+            for (double dx : {body.rearEdge(), body.frontEdge()})
             {
                 for (double dy : {-body.half_width_cm, body.half_width_cm})
                 {
@@ -271,6 +271,90 @@ double roadClearanceRect(
         }
     }
     return best;
+}
+
+RoadReport roadReportWheels(
+    const RoadBoundary & boundary, const Curve & cv, const WheelFootprint & wheels,
+    double road_safety_margin_cm, double sample_interval_cm)
+{
+    RoadReport rep;
+    rep.min_clear_cm = std::numeric_limits<double>::infinity();
+
+    const double y_outer = wheels.outerY();
+    const double y_inner = wheels.innerY();
+    const double x_rear = wheels.rearAxleX();
+    const double x_front = wheels.frontAxleX();
+
+    double station = 0.0;
+    const int nseg = cv.nseg();
+    for (int i = 0; i < nseg; ++i)
+    {
+        const double seg_len = cv.segLen(i);
+        const int count = std::max(
+            3, static_cast<int>(std::ceil(seg_len / sample_interval_cm)) + 1);
+        // roadClearanceRect 와 같은 규약: 마지막 segment 만 u=1.0 을 포함한다
+        // (그 외엔 다음 segment 의 u=0 과 중복).
+        const bool include_end = (i == nseg - 1);
+        const double step = include_end
+            ? 1.0 / static_cast<double>(count - 1)
+            : 1.0 / static_cast<double>(count);
+        const kau::bezier::Ctrl & seg = cv.seg(i);
+        const kau::bezier::Ctrl d1 = kau::bezier::hodograph(seg);
+
+        for (int k = 0; k < count; ++k)
+        {
+            const double u = static_cast<double>(k) * step;
+            const Point2 center = kau::bezier::evalSeg(seg, u);
+            const Point2 tangent = kau::bezier::evalSeg(d1, u);
+            const double heading = std::atan2(tangent.y, tangent.x);
+            const double ch = std::cos(heading);
+            const double sh = std::sin(heading);
+
+            const auto corner = [&](double dx, double dy) -> Point2
+            {
+                return Point2{center.x + dx * ch - dy * sh,
+                              center.y + dx * sh + dy * ch};
+            };
+
+            int wheels_on = 0;
+            for (double wx : {x_rear, x_front})
+            {
+                for (double sy : {-1.0, 1.0})
+                {
+                    rep.min_clear_cm = std::min(
+                        rep.min_clear_cm,
+                        pointClearance(boundary, corner(wx, sy * y_outer),
+                                      road_safety_margin_cm));
+                    if (pointClearance(boundary, corner(wx, sy * y_inner),
+                                      road_safety_margin_cm) >= 0.0)
+                    {
+                        ++wheels_on;
+                    }
+                }
+            }
+
+            rep.min_wheels_on = std::min(rep.min_wheels_on, wheels_on);
+            if (wheels_on < 4)
+            {
+                // u 는 호길이 매개변수가 아니라 Bezier 매개변수라, u*seg_len 은
+                // 근사다. 진단 표시용이므로 이 정도면 충분하다 (sample_interval
+                // 4cm 격자 위의 값이다).
+                if (rep.first_viol_s_cm < 0.0)
+                {
+                    rep.first_viol_s_cm = station + u * seg_len;
+                }
+                rep.off_integral_cm +=
+                    static_cast<double>(4 - wheels_on) / 4.0 * step * seg_len;
+            }
+        }
+        station += seg_len;
+    }
+
+    if (!std::isfinite(rep.min_clear_cm))
+    {
+        rep.min_clear_cm = 0.0;   // 빈 곡선
+    }
+    return rep;
 }
 
 }  // namespace local_path_planner

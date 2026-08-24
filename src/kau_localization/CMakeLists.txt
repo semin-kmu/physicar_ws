@@ -48,6 +48,15 @@ install(DIRECTORY
   DESTINATION share/${PROJECT_NAME}
 )
 
+# 감시자는 share/launch 에도 설치되지만 (ekf.launch.py 가 거기서 부른다),
+# kau_state_machine 의 bringup manifest 는 lib/<pkg>/<exe> 만 실행한다
+# (ros/process.py resolve_exe). 단계 1 에서 쓰려면 lib/ 에도 있어야 한다.
+install(PROGRAMS
+  launch/platform_ekf_pause.py
+  launch/clock_gate.py
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 # 지도도 설치한다. launch 가 install 트리에서 도는데 pbstream:=kau_v3 처럼
 # 이름만 받으려면 지도가 share 안에 있어야 하기 때문이다.
 # 워크스페이스가 --symlink-install 이라 여기 설치되는 것은 소스를 가리키는

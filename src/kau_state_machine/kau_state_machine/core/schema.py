@@ -2,12 +2,16 @@
 
 from dataclasses import dataclass, field
 
-# 현 구현 범위는 순차 spawn 뿐이다. 관문·재시도·evidence 키는 두지 않는다.
+# 현 구현 범위는 순차 spawn + 관문 프로세스(wait)뿐이다. 재시도·evidence 키는
+# 두지 않는다.
 _ROOT_KEYS = {'run', 'stages'}
 _RUN_KEYS = {'log_dir'}
 _STAGE_KEYS = {'id', 'delay_sec', 'nodes'}
-_NODE_KEYS = {'name', 'package', 'executable', 'ros',
+_NODE_KEYS = {'name', 'package', 'executable', 'ros', 'wait', 'when',
               'param_files', 'params', 'remap', 'args'}
+
+# when: 이 노드를 언제 띄우는가. 시계 소스로만 가른다 (docs/01 section 10).
+_WHEN = ('always', 'sim', 'real')
 
 
 @dataclass(frozen=True)
@@ -18,6 +22,10 @@ class NodeSpec:
     package: str
     executable: str
     ros: bool = True
+    # 관문. 이 프로세스가 끝날 때까지 다음 노드를 띄우지 않는다. 종료 코드가
+    # 0 이 아니면 기동을 중단한다 (clock_gate.py 처럼 조건을 재는 프로세스용).
+    wait: bool = False
+    when: str = 'always'
     param_files: tuple = ()
     params: dict = field(default_factory=dict)
     remap: dict = field(default_factory=dict)
@@ -61,11 +69,18 @@ def _node(data, where):
     for key in ('name', 'package', 'executable'):
         if not data.get(key):
             raise ValueError(f'{where}: {key} 필수')
+
+    when = str(data.get('when', 'always'))
+    if when not in _WHEN:
+        raise ValueError(f'{where}: when 은 {list(_WHEN)} 중 하나 (받은 값: {when!r})')
+
     return NodeSpec(
         name=str(data['name']),
         package=str(data['package']),
         executable=str(data['executable']),
         ros=bool(data.get('ros', True)),
+        wait=bool(data.get('wait', False)),
+        when=when,
         param_files=tuple(str(ref) for ref in data.get('param_files') or ()),
         params=dict(_mapping(data.get('params') or {}, f'{where}.params')),
         remap=dict(_mapping(data.get('remap') or {}, f'{where}.remap')),

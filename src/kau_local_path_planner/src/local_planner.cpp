@@ -21,16 +21,16 @@ LocalPlanner::LocalPlanner(
     Curve global_path, RoadBoundary boundary,
     std::vector<Obstacle> obstacles, PlannerParams params,
     double kappa_max_vehicle, double body_radius_cm,
-    VehicleFootprint body_footprint)
+    VehicleFootprint body_footprint, WheelFootprint wheels)
 : global_path_(std::move(global_path)), boundary_(std::move(boundary)),
   obstacles_(std::move(obstacles)), stations_(), params_(std::move(params)),
   kappa_lim_(kappa_max_vehicle * params_.kappa_margin),
   kappa_max_vehicle_(kappa_max_vehicle), body_radius_cm_(body_radius_cm),
-  body_footprint_(body_footprint),
+  body_footprint_(body_footprint), wheels_(wheels),
   ref_fusion_(global_path_, params_.ref_mode, params_.w_lane, params_.lane_gate),
   candidate_gen_(
       global_path_, boundary_, obstacles_, stations_, params_, kappa_lim_,
-      kappa_max_vehicle_, body_radius_cm_, body_footprint_)
+      kappa_max_vehicle_, body_radius_cm_, body_footprint_, wheels_)
 {
     stations_.reserve(obstacles_.size());
     for (const Obstacle & o : obstacles_)
@@ -167,8 +167,8 @@ PlanResult LocalPlanner::plan(
         {
             c.cost = kInf; c.reason = "degenerate";
         }
-        else if (!roadOkRect(boundary_, committed_cv, body_footprint_,
-                            kRoadSafetyMarginCm, kRoadSampleIntervalCm))
+        else if (!roadOkWheels(boundary_, committed_cv, wheels_,
+                              kRoadSafetyMarginCm, kRoadSampleIntervalCm))
         {
             c.cost = kInf; c.reason = "road_boundary";
         }
@@ -190,7 +190,7 @@ PlanResult LocalPlanner::plan(
     if (!chosen)
     {
         auto degraded = leastViolationRect(
-            cands, boundary_, body_footprint_, kRoadSafetyMarginCm,
+            cands, boundary_, body_footprint_, wheels_, kRoadSafetyMarginCm,
             kRoadSampleIntervalCm, obstacles_, params_.obs_margin,
             params_.clear_target, kappa_max_vehicle_);
         if (degraded)
@@ -204,6 +204,8 @@ PlanResult LocalPlanner::plan(
             result.clearance = clearanceRect(
                 cv, obstacles_, body_footprint_, params_.clear_target,
                 kRoadSampleIntervalCm);
+            result.alive = static_cast<int>(alive.size());
+            fillRoadDiag(result, cv);
             return result;
         }
 
@@ -231,7 +233,35 @@ PlanResult LocalPlanner::plan(
         *c.curve, obstacles_, body_footprint_, params_.clear_target,
         kRoadSampleIntervalCm);
     result.alive = static_cast<int>(alive.size());
+    fillRoadDiag(result, *c.curve);
     return result;
+}
+
+void LocalPlanner::fillRoadDiag(PlanResult & result, const Curve & cv) const
+{
+    const RoadReport full = roadReportWheels(
+        boundary_, cv, wheels_, kRoadSafetyMarginCm, kRoadSampleIntervalCm);
+    result.min_wheels_on = full.min_wheels_on;
+    result.road_clear_full = full.min_clear_cm;
+    result.road_viol_s = full.first_viol_s_cm;
+    result.road_off_len = full.off_integral_cm;
+
+    // committed 구간만 따로 -- "실행 구간은 멀쩡한데 뒤쪽(무검증 구간) 때문에
+    // 나쁜 것인가" 를 로그 한 줄로 가르기 위한 값이다.
+    const std::vector<Ctrl> & segs = cv.ctrl();
+    const int n_committed = committedSegmentCount(segs);
+    if (n_committed < cv.nseg())
+    {
+        const Curve committed_cv(
+            std::vector<Ctrl>(segs.begin(), segs.begin() + n_committed), false);
+        result.road_clear_committed = roadReportWheels(
+            boundary_, committed_cv, wheels_, kRoadSafetyMarginCm,
+            kRoadSampleIntervalCm).min_clear_cm;
+    }
+    else
+    {
+        result.road_clear_committed = full.min_clear_cm;
+    }
 }
 
 }  // namespace local_path_planner

@@ -81,11 +81,11 @@ CandidateGenerator::CandidateGenerator(
     const std::vector<ObstacleStation> & stations,
     const PlannerParams & params, double kappa_lim,
     double kappa_max_vehicle, double body_radius_cm,
-    VehicleFootprint body_footprint)
+    VehicleFootprint body_footprint, WheelFootprint wheels)
 : global_path_(global_path), boundary_(boundary), obstacles_(obstacles),
   stations_(stations), params_(params), kappa_lim_(kappa_lim),
   kappa_max_vehicle_(kappa_max_vehicle), body_radius_cm_(body_radius_cm),
-  body_footprint_(body_footprint)
+  body_footprint_(body_footprint), wheels_(wheels)
 {
 }
 
@@ -181,8 +181,12 @@ Candidate CandidateGenerator::candidate(
         }
         prediction_violation = true;   // committed 는 OK, 나머지(먼 미래)만 위반
     }
-    if (!roadOkRect(boundary_, cv, body_footprint_, kRoadSafetyMarginCm,
-                    kRoadSampleIntervalCm))
+    // 도로 이탈은 바퀴 기준 (규정: 흰선은 밟아도 되고 네 바퀴가 전부 나가야
+    // 감점). hard reject 는 wheels_.min_wheels_on 미만일 때뿐이고, 그보다
+    // 약한 이탈은 아래 w_road 비용으로 흡수한다.
+    const RoadReport road = roadReportWheels(
+        boundary_, cv, wheels_, kRoadSafetyMarginCm, kRoadSampleIntervalCm);
+    if (road.min_wheels_on < wheels_.min_wheels_on)
     {
         const int n_committed = committedSegmentCount(segs);
         bool committed_road_ok = false;
@@ -190,8 +194,8 @@ Candidate CandidateGenerator::candidate(
         {
             Curve committed_cv(
                 std::vector<Ctrl>(segs.begin(), segs.begin() + n_committed), false);
-            committed_road_ok = roadOkRect(
-                boundary_, committed_cv, body_footprint_, kRoadSafetyMarginCm,
+            committed_road_ok = roadOkWheels(
+                boundary_, committed_cv, wheels_, kRoadSafetyMarginCm,
                 kRoadSampleIntervalCm);
         }
         if (!committed_road_ok)
@@ -219,7 +223,8 @@ Candidate CandidateGenerator::candidate(
     const double combined_clear = std::min(clear, preview);
     double c_cost = cost(
         params_, kappa_max_vehicle_, global_path_, kappa_lim_, s0, d_final,
-        peak, bound, combined_clear, cv, previous_path);
+        peak, bound, combined_clear, cv, previous_path,
+        road.off_integral_cm / params_.l_plan);
     if (prediction_violation)
     {
         c_cost += kPredictionViolationPenalty;
@@ -375,8 +380,9 @@ Candidate CandidateGenerator::primitiveCandidate(
         c.cost = kInf;
         return c;
     }
-    if (!roadOkRect(boundary_, cv, body_footprint_, kRoadSafetyMarginCm,
-                    kRoadSampleIntervalCm))
+    const RoadReport road = roadReportWheels(
+        boundary_, cv, wheels_, kRoadSafetyMarginCm, kRoadSampleIntervalCm);
+    if (road.min_wheels_on < wheels_.min_wheels_on)
     {
         Candidate c; c.d = terminal_offset; c.curve = cv; c.reason = "road_boundary";
         c.cost = kInf;
@@ -393,7 +399,8 @@ Candidate CandidateGenerator::primitiveCandidate(
 
     const double c_cost = cost(
         params_, kappa_max_vehicle_, global_path_, kappa_lim_, s0,
-        terminal_offset, peak, bound, clear, cv, previous_path);
+        terminal_offset, peak, bound, clear, cv, previous_path,
+        road.off_integral_cm / params_.l_plan);
     Candidate c; c.d = terminal_offset; c.curve = cv; c.cost = c_cost; c.reason = "";
     return c;
 }
@@ -646,8 +653,10 @@ Candidate CandidateGenerator::directCandidate(
         }
 
         Curve candidate_curve(std::vector<Ctrl>{ctrl}, false);
-        if (!roadOkRect(boundary_, candidate_curve, body_footprint_, kRoadSafetyMarginCm,
-                        kRoadSampleIntervalCm))
+        const RoadReport road = roadReportWheels(
+            boundary_, candidate_curve, wheels_, kRoadSafetyMarginCm,
+            kRoadSampleIntervalCm);
+        if (road.min_wheels_on < wheels_.min_wheels_on)
         {
             best_reason = "road_boundary";
             continue;
@@ -669,7 +678,8 @@ Candidate CandidateGenerator::directCandidate(
         direct_seed_ = combo;
         const double c_cost = cost(
             params_, kappa_max_vehicle_, global_path_, kappa_lim_, s0, target,
-            std::abs(target), exact, clear, candidate_curve, previous_path);
+            std::abs(target), exact, clear, candidate_curve, previous_path,
+            road.off_integral_cm / params_.l_plan);
         Candidate c; c.d = target; c.curve = candidate_curve; c.cost = c_cost;
         c.reason = "";
         return c;

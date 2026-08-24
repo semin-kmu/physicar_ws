@@ -75,7 +75,8 @@ double cost(
     const PlannerParams & params, double kappa_max_vehicle,
     const Curve & global_path, double kappa_lim, double s0,
     double d, double peak, double bound, double clear,
-    const Curve & candidate, const Curve * previous_path)
+    const Curve & candidate, const Curve * previous_path,
+    double road_off_ratio)
 {
     const double sc = params.d_scale;
     const double obs = std::max(
@@ -90,7 +91,8 @@ double cost(
          + params.w_kappa * bound / kappa_max_vehicle
          + params.w_end * std::abs(0.80 * d) / sc
          + params.w_continuity * cont
-         + params.w_path_preview * path_ahead;
+         + params.w_path_preview * path_ahead
+         + params.w_road * std::max(0.0, road_off_ratio);
 }
 
 std::optional<std::pair<double, Curve>> leastViolation(
@@ -170,6 +172,7 @@ std::optional<std::pair<double, Curve>> leastViolation(
 std::optional<std::pair<double, Curve>> leastViolationRect(
     const std::vector<Candidate> & cands,
     const RoadBoundary & boundary, const VehicleFootprint & body,
+    const WheelFootprint & wheels,
     double road_safety_margin_cm, double road_sample_interval_cm,
     const std::vector<Obstacle> & obstacles, double obs_margin,
     double clear_target_cm, double kappa_max_vehicle)
@@ -187,9 +190,10 @@ std::optional<std::pair<double, Curve>> leastViolationRect(
 
         const double kappa_violation =
             std::max(0.0, cv.kappaMax() - kappa_max_vehicle);
+        // 도로 위반의 깊이는 "가장 깊이 나간 바퀴" 로 잰다 (차체 외곽이 아님).
         const double road_violation = std::max(
-            0.0, -roadClearanceRect(boundary, cv, body, road_safety_margin_cm,
-                                    road_sample_interval_cm));
+            0.0, -roadReportWheels(boundary, cv, wheels, road_safety_margin_cm,
+                                   road_sample_interval_cm).min_clear_cm);
         const double obstacle_violation = std::max(
             0.0, obs_margin - clearanceRect(cv, obstacles, body, clear_target_cm,
                                             road_sample_interval_cm));

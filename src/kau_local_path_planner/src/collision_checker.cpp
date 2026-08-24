@@ -106,7 +106,10 @@ double clearanceRect(
     }
     // 사각형 어느 꼭짓점에서도 station 중심까지의 최대거리 (근사와 무관한
     // 실제 대각선 절반) 를 prefilter reach 로 써서 놓치는 장애물이 없게 함.
-    const double body_reach = std::hypot(body.body_front_cm, body.half_width_cm);
+    // rear_axle_offset 보정 후의 실제 종방향 최대 편차를 쓴다.
+    const double body_reach = std::hypot(
+        std::max(std::abs(body.frontEdge()), std::abs(body.rearEdge())),
+        body.half_width_cm);
     const double reach = body_reach + clear_target_cm + max_radius;
 
     const std::vector<Obstacle> near = obstaclesNear(cv, obstacles, reach);
@@ -142,7 +145,7 @@ double clearanceRect(
                 const double local_x = dx * ch + dy * sh;
                 const double local_y = -dx * sh + dy * ch;
                 const double clamped_x = std::clamp(
-                    local_x, -body.rear_overhang_cm, body.body_front_cm);
+                    local_x, body.rearEdge(), body.frontEdge());
                 const double clamped_y = std::clamp(
                     local_y, -body.half_width_cm, body.half_width_cm);
                 const double dist = std::hypot(local_x - clamped_x, local_y - clamped_y);

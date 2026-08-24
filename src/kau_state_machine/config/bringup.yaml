@@ -13,6 +13,9 @@
 #                일괄 주입된다 (docs/01 section 10: 시각 소스 일치)
 #   remap        -r from:=to
 #   args         --ros-args 앞에 붙는 인자
+#   wait         true 면 **관문**. 이 프로세스가 끝날 때까지 다음으로 안 넘어가고,
+#                종료 코드가 0 이 아니면 기동을 중단한다
+#   when         always(기본) · sim · real. 시계 소스로만 가른다
 #
 # 단계 필드
 #   id           단계 번호 (로그 표시용)
@@ -25,20 +28,44 @@ run:
 
 stages:
 
+  # 단계 0 · sim 시계 문지기 (sim 전용)
+  #
+  # robot_localization 은 initialize() 에서 시계가 흐를 때까지 **타임아웃 없이**
+  # 기다린다. spin() 앞이라 걸리면 로그 한 줄 없이 통째로 멈춘다. 맵 리로드
+  # 직후 gz 가 paused 로 떠 있는 창에 기동을 치면 그렇게 된다.
+  # 자세한 근거는 kau_localization/launch/clock_gate.py 주석.
+  #
+  # 시계가 흐르면 0 으로 빠지고, 180 초 안에 안 흐르면 1 로 빠져 기동을 접는다.
+  # 조용히 멈춰 있는 것보다 낫다.
+  - id: 0
+    nodes:
+      - name: clock_gate
+        package: kau_localization
+        executable: clock_gate.py
+        ros: false
+        wait: true
+        when: sim
+        args: [180.0]
+
   # 단계 1 · 플랫폼 EKF 재우기
   #
   # 차량 제공 EKF 와 우리 EKF 가 동시에 odom->base_footprint 를 쏘면 TF 가 깨진다.
-  # platform_ekf_pause.py 가 lib/ 로 설치되면 주석을 해제한다 (세민_노트.md A-1).
-  # - id: 1
-  #   delay_sec: 1.0
-  #   nodes:
-  #     - name: platform_ekf_pause
-  #       package: kau_localization
-  #       executable: platform_ekf_pause.py
-  #       ros: false
-  #       args:
-  #         - physicar_bringup/config/ekf_params.yaml
-  #         - "@kau_localization:config/ekf.yaml"
+  # 감시자가 SIGSTOP 으로 재워 두고 1 Hz 로 다시 확인한다 -- 플랫폼 launch 가
+  # respawn=True 라 맵 리로드 때 새 PID 로 되살아나기 때문이다.
+  #
+  # ros: false 라 --ros-args 를 안 붙인다. use_sim_time 도 주입되지 않는데,
+  # 감시자는 sim 시계가 아니라 monotonic 벽시계로 판정하므로 의도된 것이다
+  # (시계가 얼어붙는 것 자체가 잡으려는 고장이다).
+  - id: 1
+    delay_sec: 1.0
+    nodes:
+      - name: platform_ekf_pause
+        package: kau_localization
+        executable: platform_ekf_pause.py
+        ros: false
+        args:
+          - physicar_bringup/config/ekf_params.yaml
+          - "@kau_localization:config/ekf.yaml"
 
   # 단계 2 · odom -> base_footprint
   - id: 2
@@ -70,11 +97,15 @@ stages:
         param_files: ["kau_localization:config/amcl.yaml"]
         params:
           scan_topic: /scan
-          # 시작 위치를 알면 켠다. 없으면 RViz 의 /initialpose 를 기다린다.
-          # set_initial_pose: true
-          # initial_pose.x: 0.23
-          # initial_pose.y: -0.02
-          # initial_pose.yaw: 0.0
+          # 초기 위치를 안 주면 amcl 은 map -> odom 을 아예 안 낸다
+          # ("cannot publish a pose ... Please set the initial pose"). 그러면
+          # map 프레임 자체가 없어서 local_planner 까지 같이 선다.
+          # 값은 amcl.launch.py 사용 예의 start_pose:="0.23,-0.02,0.0" 과 같다.
+          # 다른 자리에서 출발하면 여기를 고치거나 RViz 로 /initialpose 를 찍는다.
+          set_initial_pose: true
+          initial_pose.x: 0.23
+          initial_pose.y: -0.02
+          initial_pose.yaw: 0.0
 
       - name: map_amcl_lifecycle_manager
         package: nav2_lifecycle_manager

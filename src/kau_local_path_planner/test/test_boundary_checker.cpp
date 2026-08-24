@@ -13,7 +13,11 @@ using kau::local_path_planner::pointInPolygon;
 using kau::local_path_planner::roadClearance;
 using kau::local_path_planner::roadClearanceRect;
 using kau::local_path_planner::RoadBoundary;
+using kau::local_path_planner::roadOkRect;
+using kau::local_path_planner::roadOkWheels;
+using kau::local_path_planner::roadReportWheels;
 using kau::local_path_planner::VehicleFootprint;
+using kau::local_path_planner::WheelFootprint;
 
 namespace
 {
@@ -116,4 +120,135 @@ TEST(BoundaryChecker, RoadClearanceRectCatchesCornerMissedByCenterlineOnly)
     EXPECT_LT(roadClearanceRect(rb, path, body, /*road_safety_margin_cm=*/0.0,
                                /*sample_interval_cm=*/2.0),
              0.0);
+}
+
+// ====================================================================
+// 2026-08-24: 도로 이탈 판정을 바퀴 기준으로 바꾼 것에 대한 테스트.
+//
+// 규정: 흰 실선은 밟아도 되고, 네 바퀴가 전부 노면 밖으로 나가야 감점.
+// 그래서 판정 대상은 차체 사각형이 아니라 바퀴 4개다.
+// ====================================================================
+
+namespace
+{
+
+// 실차 제원 (physicar.urdf.xacro). 경로 점은 base_footprint = 휠베이스 중앙
+// 이므로 rear_axle_offset = -wheelbase/2.
+WheelFootprint physicarWheels()
+{
+    WheelFootprint w;
+    w.rear_axle_offset_cm = -9.0;
+    w.wheelbase_cm = 18.0;
+    w.track_width_cm = 16.0;
+    w.wheel_width_cm = 3.5;
+    w.min_wheels_on = 1;
+    return w;
+}
+
+VehicleFootprint physicarBody()
+{
+    VehicleFootprint b;
+    b.body_front_cm = 23.0;
+    b.rear_overhang_cm = 5.0;
+    b.half_width_cm = 10.0;
+    b.rear_axle_offset_cm = -9.0;
+    return b;
+}
+
+}  // namespace
+
+// 바퀴 기하가 URDF 대로 유도되는지. 바깥 모서리 (16+3.5)/2 = 9.75,
+// 안쪽 모서리 (16-3.5)/2 = 6.25, 축은 -9 / +9.
+TEST(BoundaryChecker, WheelFootprintGeometryFromUrdf)
+{
+    const WheelFootprint w = physicarWheels();
+    EXPECT_NEAR(w.rearAxleX(), -9.0, 1e-9);
+    EXPECT_NEAR(w.frontAxleX(), 9.0, 1e-9);
+    EXPECT_NEAR(w.outerY(), 9.75, 1e-9);
+    EXPECT_NEAR(w.innerY(), 6.25, 1e-9);
+}
+
+// rear_axle_offset 이 차체 사각형을 실제로 뒤로 옮기는지. 보정 전에는
+// 후륜축 치수(-5..+23)를 경로 점에 그대로 얹어 9cm 앞으로 밀려 있었다.
+TEST(BoundaryChecker, RearAxleOffsetShiftsBodyBox)
+{
+    VehicleFootprint uncorrected;   // rear_axle_offset_cm = 0 (기본값)
+    uncorrected.body_front_cm = 23.0;
+    uncorrected.rear_overhang_cm = 5.0;
+    EXPECT_NEAR(uncorrected.frontEdge(), 23.0, 1e-9);
+    EXPECT_NEAR(uncorrected.rearEdge(), -5.0, 1e-9);
+
+    const VehicleFootprint corrected = physicarBody();
+    // base_footprint 기준으로는 앞뒤 대칭 ±14 여야 한다 (차체 길이 28).
+    EXPECT_NEAR(corrected.frontEdge(), 14.0, 1e-9);
+    EXPECT_NEAR(corrected.rearEdge(), -14.0, 1e-9);
+}
+
+// 규정 재현: 노면 폭이 딱 바퀴 바깥 모서리에 닿는 경우.
+// 경로가 y=0 직진, 노면이 y in [-9.0, 9.0] 이면 바깥 모서리(±9.75)는 밖으로
+// 나가지만 안쪽 모서리(±6.25)는 안에 있다 = "흰선을 밟았을 뿐 이탈 아님".
+// -> 네 바퀴 모두 노면 위(wheels_on=4), 다만 여유(min_clear)는 음수.
+TEST(BoundaryChecker, WheelsOnRoadWhenOnlyOuterEdgeCrossesLine)
+{
+    RoadBoundary rb;
+    rb.outer = square(-50.0, -9.0, 150.0, 9.0);
+    rb.inner = square(1000.0, 1000.0, 1001.0, 1001.0);   // 사실상 없음
+
+    const Curve path = straightLineAtY(0.0, 100.0, 0.0);
+    const auto rep = roadReportWheels(
+        rb, path, physicarWheels(), /*road_safety_margin_cm=*/0.0,
+        /*sample_interval_cm=*/4.0);
+
+    EXPECT_EQ(rep.min_wheels_on, 4);
+    EXPECT_LT(rep.min_clear_cm, 0.0);        // 바깥 모서리는 선을 물었다
+    EXPECT_LT(rep.first_viol_s_cm, 0.0);     // 이탈로 기록되지는 않는다
+    EXPECT_NEAR(rep.off_integral_cm, 0.0, 1e-9);
+    EXPECT_TRUE(roadOkWheels(rb, path, physicarWheels(), 0.0, 4.0));
+}
+
+// 노면을 더 좁혀 안쪽 모서리(6.25)까지 밖으로 내보내면 그 쪽 두 바퀴가
+// 완전히 이탈한다 -- wheels_on 이 2 로 떨어지고 이탈 구간이 적분된다.
+// min_wheels_on=1 규정에서는 여전히 거부되지 않는다 (비용으로만 반영).
+TEST(BoundaryChecker, WheelsOffCountedWhenInnerEdgeCrosses)
+{
+    RoadBoundary rb;
+    rb.outer = square(-50.0, -50.0, 150.0, 5.0);   // y > 5 는 노면 밖
+    rb.inner = square(1000.0, 1000.0, 1001.0, 1001.0);
+
+    const Curve path = straightLineAtY(0.0, 100.0, 0.0);
+    const auto rep = roadReportWheels(
+        rb, path, physicarWheels(), /*road_safety_margin_cm=*/0.0,
+        /*sample_interval_cm=*/4.0);
+
+    EXPECT_EQ(rep.min_wheels_on, 2);          // 왼쪽 두 바퀴(y=+)가 완전히 밖
+    EXPECT_GE(rep.first_viol_s_cm, 0.0);      // 이탈 시작 호길이가 기록된다
+    EXPECT_GT(rep.off_integral_cm, 0.0);      // w_road 가 쓸 적분값
+    // 규정 기준(한 바퀴만 남아도 OK)으로는 통과.
+    EXPECT_TRUE(roadOkWheels(rb, path, physicarWheels(), 0.0, 4.0));
+
+    // 보수적으로 몰고 싶으면 min_wheels_on=4 로 올려 거부시킬 수 있다.
+    WheelFootprint strict = physicarWheels();
+    strict.min_wheels_on = 4;
+    EXPECT_FALSE(roadOkWheels(rb, path, strict, 0.0, 4.0));
+}
+
+// 이번 변경의 핵심: 차체 사각형 게이트는 실제 바퀴보다 훨씬 바깥을 본다.
+// 경로 앞쪽(x>=30)에 벽을 두면, 보정된 차체 앞모서리(+14, ±10)는 벽에
+// 닿지만 앞바퀴(+9, ±9.75)는 아직 닿지 않는 구간이 존재한다.
+TEST(BoundaryChecker, WheelGateIsLooserThanBodyBoxGate)
+{
+    RoadBoundary rb;
+    rb.outer = square(-50.0, -20.0, 150.0, 20.0);
+    // 경로 끝(x=100) 바로 앞에 가로 벽. 차체 앞모서리는 x=114 까지 뻗지만
+    // 앞바퀴는 x=109 까지만 간다.
+    rb.inner = square(112.0, -20.0, 130.0, 20.0);
+
+    const Curve path = straightLineAtY(0.0, 100.0, 0.0);
+
+    EXPECT_FALSE(roadOkRect(rb, path, physicarBody(),
+                           /*road_safety_margin_cm=*/0.0,
+                           /*sample_interval_cm=*/4.0));
+    EXPECT_TRUE(roadOkWheels(rb, path, physicarWheels(),
+                            /*road_safety_margin_cm=*/0.0,
+                            /*sample_interval_cm=*/4.0));
 }

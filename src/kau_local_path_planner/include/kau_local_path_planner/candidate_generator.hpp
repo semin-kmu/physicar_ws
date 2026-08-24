@@ -114,7 +114,8 @@ public:
         const std::vector<ObstacleStation> & stations,
         const PlannerParams & params, double kappa_lim,
         double kappa_max_vehicle, double body_radius_cm,
-        VehicleFootprint body_footprint = VehicleFootprint{});
+        VehicleFootprint body_footprint = VehicleFootprint{},
+        WheelFootprint wheels = WheelFootprint{});
 
     // 참조 멤버(global_path_ 등)를 들고 있어 복사/이동하면 댕글링된다.
     CandidateGenerator(const CandidateGenerator &) = delete;
@@ -196,7 +197,8 @@ private:
     double kappa_lim_;
     double kappa_max_vehicle_;
     double body_radius_cm_;
-    VehicleFootprint body_footprint_;
+    VehicleFootprint body_footprint_;   // 장애물 충돌 판정 (범퍼 포함)
+    WheelFootprint   wheels_;           // 도로 이탈 판정 (바퀴 4개)
 
     // Python: self._direct_seed -- 직전 성공 direct_candidate 조합 warm-start.
     mutable std::optional<std::array<double, 4>> direct_seed_;

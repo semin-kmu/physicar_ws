@@ -60,3 +60,26 @@ def test_reject_missing_field():
             'stages': [{'id': 1, 'nodes': [{'name': 'a', 'package': 'p'}]}]}
     with pytest.raises(ValueError, match='executable 필수'):
         parse_manifest(data)
+
+
+def test_gate_fields():
+    data = {'run': {'log_dir': '/tmp'}, 'stages': [{'id': 0, 'nodes': [{
+        'name': 'g', 'package': 'p', 'executable': 'g.py',
+        'ros': False, 'wait': True, 'when': 'sim', 'args': [180.0]}]}]}
+    spec = parse_manifest(data).stages[0].nodes[0]
+    assert spec.wait is True
+    assert spec.when == 'sim'
+    assert spec.args == (180.0,)
+
+
+def test_gate_defaults():
+    spec = parse_manifest(MINIMAL).stages[0].nodes[0]
+    assert spec.wait is False
+    assert spec.when == 'always'
+
+
+def test_reject_unknown_when():
+    data = {'run': {'log_dir': '/tmp'}, 'stages': [{'id': 1, 'nodes': [
+        {'name': 'a', 'package': 'p', 'executable': 'e', 'when': 'gazebo'}]}]}
+    with pytest.raises(ValueError, match='when 은'):
+        parse_manifest(data)

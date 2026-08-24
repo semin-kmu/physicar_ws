@@ -138,6 +138,46 @@ inline bool roadOkRect(
                              sample_interval_cm) >= 0.0;
 }
 
+// ---------------------------------------------------------------------
+// 2026-08-24: 도로 이탈 판정은 차체가 아니라 **바퀴** 로 한다.
+//
+// 대회 규정이 "흰 실선은 밟아도 되고, 네 바퀴가 전부 노면 밖으로 나가야
+// 감점" 이다. 흰 실선의 바깥 모서리가 곧 아스팔트 끝이라 track 폴리곤이
+// 그대로 규정상의 경계선이 된다 -- 폴리곤은 손대지 않는다.
+//
+// 위의 `roadClearanceRect`(차체 사각형)는 이 규정보다 훨씬 엄격하다. 차체
+// 앞모서리는 base_footprint 에서 25.1cm 인데 앞바퀴 외측은 13.3cm 라, 코너
+// 에서 12cm 바깥을 보고 멀쩡한 후보를 떨어뜨린다. 그래서 도로 게이트는 이
+// 함수로 바꾸고, `roadClearanceRect` 는 차체 외곽이 필요한 곳(단위테스트,
+// 장애물 계열과의 대조)에만 남긴다.
+//
+// 바퀴 하나를 두 점으로 본다:
+//   - 바깥 모서리 (outerY): 여유 측정용. 음수면 그 바퀴가 경계를 물었다
+//     (= 선을 밟기 시작). 규정상 감점은 아니라 거부 사유가 아니다.
+//   - 안쪽 모서리 (innerY): 여기까지 밖이면 그 바퀴는 **완전히** 나갔다.
+//     wheels_on 은 이 기준으로 센다.
+// ---------------------------------------------------------------------
+
+struct RoadReport
+{
+    int    min_wheels_on   = 4;     // 전 구간에서 가장 적게 남은 "노면 위" 바퀴 수
+    double min_clear_cm    = 0.0;   // 바퀴 바깥 모서리 기준 최소 여유 (음수 = 물음)
+    double first_viol_s_cm = -1.0;  // 바퀴가 처음 완전히 나간 호길이. 없으면 음수
+    double off_integral_cm = 0.0;   // ∫ (4 - wheels_on)/4 ds. 비용/진단용
+};
+
+RoadReport roadReportWheels(
+    const RoadBoundary & boundary, const Curve & cv, const WheelFootprint & wheels,
+    double road_safety_margin_cm, double sample_interval_cm);
+
+inline bool roadOkWheels(
+    const RoadBoundary & boundary, const Curve & cv, const WheelFootprint & wheels,
+    double road_safety_margin_cm, double sample_interval_cm)
+{
+    return roadReportWheels(boundary, cv, wheels, road_safety_margin_cm,
+                            sample_interval_cm).min_wheels_on >= wheels.min_wheels_on;
+}
+
 }  // namespace local_path_planner
 }  // namespace kau
 
