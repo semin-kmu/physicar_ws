@@ -1101,6 +1101,32 @@ KauLaneDetectionNode::KauLaneDetectionNode()
             0.0
         );
 
+
+    // ------------------------------------------------------------
+    // Pan 조준 (feedforward). 선언부(헤더) panAimGoalDeg 주석 참고.
+    //
+    // 여기서는 declare 만 한다. 실제 값은 updatePanSearch 가 매
+    // 프레임 get_parameter 로 다시 읽으므로 ros2 param set 이 즉시
+    // 먹는다 — 되돌릴 때 재빌드가 필요 없어야 하기 때문이다.
+    // ------------------------------------------------------------
+    pan_aim_enable_ =
+        this->declare_parameter<bool>(
+            "pan_aim_enable",
+            true
+        );
+
+    pan_aim_lookahead_m_ =
+        this->declare_parameter<double>(
+            "pan_aim_lookahead_m",
+            1.0
+        );
+
+    pan_aim_gain_ =
+        this->declare_parameter<double>(
+            "pan_aim_gain",
+            1.0
+        );
+
     // pan 회전축이 base_link 원점에서 떨어진 거리 [cm] (선언부
     // 헤더 주석 참고). pan=0 에서는 값이 얼마든 결과에 영향이
     // 없으므로 실측 전까지 0,0 으로 둔다.
@@ -4353,6 +4379,293 @@ double KauLaneDetectionNode::curvatureAheadKappa(
 
 
 
+
+// ================================================================
+// Pan 조준각 (feedforward)
+//
+// 설계 근거는 선언부(헤더) 주석 참고.
+//
+// 1. /path/global 전 구간에서 자차 최근접점을 찾는다
+// 2. 거기서 호길이로 pan_aim_lookahead_m 만큼 전진한 점을 구한다
+// 3. 그 점이 base_link 기준 몇 도에 있는지(방위각) 잰다
+// 4. pan_aim_gain 을 곱해 목표각으로 낸다 (클램프는 commandPan)
+//
+// 호길이는 정확히 잰다. 구간 전체는 seg_length(사전계산값), 마지막
+// 부분 구간만 segLength() 이분탐색이다. curvatureAheadKappa 의
+// u 균일 근사를 재사용하면 안 된다 — 그쪽 주석대로 "트리거 판정용
+// 이지 제어에 쓰지 않는" 값이다.
+// ================================================================
+
+double KauLaneDetectionNode::panAimGoalDeg(
+    const VehiclePose & pose,
+    bool * out_valid) const
+{
+    if (out_valid)
+    {
+        *out_valid = false;
+    }
+
+
+    if (!pose.valid || !global_path_)
+    {
+        return 0.0;
+    }
+
+
+    const std::size_t nctrl =
+        static_cast<std::size_t>(global_path_->degree) + 1;
+
+    if (
+        nctrl < 2 ||
+        global_path_->ctrl_x.size() != global_path_->ctrl_y.size() ||
+        global_path_->ctrl_x.empty() ||
+        global_path_->ctrl_x.size() % nctrl != 0
+    )
+    {
+        return 0.0;
+    }
+
+
+    const std::size_t nseg = global_path_->ctrl_x.size() / nctrl;
+
+    if (
+        nseg == 0 ||
+        global_path_->seg_length.size() != nseg
+    )
+    {
+        return 0.0;
+    }
+
+
+    // 구간 k 의 제어점을 꺼내는 helper.
+    const auto seg_ctrl =
+        [&](std::size_t k)
+        {
+            kau::bezier::Ctrl c(nctrl);
+
+            for (
+                std::size_t j = 0;
+                j < nctrl;
+                ++j
+            )
+            {
+                const std::size_t idx = k * nctrl + j;
+
+                c[j].x = global_path_->ctrl_x[idx];
+                c[j].y = global_path_->ctrl_y[idx];
+            }
+
+            return c;
+        };
+
+
+    // 자차 위치 [cm] (map 프레임, KauPath 단위와 맞춘다)
+    const kau::bezier::Point2 ego{
+        pose.x_m * 100.0,
+        pose.y_m * 100.0
+    };
+
+
+    // ------------------------------------------------------------
+    // 1. 최근접점 (curvatureAheadKappa 와 같은 선형 탐색)
+    // ------------------------------------------------------------
+
+    std::size_t best_seg = 0;
+
+    double best_d2 = std::numeric_limits<double>::max();
+
+    double best_u = 0.0;
+
+
+    for (
+        std::size_t k = 0;
+        k < nseg;
+        ++k
+    )
+    {
+        const kau::bezier::Ctrl ctrl = seg_ctrl(k);
+
+        const kau::bezier::Nearest near =
+            kau::bezier::nearestOnSeg(ctrl, ego);
+
+        const kau::bezier::Point2 foot =
+            kau::bezier::evalSeg(ctrl, near.u);
+
+        const double dx = foot.x - ego.x;
+
+        const double dy = foot.y - ego.y;
+
+        const double d2 = dx * dx + dy * dy;
+
+        if (d2 < best_d2)
+        {
+            best_d2 = d2;
+
+            best_seg = k;
+
+            best_u = near.u;
+        }
+    }
+
+
+    // ------------------------------------------------------------
+    // 2. 호길이로 lookahead 만큼 전진
+    //
+    // 부분 구간 길이는 segLength(ctrl, u0, u1) 가 정확히 낸다.
+    // 목표 길이에 닿는 u 는 단조증가라 이분탐색이면 충분하다.
+    // ------------------------------------------------------------
+
+    double remaining = pan_aim_lookahead_m_ * 100.0;
+
+    if (!(remaining > 0.0))
+    {
+        // 룩어헤드가 0 이하면 조준할 대상이 없다.
+        return 0.0;
+    }
+
+
+    std::size_t cur_seg = best_seg;
+
+    double cur_u = best_u;
+
+    kau::bezier::Ctrl cur_ctrl = seg_ctrl(cur_seg);
+
+    // 전 구간을 다 돌아도 못 채우면 마지막 점을 쓴다 (개곡선 종단).
+    bool reached = false;
+
+
+    for (
+        std::size_t step = 0;
+        step <= nseg;
+        ++step
+    )
+    {
+        const double rest =
+            kau::bezier::segLength(cur_ctrl, cur_u, 1.0);
+
+        if (remaining <= rest)
+        {
+            // 이 구간 안에서 끝난다. u 를 이분탐색으로 찾는다.
+            double lo = cur_u;
+
+            double hi = 1.0;
+
+            for (
+                int it = 0;
+                it < 32;
+                ++it
+            )
+            {
+                const double mid = 0.5 * (lo + hi);
+
+                if (
+                    kau::bezier::segLength(cur_ctrl, cur_u, mid) <
+                    remaining
+                )
+                {
+                    lo = mid;
+                }
+                else
+                {
+                    hi = mid;
+                }
+            }
+
+            cur_u = 0.5 * (lo + hi);
+
+            reached = true;
+
+            break;
+        }
+
+
+        remaining -= rest;
+
+
+        std::size_t next = cur_seg + 1;
+
+        if (next >= nseg)
+        {
+            if (!global_path_->is_closed)
+            {
+                // 개곡선 종단. 남은 거리를 못 채웠으므로 끝점을 쓴다.
+                cur_u = 1.0;
+
+                reached = true;
+
+                break;
+            }
+
+            next = 0;
+        }
+
+        if (next == best_seg)
+        {
+            // 폐곡선을 한 바퀴 다 돌았다 (lookahead 가 전체 길이보다 김)
+            cur_u = 1.0;
+
+            reached = true;
+
+            break;
+        }
+
+        cur_seg = next;
+
+        cur_u = 0.0;
+
+        cur_ctrl = seg_ctrl(cur_seg);
+    }
+
+
+    if (!reached)
+    {
+        return 0.0;
+    }
+
+
+    // ------------------------------------------------------------
+    // 3. 방위각 [deg] (base_link 기준, 왼쪽이 +)
+    //
+    // camera_pan_joint 는 axis +Z 라 +rad 이 왼쪽이므로 이 부호가
+    // 그대로 pan 명령의 부호가 된다 (§8 회전 부호).
+    // ------------------------------------------------------------
+
+    const kau::bezier::Point2 target =
+        kau::bezier::evalSeg(cur_ctrl, cur_u);
+
+    const double bearing_map =
+        std::atan2(
+            target.y - ego.y,
+            target.x - ego.x
+        );
+
+    double bearing_rel = bearing_map - pose.yaw_rad;
+
+    // [-pi, pi] 로 정규화. 폐곡선을 한 바퀴 돈 경우 등에서
+    // 뒤쪽 점이 잡히면 여기서 접힌다.
+    while (bearing_rel > M_PI)
+    {
+        bearing_rel -= 2.0 * M_PI;
+    }
+
+    while (bearing_rel < -M_PI)
+    {
+        bearing_rel += 2.0 * M_PI;
+    }
+
+
+    if (out_valid)
+    {
+        *out_valid = true;
+    }
+
+
+    return pan_aim_gain_ * bearing_rel * 180.0 / M_PI;
+}
+
+
+
+
 // ================================================================
 // 소실된 쪽 전방에 장애물이 있는가 (map 프레임)
 //
@@ -4712,6 +5025,84 @@ void KauLaneDetectionNode::updatePanSearch(
     const LaneDetectionResult & right,
     const rclcpp::Time & frame_stamp)
 {
+    // ------------------------------------------------------------
+    // Pan 조준 (feedforward) — 아래 탐색 상태기계를 대체한다.
+    //
+    // 파라미터를 매 프레임 다시 읽는다. bev 파라미터와 같은 idiom이고,
+    // pan_search_enable 과 달리 ros2 param set 으로 주행 중에 끄고 켤
+    // 수 있다 — 되돌릴 때 재빌드가 필요 없어야 하기 때문이다.
+    //
+    // 아래 상태기계는 한 줄도 건드리지 않았다. 여기서 조기 반환하지
+    // 않으면(기능 꺼짐 / 측위 없음 / 전역경로 없음) 예전 동작 그대로다.
+    // ------------------------------------------------------------
+
+    pan_aim_enable_ =
+        this->get_parameter("pan_aim_enable").as_bool();
+
+    pan_aim_lookahead_m_ =
+        this->get_parameter("pan_aim_lookahead_m").as_double();
+
+    pan_aim_gain_ =
+        this->get_parameter("pan_aim_gain").as_double();
+
+
+    last_pan_aim_valid_ = false;
+
+
+    if (
+        pan_aim_enable_ &&
+        pan_search_enable_
+    )
+    {
+        bool aim_valid = false;
+
+        const double aim_deg =
+            panAimGoalDeg(
+                lookupVehiclePose(frame_stamp),
+                &aim_valid
+            );
+
+        if (aim_valid)
+        {
+            last_pan_aim_deg_ = aim_deg;
+
+            last_pan_aim_valid_ = true;
+
+            commandPan(aim_deg);
+
+            // 상태기계를 Idle 로 눌러 둔다. 측위가 끊겨 아래로
+            // 흘러가게 될 때 낡은 상태/카운트에서 재개하지 않도록.
+            pan_state_ = PanSearchState::Idle;
+
+            pan_search_dir_ = 0;
+
+            left_miss_streak_ = 0;
+
+            right_miss_streak_ = 0;
+
+            pan_straight_streak_ = 0;
+
+            pan_found_streak_ = 0;
+
+            publishPanRamped(frame_stamp);
+
+            return;
+        }
+
+
+        // 측위나 전역경로가 아직 없다. 아래 탐색 상태기계로 흘려
+        // 보낸다 — 조준이 유일한 근거였다면 이 구간에서 카메라가
+        // 통째로 죽는다 (§9 가 시야 기반 근거를 따로 둔 이유와 같다).
+        RCLCPP_WARN_THROTTLE(
+            this->get_logger(),
+            *this->get_clock(),
+            5000,
+            "Pan 조준 불가 (측위 또는 /path/global 없음). "
+            "탐색 상태기계로 대체한다."
+        );
+    }
+
+
     if (!pan_search_enable_)
     {
         // 기능이 꺼지는 순간에도 카메라가 돌아간 채로 남지
@@ -7800,7 +8191,8 @@ void KauLaneDetectionNode::imageCallback(
                 "pan=%d pdeg=%.1f padeg=%.1f pgdeg=%.1f "
                 "pdfix=%.2f pdext=%d "
                 "conf=%.2f edev=%.1f egate=%.1f erej=%d "
-                "pbend=%.1f pvis=%d",
+                "pbend=%.1f pvis=%d "
+                "paim=%.1f pav=%d",
                 left_lane.found_count,
                 yellow_lane.found_count,
                 right_lane.found_count,
@@ -7829,7 +8221,9 @@ void KauLaneDetectionNode::imageCallback(
                 last_path_gate_cm_,
                 path_ema_reject_streak_,
                 last_bend_deg_,
-                last_visible_at_zero_
+                last_visible_at_zero_,
+                last_pan_aim_deg_,
+                last_pan_aim_valid_ ? 1 : 0
             );
 
             std_msgs::msg::String status_msg;

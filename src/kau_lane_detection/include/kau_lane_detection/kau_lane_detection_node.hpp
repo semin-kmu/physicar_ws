@@ -558,6 +558,49 @@
         double curvatureAheadKappa(const VehiclePose & pose) const;
 
 
+        // ================================================================
+        // Pan 조준 (feedforward) — pan_aim_enable 일 때만
+        //
+        // /path/global 위 자차 최근접점에서 호길이로
+        // pan_aim_lookahead_m 만큼 전진한 점이 base_link 기준 몇 도에
+        // 있는가. 그 각도에 pan_aim_gain 을 곱한 값이 pan 목표각이다.
+        // 판정 불가(측위/전역경로 없음)면 out_valid = false.
+        //
+        // 기존 updatePanSearch 상태기계가 "차선을 놓친 뒤" 찾아 도는
+        // 되먹임이라면, 이쪽은 "도로가 휜 만큼 미리 돌리는" 앞먹임이다.
+        //
+        //   되먹임의 문제  검출 -> pan -> 검출 이 닫힌 고리라 발진한다
+        //                  (§8 실측 15초에 9번 왕복). 탐색 지연도 크다
+        //                  — 3프레임 소실 감지 후 램프+정착+스텝이라
+        //                  커브가 끝날 무렵 도착한다.
+        //   앞먹임의 이점  명령이 전역경로와 측위에서만 나오므로 검출을
+        //                  거치지 않는다. 고리가 끊겨 발진 모드가 없다.
+        //
+        // 각도는 "그 점의 방위"(chord bearing)지 "그 지점 접선"이 아니다.
+        // 접선을 쓰면 횡오차에 불변이지만, 그건 우리가 원하는 게 아니다
+        // — 차가 실제로 20cm 밀려 있으면 차선도 그만큼 밀려 보이므로
+        // 카메라도 따라가야 한다. 방위각은 곡률분과 횡오차분을 합쳐서
+        // 낸다:
+        //
+        //     psi = d/(2R)  +  atan(e/d)      (R 곡률반경, e 횡오차)
+        //
+        // 측위 잡음이 e 에 섞여 들어오지만 AMCL 실측 지터 1.12cm 는
+        // d=1m 에서 0.64도라 무시할 수준이다 (kau_localization README
+        // "map -> odom 이 훨씬 안정적이다"). Cartographer 는 4.88cm /
+        // 변화율 최대 167cm/s 라 허위 각속도가 96deg/s 까지 나오므로
+        // 이 기능과 같이 쓰지 말 것 — 신호 대역(커브 진입 143deg/s)과
+        // 겹쳐서 EMA 로도 못 가른다.
+        //
+        // 호길이 전진은 seg_length(구간 전체) + segLength(부분 구간
+        // Gauss-Legendre) 이분탐색으로 정확히 잰다. curvatureAheadKappa
+        // 의 u 균일 근사를 그대로 쓰면 안 된다 — 그쪽은 자기 주석대로
+        // "트리거 판정용이지 제어에 쓰지 않는" 근사다.
+        // ================================================================
+        double panAimGoalDeg(
+            const VehiclePose & pose,
+            bool * out_valid) const;
+
+
         // 소실된 쪽 dir 방향, 전방 obstacle_ahead_max_m_ 이내에 장애물이
         // 있는가. dir 은 pan_search_dir_ 와 같은 규약 (+1 왼쪽 / -1 오른쪽).
         //
@@ -1123,6 +1166,31 @@
         double pan_pivot_offset_x_cm_;
 
         double pan_pivot_offset_y_cm_;
+
+
+        // ------------------------------------------------------------
+        // Pan 조준 (feedforward). panAimGoalDeg 선언부 주석 참고.
+        //
+        // 셋 다 매 프레임 get_parameter 로 다시 읽는다 (bev 파라미터와
+        // 같은 idiom). pan_search_enable 과 달리 ros2 param set 으로
+        // 주행 중에 끄고 켤 수 있다 — 되돌릴 때 재빌드가 필요 없어야
+        // 하기 때문이다.
+        // ------------------------------------------------------------
+
+        // false 면 이 블록이 통째로 꺼지고 기존 탐색 상태기계가
+        // 그대로 동작한다.
+        bool pan_aim_enable_;
+
+        // 최근접점에서 호길이로 이만큼 [m] 전진한 점을 조준한다.
+        double pan_aim_lookahead_m_;
+
+        // 조준 방위각에 곱하는 배수.
+        double pan_aim_gain_;
+
+        // 진단용 (status 의 paim / pav).
+        double last_pan_aim_deg_ = 0.0;
+
+        bool last_pan_aim_valid_ = false;
 
         // 재검출 인정에 필요한 최소 창 수 (Searching -> Holding).
         //

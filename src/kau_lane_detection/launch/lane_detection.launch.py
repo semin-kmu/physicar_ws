@@ -32,6 +32,7 @@ ROS 쪽에는 image_raw 만 bridge 되어 있어서 camera_info 가 비어 있�
     viewer:=false               웹 뷰어(포트 5000) 없이 노드만
     params_file:=/path/to.yaml  다른 파라미터 파일로 교체
     pan_search:=false           카메라 pan 탐색 끄기 (기본 켜짐)
+    pan_aim:=false              카메라 pan 조준 끄기 (기본 켜짐)
 
 pan_search 는 노드가 생성자에서 한 번만 읽는 값이라
 ros2 param set 으로는 바꿀 수 없다. 기동 시점에 넣어야 한다.
@@ -85,6 +86,7 @@ def generate_launch_description():
     image_bridge = LaunchConfiguration('image_bridge')
     viewer = LaunchConfiguration('viewer')
     pan_search = LaunchConfiguration('pan_search')
+    pan_aim = LaunchConfiguration('pan_aim')
     use_sim_time = ParameterValue(
         LaunchConfiguration('use_sim_time'), value_type=bool)
 
@@ -139,6 +141,17 @@ def generate_launch_description():
             ),
         ),
 
+        DeclareLaunchArgument(
+            'pan_aim',
+            default_value='true',
+            description=(
+                '전역경로 룩어헤드로 카메라를 미리 돌리는 조준 '
+                '(기본 켜짐). 켜지면 pan_search 상태기계 대신 '
+                '동작하고, 측위/전역경로가 없으면 자동으로 '
+                '상태기계로 넘어간다'
+            ),
+        ),
+
         # ------------------------------------------------------------
         # Gazebo -> ROS Bridge
         #
@@ -180,6 +193,11 @@ def generate_launch_description():
                     # 여기서 넣지 않으면 나중에 켤 방법이 없다.
                     'pan_search_enable': ParameterValue(
                         pan_search, value_type=bool),
+
+                    # 이쪽은 노드가 매 프레임 다시 읽으므로 기동 뒤
+                    # ros2 param set 으로도 바꿀 수 있다.
+                    'pan_aim_enable': ParameterValue(
+                        pan_aim, value_type=bool),
                     'use_sim_time': use_sim_time,
                 },
             ],
