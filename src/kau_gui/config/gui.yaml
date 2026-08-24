@@ -31,9 +31,6 @@
       topic: "/map"
       yaml_path: ""                 # 비우면 auto/file 에서 맵 배경 없이 동작
       wait_s: 5.0
-      # 축 눈금 표시 단위. cm | m. 내부 계산은 항상 m 이고 표시만 바뀐다.
-      # 팀 규약이 cm 이고 시뮬(sim_common/viz.py)도 cm 라 나란히 보기 쉽다.
-      display_unit: "cm"
 
     # --- 구독 토픽 ---
     topics:
@@ -42,16 +39,13 @@
       path_global: "/viz/path/global"
       path_local: "/viz/path/local"
       path_lane: "/viz/path/lane"
-      lookahead: "/viz/path/lookahead"
       speed_cmd: "/speed"           # target speed
       odom: "/odom"                 # real speed. /odometry/filtered 아님
       steering: "/steering"         # cmd steer [rad]
       steer_debug: "/debug/steer"   # raw steer · Ld · heading err · cte
 
-    # --- 차량 외형 (map 패널 표시용) ---
-    vehicle:
-      length_m: 0.30
-      width_m: 0.20
+    # 맵의 TF 축 마커 길이 [cm]. ROS 표준 모양(x 빨강 / y 초록)으로 그린다.
+    tf_axis_cm: 20.0
 
     # --- 노드 감시 ---
     # bringup.yaml 이 기동하는 노드 그대로. 순서도 맞춰 둔다.
