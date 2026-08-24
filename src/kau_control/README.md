@@ -79,7 +79,7 @@ ros2 launch kau_control control.launch.py log_level:=debug      # 제어 내부�
 ```
 
 `physicar_bringup` 의 `sim.launch.py` / `real.launch.py` 와
-`kau_localization` 의 `localization.launch.py` 가 떠 있어야 한다.
+`kau_localization` 의 `cartographer_localization.launch.py` (또는 `amcl.launch.py`) 가 떠 있어야 한다.
 **`map -> odom` TF 가 없으면 두 노드 모두 계속 0 을 발행한다** (의도된 동작).
 
 한쪽만 띄우고 싶으면 (예: 조향만 붙여 보기):
@@ -258,7 +258,7 @@ window 추적이 무너진다 (레퍼런스 실측: 전역 탐색 대비 불일�
 
 ## 7. 해야 할 일
 
-- [ ] `localization.launch.py` 를 띄우고 `map` 프레임에서 추종 정확도 재측정
+- [ ] `cartographer_localization.launch.py` 를 띄우고 `map` 프레임에서 추종 정확도 재측정
 - [ ] 시뮬 헤딩/진행방향 50 deg 불일치 원인 규명 (측위인지 차량 모델인지)
 - [ ] 가이드의 시나리오 1(오프셋 복귀) / 2(단일 커브) / 3(S-curve) 실측,
       `k_v` / `ld_min` / `ld_max` 재튜닝. 시뮬 탐색 범위는

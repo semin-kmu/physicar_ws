@@ -38,7 +38,7 @@ steer_controller:
     fallback_path_latched: true
     speed_topic: "/speed"
 
-    control_hz: 100.0
+    control_hz: 50.0
 
     # identity 모드에서는 TF 를 안 보므로 tf_timeout 이 놀고,
     # 경로 갱신이 유일한 생존 신호가 된다.
@@ -93,7 +93,7 @@ speed_controller:
     path_latched: false
     fallback_path_latched: true
 
-    control_hz: 100.0
+    control_hz: 50.0
     tf_timeout: 0.2
     path_timeout: 0.5
     cte_abort_cm: 40.0
@@ -113,7 +113,7 @@ speed_controller:
       # 먼저 상수 속도로 조향을 확인하고, 그다음에 v_min 을 내려
       # (예: 0.3 / 0.8) 가감속을 켠다.
       #
-      # 0.4 m/s: 100 Hz 제어 기준 한 tick 에 4 mm, LookAhead 25 cm 를
+      # 0.4 m/s: 50 Hz 제어 기준 한 tick 에 8 mm, LookAhead 25 cm 를
       # 0.6 초에 통과한다. 차선 인지가 14 Hz 이므로 인지 한 프레임
       # 사이에 2.9 cm 진행 — 인지 지연이 조향에 묻히는 범위다.
       v_min: 0.4

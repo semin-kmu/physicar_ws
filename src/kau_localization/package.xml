@@ -3,7 +3,7 @@
 <package format="3">
   <name>kau_localization</name>
   <version>0.0.0</version>
-  <description>PhysiCar Cartographer 2D SLAM and pure localization.</description>
+  <description>PhysiCar 2D localization: Cartographer SLAM/pure localization and AMCL.</description>
   <maintainer email="physicar@todo.todo">physicar</maintainer>
   <license>Apache-2.0</license>
 
@@ -12,6 +12,8 @@
   <depend>rclcpp</depend>
   <depend>cartographer_ros_msgs</depend>
   <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>std_srvs</depend>
 
   <exec_depend>cartographer_ros</exec_depend>
   <exec_depend>ament_index_python</exec_depend>
@@ -19,6 +21,12 @@
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>rviz2</exec_depend>
   <exec_depend>robot_localization</exec_depend>
+  <exec_depend>nav2_amcl</exec_depend>
+  <exec_depend>nav2_map_server</exec_depend>
+  <exec_depend>nav2_lifecycle_manager</exec_depend>
+  <!-- /particle_cloud 는 nav2_msgs/ParticleCloud 라 RViz 기본 플러그인으로
+       표시가 안 된다. rviz/localization.rviz 가 이 플러그인을 참조한다. -->
+  <exec_depend>nav2_rviz_plugins</exec_depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>

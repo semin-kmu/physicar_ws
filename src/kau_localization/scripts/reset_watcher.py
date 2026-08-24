@@ -409,7 +409,7 @@ class ResetWatcher(Node):
         if self.localization_alive():
             return
         cmd = [
-            'ros2', 'launch', 'kau_localization', 'localization.launch.py',
+            'ros2', 'launch', 'kau_localization', 'cartographer_localization.launch.py',
             f'pbstream:={self.args.pbstream}',
             'use_sim_time:=true',
             f"rviz:={'false' if self.args.no_rviz else 'true'}",
@@ -646,7 +646,8 @@ def main():
         description='PhysiCar 리셋/재시작 버튼을 감지해 localization 을 이어붙인다.',
         formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--pbstream', default=str(default_pbstream) if default_pbstream else None,
-                        help=f'localization.launch.py 에 넘길 지도 (기본: {default_pbstream})')
+                        help='cartographer_localization.launch.py 에 넘길 지도 '
+                             f'(기본: {default_pbstream})')
     parser.add_argument('--sim-log', default=DEFAULT_SIM_LOG, help='sim_api 로그 경로')
     parser.add_argument('--sim-api', default=DEFAULT_SIM_API, help='sim_api 주소')
     parser.add_argument('--no-rviz', action='store_true', help='RViz 를 띄우지 않는다')
@@ -666,7 +667,7 @@ def main():
     parser.add_argument('--report-period', type=float, default=10.0,
                         help='드리프트를 콘솔에 찍는 주기 [s]')
     parser.add_argument('--launch-arg', action='append', default=[],
-                        help='localization.launch.py 에 추가로 넘길 인자 (여러 번 가능)')
+                        help='cartographer_localization.launch.py 에 추가로 넘길 인자 (여러 번 가능)')
     args = parser.parse_args()
 
     if not args.pbstream:

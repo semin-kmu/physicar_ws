@@ -45,7 +45,7 @@ public:
     : rclcpp::Node("speed_controller"),
       tracker_(this)
     {
-        declare_parameter<double>("control_hz", 100.0);
+        declare_parameter<double>("control_hz", 50.0);
         declare_parameter<double>("vehicle.wheelbase_cm", 18.0);
         declare_parameter<double>("vehicle.max_steer_deg", 20.0);
 

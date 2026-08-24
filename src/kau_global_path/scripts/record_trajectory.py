@@ -3,7 +3,8 @@
 teleop 주행 궤적을 **바퀴마다 한 파일씩** CSV 로 기록한다.
 lane_graph 수기 편집의 좌표 기준이 된다.
 
-localization.launch.py 가 떠 있고 2D Pose Estimate 로 초기화가 끝난 뒤에 실행한다.
+cartographer_localization.launch.py 가 떠 있고 2D Pose Estimate 로 초기화가
+끝난 뒤에 실행한다.
 map -> base_footprint TF 를 폴링해서 일정 거리 이상 움직였을 때만 한 점을 남긴다.
 시간 기준으로 남기면 정지 구간에 점이 수천 개 쌓여서 편집기에서 못 쓴다.
 

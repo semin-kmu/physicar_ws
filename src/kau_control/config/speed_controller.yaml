@@ -22,7 +22,7 @@ speed_controller:
     path_latched: false
     fallback_path_latched: true
 
-    control_hz: 100.0
+    control_hz: 50.0
     tf_timeout: 0.2
     path_timeout: 1.0
     cte_abort_cm: 200.0

@@ -327,8 +327,11 @@ def main():
     print('=' * 62)
     print()
     print(' 이 지도로 측위를 띄우려면:')
-    print(f'   ros2 launch kau_localization localization.launch.py \\')
-    print(f'       pbstream:={pbstream} rviz:=true')
+    # 지도는 소스 트리에 생기고 launch 는 install 트리에서 돈다.
+    # 이름(pbstream:=kau_vN)으로 부르려면 한 번 설치해야 한다.
+    print('   colcon build --packages-select kau_localization')
+    print('   ros2 launch kau_localization cartographer_localization.launch.py \\')
+    print(f'       pbstream:={stem.name} rviz:=true')
     sys.exit(0 if ok else 1)
 
 

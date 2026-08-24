@@ -21,7 +21,7 @@ steer_controller:
     fallback_path_latched: true
     speed_topic: "/speed"               # Ld 계산에 쓸 현재 속도 명령
 
-    control_hz: 100.0
+    control_hz: 50.0
     tf_timeout: 0.2                     # s, TF 가 이보다 오래되면 조향 0
     path_timeout: 1.0                   # s, 주 경로가 이보다 오래되면 fallback
     cte_abort_cm: 200.0                 # cm, 발산 판정 -> 조향 0

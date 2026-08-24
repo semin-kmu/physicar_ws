@@ -1,0 +1,246 @@
+# Copyright 2026 KAU AMET Team
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# PhysiCar AMCL (nav2_amcl) 파티클 필터 측위 설정.
+#
+# Cartographer 의 대안이다. 추정 정확도는 Cartographer 가 낫지만, 대회장에서
+# 관계자가 차를 들어 이전 지점으로 되돌릴 때 Cartographer 는 pose graph 가
+# 깨져 복구가 어렵다. AMCL 은 /initialpose 한 방이면 그 자리에서 다시 잡는다.
+#
+# **Cartographer 와 동시에 띄우면 안 된다.** 둘 다 map -> odom 을 발행한다.
+#
+# 기준선은 physicar_bringup/config/nav2_params.yaml 의 amcl 섹션이고,
+# 이 차량에 맞지 않는 값만 바꿨다. 바꾼 것은 전부 아래에 이유를 남긴다.
+
+amcl:
+  ros__parameters:
+    # ── 프레임 ──────────────────────────────────────────────────────────
+    # TF 소유권은 Cartographer 를 쓸 때와 동일하다.
+    #   map -> odom            : 이 노드
+    #   odom -> base_footprint : ekf_filter_node (건드리지 않는다)
+    global_frame_id: "map"
+    odom_frame_id: "odom"
+    base_frame_id: "base_footprint"
+    tf_broadcast: true
+
+    # ── 센서 입력 ───────────────────────────────────────────────────────
+    # raw /scan 을 쓴다. /scan_filtered 는 무효값을 0.0 으로 바꾸는데
+    # (physicar_bringup/src/scan_filter_node.cpp:59) nav2_amcl 의
+    # likelihood_field 모델은 range_max 이상과 NaN 만 걸러내고 하한은 안 본다.
+    # 0.0 이 "코앞에 벽" 으로 들어가 파티클 가중치를 망가뜨린다.
+    scan_topic: /scan
+    map_topic: /map
+
+    laser_model_type: "likelihood_field"
+
+    # 실측 /scan: range_min 0.10, range_max 16.0, 719 beam, 10 Hz, 360도.
+    # nav2 기본값의 laser_min_range 0.05 는 라이다 실제 하한보다 낮아서
+    # 있으나 마나였다. 실제 값으로 맞춘다.
+    laser_min_range: 0.1
+    laser_max_range: 16.0
+
+    # 719 beam 중 몇 개를 쓸지. 기본 60 은 12 x 7 m 빈 직사각형에서 빈약하다 —
+    # 특징이 벽 네 개뿐이라 beam 이 적으면 벽을 따라 미끄러지는 자유도가 남는다.
+    # 120 이면 3도 간격이다. CPU 가 모자라면 여기부터 내린다.
+    max_beams: 120
+
+    # likelihood_field 모델의 뾰족함. 이 셋이 "스캔이 지도와 얼마나 맞아야
+    # 좋은 자세로 쳐줄지" 를 정한다.
+    #
+    # 2026-08-23: nav2 기본값(sigma_hit 0.2 / z_hit 0.5 / z_rand 0.5)이 이
+    # 라이다에는 너무 관대했다. z_rand 0.5 는 확률질량의 절반을 "어디서 왔는지
+    # 모르는 빔" 에 주는 것이라 우도장이 평평해지고, sigma_hit 0.2 는 지도
+    # 해상도(0.05 m)의 4 배라 20 cm 오차도 거의 벌하지 않는다.
+    #
+    # 실측: 스캔-지도 전역 최적해로 /initialpose 를 찍어준 뒤 필터를 돌리면
+    # AMCL 이 오히려 그 자리에서 밀려났다 (10 cm 이내 비율 89.6 -> 56 %).
+    # 우도장이 평평해서 옳은 자세를 붙잡아 두지 못한 것이다.
+    #
+    # sim 라이다는 잡음이 거의 없으므로 뾰족하게 간다. 실기에서는 잡음과
+    # 지도에 없는 장애물(라바콘) 때문에 z_rand 를 조금 올려야 할 수 있다.
+    laser_likelihood_max_dist: 2.0
+    sigma_hit: 0.08
+    z_hit: 0.9
+    z_rand: 0.1
+    z_max: 0.05
+    z_short: 0.05
+    lambda_short: 0.1
+
+    # beam skip 은 지도에 없는 동적 장애물이 많을 때 쓰는 것이다.
+    # 라바콘은 지도에 없지만 수가 적어서 z_rand 로 흡수된다. 켜면 CPU 만 든다.
+    do_beamskip: false
+    beam_skip_distance: 0.5
+    beam_skip_error_threshold: 0.9
+    beam_skip_threshold: 0.3
+
+    # ── 모션 모델 ───────────────────────────────────────────────────────
+    # Ackermann 이지만 DifferentialMotionModel 이 맞다. 이 모델은 조향
+    # 기구학이 아니라 "오도메트리 증분에 얼마나 노이즈를 실을까" 를 정한다.
+    robot_model_type: "nav2_amcl::DifferentialMotionModel"
+
+    # alpha1 회전<-회전 · alpha2 회전<-병진 · alpha3 병진<-병진 · alpha4 병진<-회전
+    # (alpha5 는 Omni 모델 전용이라 여기선 안 쓰인다)
+    #
+    # 기본값은 넷 다 0.2 다. 이 차의 오도메트리는 회전이 정확한 편이다 —
+    # EKF 가 yaw 와 vyaw 를 100% IMU 로만 받고 (ekf_params.yaml 의 odom0_config
+    # 는 yaw · vyaw 가 둘 다 false), sim 자이로의 angular_velocity_covariance 가
+    # 4e-8 이다. 실측으로도 gyro/EKF yaw 는 지연 0.00 s · 상관 0.98 이었다.
+    #
+    # 2026-08-23: 처음에 0.05 까지 낮췄다가 0.1 로 올렸다. "회전 중 눈에 띄게
+    # 틀어진다" 는 증상 때문이다. 위 상관 0.98 은 **단기** 값이고, 고속 회전에서는
+    # 전제가 약해진다 — physicar_2d_localization.lua 의 실측 기록에 따르면
+    # >80 deg/s 구간에서 yaw 오차가 6.6 도까지 벌어진다. 0.05 로는 파티클이
+    # yaw 로 그만큼 퍼지지 않아 스캔이 알려주는 보정을 받아들일 여지가 없다.
+    #
+    # 병진은 laser ICP(/odom/laser) 라 회전만큼 믿을 게 못 되어 기본값을 둔다.
+    alpha1: 0.1
+    alpha2: 0.1
+    alpha3: 0.2
+    alpha4: 0.2
+    alpha5: 0.2
+
+    # ── 갱신 조건 ───────────────────────────────────────────────────────
+    # 이만큼 움직여야 필터를 갱신한다. 그 사이 map -> odom 은 고정이다.
+    #
+    # 기본값 0.2 rad = 11.5 도는 회전 중 보정을 너무 오래 미룬다. 이 차의
+    # 회전 속도는 실측 RMS 56 deg/s · 최대 165 deg/s 라 11.5 도는 0.2 초에
+    # 지나간다.
+    #
+    # 2026-08-23: 0.07 rad(4도) 에서 0.02 rad(1.1도) 로 더 조였다. "회전하다
+    # 멈추면 그 방향으로 틀어진 채 유지된다" 는 증상 때문이다. 감속 구간에서
+    # 남은 회전량이 임계값보다 작으면 **마지막 갱신이 고속 회전 중의 것**이 되고,
+    # 그때의 각속도 비례 오차가 map -> odom 에 그대로 얼어붙는다. 임계값을
+    # 낮추면 감속 중에도 갱신이 일어나 마지막 갱신이 저속일 때 찍힌다.
+    #
+    # 2026-08-24: 0.02 rad(1.1도) 에서 0.004 rad(0.23도) 로 한 번 더 조였다.
+    # 이유는 위와 다르다. **이 플랫폼은 정지 중에도 odom 이 가만히 있지 않는다.**
+    # EKF 가 절대 방위 기준을 안 쓰고 있어서 (자세한 내용은 README 의 "EKF yaw
+    # 드리프트" 절) 정지 상태에서도 odom yaw 가 7.9 deg/min 로 랜덤워크한다.
+    #
+    # 1.1 도 문턱은 그 랜덤워크가 잘 못 넘는다. 실측으로 정지 60 초 동안 갱신이
+    # 2 회밖에 안 일어났고, 그 사이 map -> base yaw 가 +2 ~ +4.5 도 틀어진 채
+    # 방치됐다. 문턱을 0.23 도로 낮추면 드리프트 자체가 갱신을 자주 트리거한다.
+    #
+    # 정지 3 분 실측 (강제 갱신 없음):
+    #   update_min_a 0.02  + nomotion 4 회   스캔 10 cm 이내 71.6 %, yaw +2~+4.5 도
+    #   update_min_a 0.004 + 강제 갱신 없음  스캔 10 cm 이내 92~99 %, yaw 오차 1.7 도 이내
+    #
+    # **nomotion_updater 로 강제 갱신하는 것과는 효과가 정반대다.** 자연 갱신은
+    # odom 델타가 0 이 아니므로 모션 모델이 alpha1 * |dtheta| 만큼 노이즈를 주입해
+    # 파티클 다양성이 유지된다 (표준편차 1.1~1.5 cm 로 안정). 강제 갱신은 델타가
+    # 0 이라 노이즈 주입 없이 리샘플링만 반복해 다양성이 소멸한다 — 실측으로
+    # 2 Hz 무제한 강제 갱신은 표준편차가 0.7 cm 까지 줄고 100 초만에 발산했다
+    # (10 cm 이내 98.8 % -> 35.8 %).
+    #
+    # 대가는 CPU 다. 갱신 빈도를 5 배 올린 뒤 실측 amcl CPU 3.2 % 로 여유가 있다.
+    update_min_d: 0.01
+    update_min_a: 0.004
+
+    # ── 파티클 ──────────────────────────────────────────────────────────
+    # 12 x 7 m 방이라 전역 탐색 부담이 작다. nav2 기본(500~2000)에서
+    # 하한만 낮춰 정상 추적 중 CPU 를 아낀다 — KLD 샘플링이 알아서
+    # 불확실할 때만 위로 늘린다.
+    min_particles: 300
+    max_particles: 2000
+    pf_err: 0.05
+    pf_z: 0.99
+    resample_interval: 1
+
+    # ── 복구 (augmented MCL) ────────────────────────────────────────────
+    # **끈 채로 둔다.** 켜면 스캔이 안 맞을 때 무작위 파티클을 뿌려 전역
+    # 재탐색을 한다. 대회장 시나리오에 딱 맞아 보이지만 이 지도에서는 위험하다 —
+    # 12 x 7 m 빈 직사각형은 180도 회전 대칭이라, 뿌린 파티클이 정반대 방향
+    # 자세에 붙어도 스캔상으로는 똑같이 그럴듯하다. 한 번 뒤집히면 스스로
+    # 못 돌아온다.
+    #
+    # 차를 옮겼을 때의 복구는 무작위 재탐색이 아니라 /initialpose 재주입으로
+    # 한다 (scripts/reset_watcher.py 가 스폰 좌표를 안다). 그게 훨씬 확실하다.
+    #
+    # 라바콘 배치가 대칭을 확실히 깨는 지도라면 0.001 / 0.1 로 켜볼 수 있다.
+    recovery_alpha_slow: 0.0
+    recovery_alpha_fast: 0.0
+
+    # ── 기타 ────────────────────────────────────────────────────────────
+    # map -> odom TF 의 유효기간. 이 값만큼 미래까지 유효하다고 붙여 발행하므로
+    # 갱신이 뜸해도 다운스트림의 TF 조회가 실패하지 않는다. AMCL 은 갱신
+    # 조건을 만족할 때만 보정량을 바꾸므로 넉넉해야 한다.
+    transform_tolerance: 1.0
+
+    save_pose_rate: 0.5
+    first_map_only: false
+    # true 로 두면 재기동할 때마다 initial_pose 로 되돌린다. 우리는
+    # /initialpose 를 밖에서 주입하므로 false 여야 그 값이 살아남는다.
+    always_reset_initial_pose: false
+
+    # 시작 위치. launch 의 start_pose 인자가 이 값을 덮어쓴다.
+    # 지도 origin 이 [-3.79, -1.76] 이라 (0,0,0) 은 방 한가운데가 아니다.
+    set_initial_pose: false
+    initial_pose:
+      x: 0.0
+      y: 0.0
+      z: 0.0
+      yaw: 0.0
+
+nomotion_updater:
+  ros__parameters:
+    # 정지를 감지해 /request_nomotion_update 를 호출한다. 자세한 이유는
+    # src/nomotion_updater.cpp 주석 참고.
+    odom_topic: /odom
+    service_name: /request_nomotion_update
+    rate_hz: 2.0
+    # 정지 판정. EKF 출력에는 정지 중에도 노이즈가 남으므로 0 이 아니다.
+    linear_threshold: 0.02      # [m/s]
+    angular_threshold: 0.05     # [rad/s]
+    settle_sec: 0.3             # 이만큼 조용해야 정지로 본다
+    # 한 번 정지할 때 호출할 최대 횟수. 0 이면 무제한 (권장하지 않는다).
+    #
+    # 실측 (2026-08-24, sim, 센서 모델 z_hit 0.9 / z_rand 0.1 / sigma_hit 0.08).
+    # yaw 를 8 도 틀어 심고 (회전 중 스캔 공백에서 생기는 실제 오차 크기)
+    # 강제 갱신을 반복했을 때 스캔-벽 10 cm 이내 비율 / 파티클 xy 표준편차:
+    #     0 회  38.2 %   -          <- 틀어진 상태
+    #     1 회  54.2 %   23.8 cm
+    #     2 회  72.6 %   19.5 cm
+    #     3 회  81.0 %   15.7 cm
+    #     4 회  86.7 %   13.8 cm    <- 여기서 사실상 끝난다
+    #     8 회  87.4 %    6.7 cm
+    #    12 회  97.4 %    4.2 cm    <- 정확하지만 과신
+    #
+    # 4 회 이후로는 정확도가 거의 안 오르는데 파티클 표준편차만 계속 줄어든다.
+    # 4.2 cm 까지 쪼그라들면 나중에 차가 실제로 옮겨졌을 때 못 따라간다.
+    #
+    # 게다가 **이미 맞는 자세에서는 반복 갱신이 오히려 해롭다.** 같은 조건에서
+    # 정답 자세를 심고 돌리면 96.2 -> 74.3 % 로 밀린다 (12 회). 최적점 근처는
+    # 우도 기울기가 평평해서 복원력보다 리샘플링 노이즈가 커 랜덤워크가 된다.
+    # 멀리 있을 때만 기울기가 끌어당긴다.
+    #
+    # 그래서 "틀어졌으면 복구되고, 맞았으면 크게 안 망가지는" 구간이 3~4 회다.
+    # rate_hz 2.0 이므로 정지 후 2 초 안에 보정이 끝난다.
+    max_calls: 4
+    # 예산을 되살릴 조건. 정지 중에도 EKF twist 에는 노이즈가 남아서 속도로
+    # 판정하면 예산이 계속 되살아나 사실상 무제한이 된다. 그래서 실제로
+    # 이만큼 이동/회전했을 때만 되살린다.
+    reset_distance: 0.10        # [m]
+    reset_angle: 0.10           # [rad]
+
+map_server:
+  ros__parameters:
+    # yaml_filename 은 launch 가 map 인자로 넣는다.
+    topic_name: "map"
+    frame_id: "map"
+
+map_amcl_lifecycle_manager:
+  ros__parameters:
+    autostart: true
+    node_names: ["map_server", "amcl"]
+    bond_timeout: 4.0

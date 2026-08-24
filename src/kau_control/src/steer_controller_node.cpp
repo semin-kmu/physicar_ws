@@ -40,7 +40,7 @@ public:
     : rclcpp::Node("steer_controller"),
       tracker_(this)
     {
-        declare_parameter<double>("control_hz", 100.0);
+        declare_parameter<double>("control_hz", 50.0);
         declare_parameter<double>("vehicle.wheelbase_cm", 18.0);
         declare_parameter<double>("vehicle.max_steer_deg", 20.0);
         declare_parameter<double>("controller.k_v", 0.5);
@@ -199,7 +199,7 @@ private:
         steer_pub_->publish(m);
     }
 
-    // 경로가 바뀔 때만 다시 그린다 (100 Hz 로 Path 를 쏘면 낭비다).
+    // 경로가 바뀔 때만 다시 그린다 (50 Hz 로 Path 를 쏘면 낭비다).
     void publishVizPath()
     {
         if (!viz_enabled_ || viz_id_ == tracker_.pathId())

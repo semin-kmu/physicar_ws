@@ -74,7 +74,7 @@ PACKAGE = 'kau_localization'
 def generate_launch_description():
     share = Path(get_package_share_directory(PACKAGE))
     config_dir = str(share / 'config')
-    rviz_config = str(share / 'rviz' / 'cartographer.rviz')
+    rviz_config = str(share / 'rviz' / 'localization.rviz')
 
     use_sim_time = LaunchConfiguration('use_sim_time')
     scan_topic = LaunchConfiguration('scan_topic')

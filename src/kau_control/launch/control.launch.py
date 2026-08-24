@@ -9,7 +9,7 @@
 돈다 — 상호 감시는 state_machine 소관이다.
 
 physicar_bringup 의 sim.launch.py / real.launch.py 와 kau_localization 의
-localization.launch.py 가 떠 있는 상태에서 얹는다.
+cartographer_localization.launch.py (또는 amcl.launch.py) 가 떠 있는 상태에서 얹는다.
 (map -> odom TF 가 없으면 두 노드 모두 계속 0 을 발행한다)
 
     ros2 launch kau_control control.launch.py

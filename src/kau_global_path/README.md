@@ -195,7 +195,7 @@ pbstream 안의 `/trajectory_node_list` 를 그대로 쓰지 않는다. 이유:
 ```text
 ① 트랙을 비우고 slam.launch.py 로 재매핑          (지저분해도 됨. 지도 채우기가 목적)
 ② kau_v3.pbstream 저장 + pgm/yaml 변환
-③ localization.launch.py 로 새 지도 위에 올림      ← 여기서부터 map 프레임 고정
+③ cartographer_localization.launch.py 로 새 지도 위에 올림  ← 여기서부터 map 프레임 고정
 ④ teleop 으로 inner lane 한 바퀴씩 -> inner_1.csv inner_2.csv ...
 ⑤ teleop 으로 outer lane 한 바퀴씩 -> outer_1.csv outer_2.csv ...
 ```
@@ -1108,7 +1108,7 @@ POSE_GRAPH.optimize_every_n_nodes = 20
 ### 1단계 — 궤적 확보  ← **지금 여기. 차가 있어야 진행된다**
 
 - [x] `map -> base_footprint` 를 CSV 로 기록하는 스크립트 (`scripts/record_trajectory.py`)
-- [ ] `localization.launch.py` 로 `kau_v3` 위에 올리고 2D Pose Estimate 로 초기화
+- [ ] `cartographer_localization.launch.py` 로 `kau_v3` 위에 올리고 2D Pose Estimate 로 초기화
 - [ ] teleop 으로 inner lane **한 바퀴씩 여러 번** -> `data/inner_1.csv ...` (3.2)
 - [ ] teleop 으로 outer lane **한 바퀴씩 여러 번** -> `data/outer_1.csv ...` (6.4 의 3번 때문에 필수)
 - [ ] 잘못 돈 바퀴 csv 삭제 -> 다시 돌리면 그 번호를 다시 채운다
