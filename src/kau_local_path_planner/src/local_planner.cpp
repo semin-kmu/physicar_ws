@@ -216,27 +216,26 @@ PlanResult LocalPlanner::plan(
              [&cands](std::size_t a, std::size_t b)
              { return cands[a].cost < cands[b].cost; });
 
-    // 2026-08-24 (committed/prediction horizon, KAU_AMET_Test 알고리즘
-    // 반영): stage-1 과 동일하게, committed horizon(kCommittedHorizonCm)
-    // 안에서는 exact kappa/road 를 그대로 hard 하게 유지하되, 그 이후(먼
-    // 미래)에서만의 위반은 즉시 폐기하지 않는다 -- stage-1(candidate())
-    // 에서 이미 그런 후보에 cost 페널티를 부여해뒀으므로, 여기서는
-    // committed 기준으로만 재검증한다.
+    // 검증 구간(validated horizon) 안에서는 exact kappa/road 를 hard 하게
+    // 유지하되, 그 이후(먼 미래)에서만의 위반은 즉시 폐기하지 않는다 --
+    // stage-1(candidate()) 에서 이미 그런 후보에 cost 페널티를 부여해뒀다.
+    //
+    // stage-1 은 세그먼트 단위 hull 상한(committedSegmentCount) 으로 싸게
+    // 거르는 사전 필터이고, 진짜 게이트는 여기다. stage-1 이 더 느슨해도
+    // (검사 범위가 좁아도) 후보가 여기까지 와서 정확히 걸리므로 안전하다.
+    //
+    // 2026-08-25: 검증 구간을 세그먼트 단위가 아니라 **호길이**로 끊는다.
+    // 세그먼트가 75/112.5/112.5cm 라 예전 방식은 75cm 아니면 187.5cm 둘
+    // 중 하나로만 떨어졌고, 실효 75cm 는 v=1.0 짜리였다. v_max=2.0 에서는
+    // 145cm 가 필요하다 (params_.validated_horizon_cm 주석 참조).
+    // kappaMaxOver 는 de Casteljau 로 정확히 잘라 14차 근을 쓰므로 구간 밖
+    // 곡률이 섞이지 않고, Curve 를 새로 만들 필요도 없다.
     std::optional<std::size_t> chosen;
     for (std::size_t i : alive)
     {
         Candidate & c = cands[i];
-        const std::vector<Ctrl> & segs = c.curve->ctrl();
-        const int n_committed = committedSegmentCount(segs);
-        const bool has_prediction_zone = n_committed < c.curve->nseg();
-        const Curve committed_cv = has_prediction_zone
-            ? Curve(std::vector<Ctrl>(
-                  segs.begin(), segs.begin() + n_committed), false)
-            : *c.curve;
-        const double kmax = c.curve->kappaMax();   // stage 2, 14차 근 (기록용, 전체)
-        const double kmax_committed = has_prediction_zone
-            ? committed_cv.kappaMax() : kmax;
-        if (kmax_committed > kappa_lim_)
+        const double horizon = validatedHorizon(*c.curve);
+        if (c.curve->kappaMaxOver(0.0, horizon) > kappa_lim_)
         {
             c.cost = kInf; c.reason = "kappa_exact";
         }
@@ -244,8 +243,8 @@ PlanResult LocalPlanner::plan(
         {
             c.cost = kInf; c.reason = "degenerate";
         }
-        else if (!roadOkWheels(boundary_, committed_cv, wheels_,
-                              roadMargin(), kRoadSampleIntervalCm))
+        else if (!roadOkWheels(boundary_, *c.curve, wheels_,
+                              roadMargin(), kRoadSampleIntervalCm, horizon))
         {
             c.cost = kInf; c.reason = "road_boundary";
         }
@@ -281,6 +280,7 @@ PlanResult LocalPlanner::plan(
             previous_path_ = cv;
             prev_stamp_sec_ = now_sec;
             result.path = cv;
+            result.valid_length_cm = validatedHorizon(cv);
             result.status = PlanStatus::kDegraded;
             result.chosen_offset = d;
             result.kappa_max = cv.kappaMax();
@@ -310,6 +310,7 @@ PlanResult LocalPlanner::plan(
     previous_path_ = *c.curve;
     prev_stamp_sec_ = now_sec;
     result.path = *c.curve;
+    result.valid_length_cm = validatedHorizon(*c.curve);
     result.status = PlanStatus::kOk;
     result.chosen_offset = c.d;
     result.kappa_max = c.curve->kappaMax();
@@ -334,22 +335,22 @@ void LocalPlanner::fillRoadDiag(PlanResult & result, const Curve & cv) const
     result.road_viol_s = full.first_viol_s_cm;
     result.road_off_len = full.off_integral_cm;
 
-    // committed 구간만 따로 -- "실행 구간은 멀쩡한데 뒤쪽(무검증 구간) 때문에
+    // 검증 구간만 따로 -- "게이트 건 구간은 멀쩡한데 뒤쪽(무검증 구간) 때문에
     // 나쁜 것인가" 를 로그 한 줄로 가르기 위한 값이다.
-    const std::vector<Ctrl> & segs = cv.ctrl();
-    const int n_committed = committedSegmentCount(segs);
-    if (n_committed < cv.nseg())
+    result.road_clear_committed = roadReportWheels(
+        boundary_, cv, wheels_, kRoadSafetyMarginCm, kRoadSampleIntervalCm,
+        validatedHorizon(cv)).min_clear_cm;
+}
+
+double LocalPlanner::validatedHorizon(const Curve & cv) const
+{
+    const double h = params_.validated_horizon_cm;
+    const double len = cv.length();
+    if (!(h > 0.0))
     {
-        const Curve committed_cv(
-            std::vector<Ctrl>(segs.begin(), segs.begin() + n_committed), false);
-        result.road_clear_committed = roadReportWheels(
-            boundary_, committed_cv, wheels_, kRoadSafetyMarginCm,
-            kRoadSampleIntervalCm).min_clear_cm;
+        return len;   // 0 이하로 설정되면 전 구간 검증 (가장 보수적)
     }
-    else
-    {
-        result.road_clear_committed = full.min_clear_cm;
-    }
+    return std::min(h, len);
 }
 
 }  // namespace local_path_planner

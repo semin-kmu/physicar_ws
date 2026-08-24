@@ -270,6 +270,11 @@ private:
         declare_parameter<double>("anchor_blend_lo_cm", 5.0);
         declare_parameter<double>("anchor_blend_hi_cm", 15.0);
         declare_parameter<double>("anchor_max_age_sec", 0.5);
+
+        // 2026-08-25: hard gate 를 거는 호길이. KauPath.valid_length 로도
+        // 나가서 steer_controller 가 Ld 를 이 안으로 제한한다.
+        // types.hpp PlannerParams 주석의 70v+5 식 참조.
+        declare_parameter<double>("validated_horizon_cm", 145.0);
     }
 
     PlannerParams loadPlannerParams()
@@ -296,6 +301,8 @@ private:
         p.anchor_blend_lo_cm = get_parameter("anchor_blend_lo_cm").as_double();
         p.anchor_blend_hi_cm = get_parameter("anchor_blend_hi_cm").as_double();
         p.anchor_max_age_sec = get_parameter("anchor_max_age_sec").as_double();
+        p.validated_horizon_cm =
+            get_parameter("validated_horizon_cm").as_double();
         return p;
     }
 
@@ -456,7 +463,12 @@ private:
         auto msg = curveToKauPath(
             *result.path, src, map_frame_, now(),
             /*confidence=*/result.status == PlanStatus::kOk ? 1.0f : 0.5f,
-            /*valid_length=*/0.0);
+            // 2026-08-25: hard gate 를 실제로 건 호길이. 예전엔 0(= 제한
+            // 없음)을 넣어서, steer_controller 의 Ld 절단 로직이 통째로
+            // 건너뛰어졌다. 그 결과 v>1.0 에서 제어기가 무검증 구간의 점을
+            // 보고 조향했다 (그 구간 곡률이 반경 28~47cm 로 실측됨 -- 차량
+            // 최소회전반경 49.5cm 미만이라 애초에 못 따라간다).
+            result.valid_length_cm);
         local_path_pub_->publish(msg);
 
         if (viz_path_pub_)
@@ -471,13 +483,14 @@ private:
         RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000,
             "plan st=%d d=%+.1f k0=%+.5f kmax=%.5f obs=%+.1f wheels_on=%d "
             "road_full=%+.1f road_cmt=%+.1f viol_s=%.0f off=%.1f "
-            "e=%.1f a=%.2f m=%.1f alive=%d lane=%d %.1fms",
+            "e=%.1f a=%.2f m=%.1f vl=%.0f alive=%d lane=%d %.1fms",
             static_cast<int>(result.status), result.chosen_offset,
             result.kappa0, result.kappa_max, result.clearance,
             result.min_wheels_on,
             result.road_clear_full, result.road_clear_committed,
             result.road_viol_s, result.road_off_len,
             result.anchor_e_cm, result.anchor_alpha, result.anchor_margin_cm,
+            result.valid_length_cm,
             result.alive, result.lane_used ? 1 : 0, result.calc_ms);
 
         if (result.min_wheels_on < 4)

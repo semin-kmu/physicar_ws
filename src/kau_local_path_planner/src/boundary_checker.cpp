@@ -275,9 +275,10 @@ double roadClearanceRect(
 
 RoadReport roadReportWheels(
     const RoadBoundary & boundary, const Curve & cv, const WheelFootprint & wheels,
-    double road_safety_margin_cm, double sample_interval_cm)
+    double road_safety_margin_cm, double sample_interval_cm, double s_max_cm)
 {
     RoadReport rep;
+    bool reached_limit = false;
     rep.min_clear_cm = std::numeric_limits<double>::infinity();
 
     const double y_outer = wheels.outerY();
@@ -334,6 +335,8 @@ RoadReport roadReportWheels(
             }
 
             rep.min_wheels_on = std::min(rep.min_wheels_on, wheels_on);
+            // u 는 호길이 매개변수가 아니라 station 은 근사다 (아래 주석 참조).
+            const double s_here = station + u * seg_len;
             if (wheels_on < 4)
             {
                 // u 는 호길이 매개변수가 아니라 Bezier 매개변수라, u*seg_len 은
@@ -341,11 +344,22 @@ RoadReport roadReportWheels(
                 // 4cm 격자 위의 값이다).
                 if (rep.first_viol_s_cm < 0.0)
                 {
-                    rep.first_viol_s_cm = station + u * seg_len;
+                    rep.first_viol_s_cm = s_here;
                 }
                 rep.off_integral_cm +=
                     static_cast<double>(4 - wheels_on) / 4.0 * step * seg_len;
             }
+
+            // s_max 를 넘긴 첫 샘플까지 본 뒤 멈춘다 (보수적 절단).
+            if (s_here >= s_max_cm)
+            {
+                reached_limit = true;
+                break;
+            }
+        }
+        if (reached_limit)
+        {
+            break;
         }
         station += seg_len;
     }

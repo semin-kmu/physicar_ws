@@ -29,4 +29,9 @@ float32[] seg_kappa_max     # [1/cm] |kappa| 상한. 강체변환 불변
 
 # --- 품질 ---
 float32 confidence          # 0.0 ~ 1.0
-float64 valid_length        # [cm] 실관측 구간. Lane Detection 전용, 그 외 0
+# [cm] 이 경로를 믿어도 되는 앞쪽 길이. 0 이면 "제한 없음".
+# steer_controller 가 lookahead 점을 이 안에만 둔다.
+#   Lane Detection : 카메라가 실제로 본 구간 (그 너머는 외삽)
+#   Local Planner  : hard gate(도로/곡률)를 실제로 건 구간 (2026-08-25 추가)
+#   Global Path    : 0 (전 구간 신뢰)
+float64 valid_length

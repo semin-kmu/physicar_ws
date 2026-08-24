@@ -309,3 +309,100 @@ TEST(LocalPlannerAnchor, Kappa0NeverExceedsKappaLimOverRepeatedTicks)
         EXPECT_EQ(r.status, PlanStatus::kOk) << "tick " << tick;
     }
 }
+
+// ====================================================================
+// 검증 구간 (2026-08-25)
+//
+// hard gate 를 거는 호길이. 예전에는 세그먼트 단위로 잘라 75cm 아니면
+// 187.5cm 둘 중 하나였는데(세그먼트 75/112.5/112.5cm), 실효 75cm 는 정확히
+// v=1.0 짜리다. 제어기는 (경로 위 자차 위치 + Ld) 를 보므로 v_max=2.0 에서는
+// 145cm 가 필요하다 -- 그 값을 정확히 검사하고, KauPath.valid_length 로
+// 발행해 제어기가 Ld 를 그 안으로 자르게 한다.
+// ====================================================================
+
+TEST(LocalPlannerHorizon, ValidLengthIsPublishedAndBounded)
+{
+    LocalPlanner planner(
+        straightGlobalPath(2000.0), wideOpenBoundary(), {}, tunedParams(),
+        kKappaMaxVehicle, /*body_radius_cm=*/11.0);
+
+    const auto r = planner.plan(0.0, 0.0, 0.0, nullptr, 0.0f, 0.0);
+    ASSERT_TRUE(r.path.has_value());
+
+    // 0 이면 제어기가 "제한 없음" 으로 읽어 Ld 절단이 통째로 꺼진다.
+    EXPECT_GT(r.valid_length_cm, 0.0);
+    EXPECT_DOUBLE_EQ(r.valid_length_cm, tunedParams().validated_horizon_cm);
+    EXPECT_LE(r.valid_length_cm, r.path->length());
+
+    // steer_controller 는 usable < ld_min(30cm) 이면 정지한다.
+    EXPECT_GT(r.valid_length_cm, 35.0);
+}
+
+TEST(LocalPlannerHorizon, ValidLengthClampsToShorterPath)
+{
+    // 곡선이 horizon 보다 짧으면 곡선 길이가 상한이다 (그 너머는 없으니까).
+    PlannerParams p = tunedParams();
+    p.validated_horizon_cm = 5000.0;   // 경로보다 훨씬 긴 값
+
+    LocalPlanner planner(
+        straightGlobalPath(2000.0), wideOpenBoundary(), {}, p,
+        kKappaMaxVehicle, /*body_radius_cm=*/11.0);
+
+    const auto r = planner.plan(0.0, 0.0, 0.0, nullptr, 0.0f, 0.0);
+    ASSERT_TRUE(r.path.has_value());
+    EXPECT_DOUBLE_EQ(r.valid_length_cm, r.path->length());
+}
+
+TEST(LocalPlannerHorizon, CurvatureIsGatedOverTheValidatedLengthExactly)
+{
+    // 채택 경로는 검증 구간 안에서 kappa_lim 을 넘지 않아야 한다.
+    // (그 너머는 무검증이라 kappa_max 가 넘을 수 있고, 그게 정상이다.)
+    constexpr double kKappaLim = kKappaMaxVehicle * kKappaMargin;
+
+    LocalPlanner planner(
+        arcGlobalPath(/*radius=*/300.0, /*total_angle=*/2.5, /*nseg=*/10),
+        wideBoxBoundary(), {}, tunedParams(),
+        kKappaMaxVehicle, /*body_radius_cm=*/11.0);
+
+    auto r = planner.plan(0.0, 0.0, 0.0, nullptr, 0.0f, 0.0);
+    ASSERT_TRUE(r.path.has_value());
+
+    for (int tick = 1; tick <= 12; ++tick)
+    {
+        const Curve prev = *r.path;
+        const auto f =
+            kau::local_path_planner::referenceFrame(prev, prev.wrapS(15.0));
+        r = planner.plan(f.point.x, f.point.y, f.heading, nullptr, 0.0f,
+                        0.1 * tick);
+        ASSERT_TRUE(r.path.has_value()) << "tick " << tick;
+
+        const double gated = r.path->kappaMaxOver(0.0, r.valid_length_cm);
+        EXPECT_LE(gated, kKappaLim + 1e-9) << "tick " << tick;
+    }
+}
+
+TEST(LocalPlannerHorizon, LongerHorizonGatesStrictlyMore)
+{
+    // 검증 구간을 늘리면 검사 대상이 넓어지므로, 채택 경로의 "구간 내
+    // 최대 곡률" 은 짧은 구간일 때보다 넓은 범위에서 제약된다.
+    // 세그먼트 단위 절단이었다면 75 -> 145 가 187.5 로 튀어 이 비교가
+    // 성립하지 않는다 (호길이 절단이 실제로 동작하는지 확인).
+    auto run = [](double horizon)
+    {
+        PlannerParams p = tunedParams();
+        p.validated_horizon_cm = horizon;
+        LocalPlanner planner(
+            arcGlobalPath(300.0, 2.5, 10), wideBoxBoundary(), {}, p,
+            kKappaMaxVehicle, /*body_radius_cm=*/11.0);
+        return planner.plan(0.0, 0.0, 0.0, nullptr, 0.0f, 0.0);
+    };
+
+    const auto short_r = run(75.0);
+    const auto long_r = run(145.0);
+    ASSERT_TRUE(short_r.path.has_value());
+    ASSERT_TRUE(long_r.path.has_value());
+
+    // 세그먼트 단위였다면 둘 다 같은 값(75 / 187.5)으로 뭉개진다.
+    EXPECT_DOUBLE_EQ(short_r.valid_length_cm, 75.0);
+    EXPECT_DOUBLE_EQ(long_r.valid_length_cm, 145.0);
+}

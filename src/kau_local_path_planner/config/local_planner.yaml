@@ -136,4 +136,35 @@ local_planner_node:
     anchor_blend_hi_cm: 15.0
     anchor_max_age_sec: 0.5          # 이전 경로가 이보다 낡으면 alpha=1
 
+    # --- 검증 구간 (2026-08-25) ---
+    #
+    # 경로는 l_plan(300cm) 을 그리지만 hard gate(도로/곡률)는 이 길이까지만
+    # 건다. 그 너머는 도착 전에 재계획되므로 비용으로만 다룬다.
+    #
+    # 크기는 **제어기가 보는 점**이 정한다. Pure Pursuit 의 목표점은 경로
+    # 시작이 아니라 (경로 위 자차 위치 + Ld) 에 있고, 자차는 경로를 받은 뒤
+    # 다음 경로가 올 때까지 이미 앞으로 나가 있다:
+    #
+    #   필요 = Ld + (한 주기 이동) + LD_VALID_MARGIN_CM
+    #        = k_v*v + v/plan_hz + 5  =  70v + 5   [cm, v in m/s]
+    #
+    #     v 0.6 ->  47cm     v 1.0 ->  75cm
+    #     v 1.5 -> 110cm     v 2.0 -> 145cm   <- speed_controller v_max
+    #
+    # 예전 방식(kCommittedHorizonCm 52.422)은 세그먼트 단위로 잘라서 실효
+    # 75cm 였다 (세그먼트가 75/112.5/112.5cm 라 75 아니면 187.5 둘 중 하나).
+    # 그건 정확히 v=1.0 짜리다. v_max=2.0 에서는 제어기가 검증 안 된 구간의
+    # 점을 보고 조향했고, 실측 로그에서 그 구간 곡률이 kmax 0.0230~0.0350
+    # (반경 43cm / 28.6cm) 으로 나왔다 -- 차량 최소회전반경 49.5cm 미만이라
+    # 애초에 못 따라가는 곡선이다.
+    #
+    # 이 값은 KauPath.valid_length 로도 발행되어 steer_controller 가 Ld 를
+    # 이 안으로 자른다 (안전망). 단, 제어기는 usable < ld_min(30cm) 이면
+    # 정지하므로 35cm 밑으로 내리지 말 것.
+    #
+    # ★ plan_hz / k_v / v_max 중 하나라도 바꾸면 다시 계산할 것.
+    # ★ 올릴수록 후보 탈락이 늘어 st=1(degraded) 비율이 오른다. 바꾼 뒤
+    #   로그의 st= 분포를 반드시 재측정할 것.
+    validated_horizon_cm: 145.0
+
     track_yaml_path: ""              # launch 가 채움

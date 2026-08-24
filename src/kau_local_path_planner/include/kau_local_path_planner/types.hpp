@@ -92,6 +92,29 @@ struct PlannerParams
     double anchor_blend_lo_cm = 5.0;    // 정상 주행 추종오차보다 커야 루프가 끊긴다
     double anchor_blend_hi_cm = 15.0;   // 이 밖은 이전 경로를 앵커로 쓰지 않는다
     double anchor_max_age_sec = 0.5;    // 이전 경로가 이보다 낡으면 alpha=1
+
+    // --- 검증 구간 (2026-08-25) ---
+    //
+    // 경로는 l_plan(300cm) 을 그리지만 hard gate 를 이 길이까지만 건다. 그
+    // 너머는 도착 전에 재계획되므로 비용으로만 다룬다.
+    //
+    // 크기는 **제어기가 보는 점**이 정한다. Pure Pursuit 의 목표점은 경로
+    // 시작이 아니라 (경로 위 자차 위치 + Ld) 에 있고, 자차는 경로를 받은 뒤
+    // 다음 경로가 올 때까지 이미 앞으로 나가 있다:
+    //
+    //   필요 길이 = Ld + (한 주기 이동) + LD_VALID_MARGIN_CM
+    //             = k_v*v + v/plan_hz + 5
+    //             = 0.5v*100 + v*100/5 + 5  =  70v + 5   [cm, v in m/s]
+    //
+    //   v 1.0 -> 75cm   v 1.5 -> 110cm   v 2.0 -> 145cm
+    //
+    // 예전 값(kCommittedHorizonCm 52.422)은 세그먼트 단위 절단이라 실효
+    // 75cm 였고, 그건 정확히 v=1.0 짜리다. v_max=2.0 으로 달리면 제어기가
+    // 검증 안 된 구간의 점을 보고 조향한다 (실측 로그에서 그 구간 곡률이
+    // 반경 28~47cm 로 나왔다 -- 차량 최소회전반경 49.5cm 보다 작다).
+    //
+    // ★ plan_hz / k_v / v_max 중 하나라도 바꾸면 이 값을 다시 계산할 것.
+    double validated_horizon_cm = 145.0;
 };
 
 // ====================================================================
@@ -224,6 +247,12 @@ struct PlanResult
     double anchor_alpha    = 1.0;   // 0=이전 경로 앵커, 1=실측 자세
     double anchor_margin_cm = 0.0;  // cm, 이번 틱 road/obstacle 마진에 더한 값
     double kappa0          = 0.0;   // 1/cm, 이번 틱 P0 곡률 (clamp 후)
+
+    // hard gate 를 실제로 건 호길이. KauPath.valid_length 로 발행되어
+    // steer_controller 가 Ld 를 이 안으로 제한한다 (그 너머는 무검증이라
+    // lookahead 점을 두면 안 된다). 0 이면 "제한 없음" 으로 해석되므로
+    // 경로가 있을 때는 반드시 양수여야 한다.
+    double valid_length_cm = 0.0;
 };
 
 }  // namespace local_path_planner

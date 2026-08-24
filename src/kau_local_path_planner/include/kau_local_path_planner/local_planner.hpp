@@ -99,6 +99,10 @@ private:
     // 없어서 튜닝 근거가 없었다.
     void fillRoadDiag(PlanResult & result, const Curve & cv) const;
 
+    // hard gate 를 거는 호길이. params_.validated_horizon_cm 을 곡선 길이로
+    // clamp 한 값 (0 이하로 설정되면 전 구간 = 가장 보수적).
+    double validatedHorizon(const Curve & cv) const;
+
     Curve global_path_;
     RoadBoundary boundary_;
     std::vector<Obstacle> obstacles_;

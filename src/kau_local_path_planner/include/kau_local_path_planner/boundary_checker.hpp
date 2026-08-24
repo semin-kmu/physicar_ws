@@ -23,6 +23,7 @@
 #ifndef KAU_LOCAL_PATH_PLANNER__BOUNDARY_CHECKER_HPP_
 #define KAU_LOCAL_PATH_PLANNER__BOUNDARY_CHECKER_HPP_
 
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -166,16 +167,29 @@ struct RoadReport
     double off_integral_cm = 0.0;   // ∫ (4 - wheels_on)/4 ds. 비용/진단용
 };
 
+// s_max_cm: 검사할 호길이 상한. 기본값(무한)이면 곡선 전체.
+//
+// 2026-08-25: 게이트를 "검증 구간"으로 좁히기 위해 추가했다. 예전에는 곡선을
+// 세그먼트 단위로 잘라 새 Curve 를 만들어 넘겼는데, 세그먼트가 75/112.5/112.5cm
+// 라 검증 구간이 75cm 아니면 187.5cm 둘 중 하나로만 떨어졌다 (중간값 불가).
+// 여기서 호길이로 끊으면 임의 길이를 정확히 검사할 수 있고 Curve 생성도 없다.
+//
+// 경계 처리는 보수적이다 -- s_max 를 넘어서는 첫 샘플까지 포함하고 멈춘다.
+// (u 가 호길이 매개변수가 아니라 station 이 근사값이므로, 모자라게 끊는 것보다
+// 넘치게 끊는 쪽이 안전하다.)
 RoadReport roadReportWheels(
     const RoadBoundary & boundary, const Curve & cv, const WheelFootprint & wheels,
-    double road_safety_margin_cm, double sample_interval_cm);
+    double road_safety_margin_cm, double sample_interval_cm,
+    double s_max_cm = std::numeric_limits<double>::infinity());
 
 inline bool roadOkWheels(
     const RoadBoundary & boundary, const Curve & cv, const WheelFootprint & wheels,
-    double road_safety_margin_cm, double sample_interval_cm)
+    double road_safety_margin_cm, double sample_interval_cm,
+    double s_max_cm = std::numeric_limits<double>::infinity())
 {
     return roadReportWheels(boundary, cv, wheels, road_safety_margin_cm,
-                            sample_interval_cm).min_wheels_on >= wheels.min_wheels_on;
+                            sample_interval_cm, s_max_cm).min_wheels_on
+           >= wheels.min_wheels_on;
 }
 
 }  // namespace local_path_planner
