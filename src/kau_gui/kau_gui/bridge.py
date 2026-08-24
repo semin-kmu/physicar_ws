@@ -18,7 +18,7 @@ from __future__ import annotations
 import math
 import threading
 from collections import deque
-from pathlib import Path
+import pathlib
 
 import numpy as np
 import rclpy
@@ -193,7 +193,7 @@ class Bridge(Node):
             self.get_logger().warn(
                 f"[kau_gui] 패키지를 못 찾음: {self.map_pkg}. 맵 배경 없이 뜬다")
             return ""
-        path = Path(share) / "maps" / f"{self.map_name}.yaml"
+        path = pathlib.Path(share) / "maps" / f"{self.map_name}.yaml"
         if not path.is_file():
             self.get_logger().warn(
                 f"[kau_gui] 맵 yaml 없음: {path}. 맵 배경 없이 뜬다")
