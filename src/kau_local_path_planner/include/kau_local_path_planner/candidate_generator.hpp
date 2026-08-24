@@ -67,6 +67,26 @@ inline constexpr double kRoadSafetyMarginCm = 2.0;
 inline constexpr double kRoadSampleIntervalCm = 4.0;
 inline constexpr double kEndRatio = 0.80;
 
+// 2026-08-24 (committed/prediction horizon, KAU_AMET_Test 알고리즘 반영):
+// 1-lap dynamic+EMA 실측(`diagnose_receding_horizon.py`) 결과, 실제
+// replanning 주기당 ego 이동거리는 mean=14.2cm, p95=21.5cm, max=26.211cm
+// 였다(plan_hz=5Hz). 이 max 값의 2배(재계획이 한 사이클 지연/스킵돼도
+// 커버)를 "반드시 안전해야 하는" committed horizon 으로 삼는다 -- 임의
+// 상수가 아니라 실측값 기반. 같은 진단에서 degraded 148개 중 84개
+// (56.8%)가 "실행 구간(committed horizon)은 완전 valid, 400cm 끝의 먼
+// 미래 구간 때문에만 전체 invalid"였다. committed horizon 안의 road/
+// curvature 위반은 그대로 hard reject 하되, 그 이후(먼 미래, prediction
+// 구간)에서만의 위반은 즉시 폐기하지 않고 cost 페널티만 부여한다.
+// obstacle clearance 는 이 구분과 무관하게 항상 엄격하게 유지한다.
+inline constexpr double kCommittedHorizonCm = 52.422;
+inline constexpr double kPredictionViolationPenalty = 200.0;
+
+// Python: _committed_segment_count(segs). `kCommittedHorizonCm` 이내를
+// 포함하는 앞쪽 segment 개수(segment 단위 근사 -- station 이 horizon 을
+// 살짝 넘는 segment 하나까지 통째로 포함시켜, 정밀 절단 없이도 committed
+// 판정 범위가 항상 실제보다 넓거나 같도록 보수적으로 정의한다). 최소 1.
+int committedSegmentCount(const std::vector<Ctrl> & segs);
+
 // knot 1 개 (위치, heading, 곡률). Python: curve.Knot.
 struct Knot
 {

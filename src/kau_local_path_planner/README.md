@@ -81,6 +81,26 @@ src/local_planner_node.cpp   ROS2 wiring (구독/발행/TF/파라미터) 만 담
   penalty 가 작아지는 부작용). `leastViolation()` 을 obstacle_violation
   최소 후보군으로 먼저 좁힌 뒤 그 안에서 road+kappa 위반 최소를 고르는
   현재 Python 로직으로 맞췄다 — 장애물 충돌은 항상 최우선으로 회피.
+- **Committed/Prediction Horizon** (`_committed_segment_count`/`plan()`
+  stage-2 → `committedSegmentCount()`/`CandidateGenerator::candidate()`
+  + `LocalPlanner::plan()` 최종 선택 루프): 400cm(`l_plan`) 전체 경로에
+  road/curvature hard constraint 를 적용하면, 실제로는 다음 재계획
+  전까지 쓰지도 않을 먼 미래 구간의 위반 때문에 정상 실행 가능한
+  candidate 까지 대량 false-rejection 되는 문제가 있었다
+  (KAU_AMET_Test 1-lap 실측: degraded 148개 중 84개=56.8%가 "실행 구간은
+  완전 valid, 먼 미래 구간만 invalid"). `kCommittedHorizonCm=52.422cm`
+  (=2×실측 최대 재계획 주기당 이동거리, 5Hz) 이내는 그대로 hard
+  reject 하고, 그 이후(prediction 구간)에서만의 kappa/road 위반은
+  `kPredictionViolationPenalty=200.0` cost 페널티만 부여해 후보 pool 에
+  남긴다(다른 완전-valid 후보가 있으면 그쪽이 낮은 cost 로 우선
+  선택됨). **obstacle clearance 는 이 구분과 무관하게 항상 엄격
+  유지**(안전 최우선, 완화하지 않음). `LocalPlanner::plan()` 최종
+  선택 루프(stage-2, 14차 근 exact 검사)도 동일하게 committed 기준으로
+  재검증한다. 1-lap dynamic+EMA 실측(baseline→적용 후): ok/degraded
+  62/148→102/107, kappa_bound 실패 1015→621(-39%), 실제 vehicle
+  boundary violation 503→403 rows(-20%), collision 없음 유지,
+  min_clearance +7.989→+7.138cm, steer-rate 오히려 개선(mean/p95/max
+  18.51/57.57/222.38→17.01/52.36/222.38 deg/s).
 - **토픽 예외처리**: KAU_AMET_Test 의 "Lane/Global/Object 두절" 3가지
   대응(`plan()` docstring)이 이미 이 포트에 구조적으로 반영돼 있음을
   이번에 확인했다 (추가 수정 불필요) — Lane 은 `lane_curve_` 가

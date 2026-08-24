@@ -47,6 +47,20 @@ std::pair<std::optional<Ctrl>, double> fitSegment(
     return {best, best_kb};
 }
 
+int committedSegmentCount(const std::vector<Ctrl> & segs)
+{
+    double station = 0.0;
+    for (std::size_t i = 0; i < segs.size(); ++i)
+    {
+        station += kau::bezier::segLength(segs[i]);
+        if (station >= kCommittedHorizonCm)
+        {
+            return static_cast<int>(i) + 1;
+        }
+    }
+    return static_cast<int>(segs.size());
+}
+
 ObstacleStation makeStation(const Curve & global_path, const Obstacle & obstacle)
 {
     const kau::control::TrackState st = global_path.nearestGlobal(obstacle.center);
@@ -128,6 +142,7 @@ Candidate CandidateGenerator::candidate(
     }
 
     std::vector<Ctrl> segs;
+    std::vector<double> bounds;
     double bound = 0.0;
     for (std::size_t i = 0; i + 1 < knots.size(); ++i)
     {
@@ -138,23 +153,54 @@ Candidate CandidateGenerator::candidate(
             return c;
         }
         segs.push_back(std::move(*seg_opt));
+        bounds.push_back(kb);
         bound = std::max(bound, kb);
     }
 
     Curve cv(segs, false);
+    // 2026-08-24 (committed/prediction horizon): stage-1(convex-hull 상한)
+    // 도 committed horizon 안에서만 hard 하게 유지한다. 그 이후(먼 미래)
+    // 에서만의 위반은 즉시 폐기 대신 cost 페널티로 남긴다.
+    bool prediction_violation = false;
     if (bound > kappa_lim_)
     {
-        Candidate c; c.d = offsets.back(); c.curve = cv; c.reason = "kappa_bound";
-        c.cost = kInf;
-        return c;
+        const int n_committed = committedSegmentCount(segs);
+        double committed_bound = 0.0;
+        for (int k = 0; k < n_committed; ++k)
+        {
+            committed_bound = std::max(
+                committed_bound, bounds[static_cast<std::size_t>(k)]);
+        }
+        if (committed_bound > kappa_lim_)
+        {
+            Candidate c; c.d = offsets.back(); c.curve = cv; c.reason = "kappa_bound";
+            c.cost = kInf;
+            return c;
+        }
+        prediction_violation = true;   // committed 는 OK, 나머지(먼 미래)만 위반
     }
     if (!roadOk(boundary_, cv, body_radius_cm_ + kRoadSafetyMarginCm,
                kRoadSampleIntervalCm))
     {
-        Candidate c; c.d = offsets.back(); c.curve = cv; c.reason = "road_boundary";
-        c.cost = kInf;
-        return c;
+        const int n_committed = committedSegmentCount(segs);
+        bool committed_road_ok = false;
+        if (n_committed < static_cast<int>(segs.size()))
+        {
+            Curve committed_cv(
+                std::vector<Ctrl>(segs.begin(), segs.begin() + n_committed), false);
+            committed_road_ok = roadOk(
+                boundary_, committed_cv, body_radius_cm_ + kRoadSafetyMarginCm,
+                kRoadSampleIntervalCm);
+        }
+        if (!committed_road_ok)
+        {
+            Candidate c; c.d = offsets.back(); c.curve = cv; c.reason = "road_boundary";
+            c.cost = kInf;
+            return c;
+        }
+        prediction_violation = true;
     }
+    // obstacle: committed/prediction 구분 없이 항상 엄격 (변경 없음)
     const double clear = clearance(cv, obstacles_, body_radius_cm_, params_.clear_target);
     if (clear < params_.obs_margin)
     {
@@ -168,9 +214,13 @@ Candidate CandidateGenerator::candidate(
         global_path_, stations_, d_final, kEndRatio, s0, params_.l_plan,
         params_.preview, body_radius_cm_);
     const double combined_clear = std::min(clear, preview);
-    const double c_cost = cost(
+    double c_cost = cost(
         params_, kappa_max_vehicle_, global_path_, kappa_lim_, s0, d_final,
         peak, bound, combined_clear, cv, previous_path);
+    if (prediction_violation)
+    {
+        c_cost += kPredictionViolationPenalty;
+    }
 
     Candidate c; c.d = d_final; c.curve = cv; c.cost = c_cost; c.reason = "";
     return c;

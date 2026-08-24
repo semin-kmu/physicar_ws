@@ -137,12 +137,27 @@ PlanResult LocalPlanner::plan(
              [&cands](std::size_t a, std::size_t b)
              { return cands[a].cost < cands[b].cost; });
 
+    // 2026-08-24 (committed/prediction horizon, KAU_AMET_Test 알고리즘
+    // 반영): stage-1 과 동일하게, committed horizon(kCommittedHorizonCm)
+    // 안에서는 exact kappa/road 를 그대로 hard 하게 유지하되, 그 이후(먼
+    // 미래)에서만의 위반은 즉시 폐기하지 않는다 -- stage-1(candidate())
+    // 에서 이미 그런 후보에 cost 페널티를 부여해뒀으므로, 여기서는
+    // committed 기준으로만 재검증한다.
     std::optional<std::size_t> chosen;
     for (std::size_t i : alive)
     {
         Candidate & c = cands[i];
-        const double kmax = c.curve->kappaMax();   // stage 2, 14차 근
-        if (kmax > kappa_lim_)
+        const std::vector<Ctrl> & segs = c.curve->ctrl();
+        const int n_committed = committedSegmentCount(segs);
+        const bool has_prediction_zone = n_committed < c.curve->nseg();
+        const Curve committed_cv = has_prediction_zone
+            ? Curve(std::vector<Ctrl>(
+                  segs.begin(), segs.begin() + n_committed), false)
+            : *c.curve;
+        const double kmax = c.curve->kappaMax();   // stage 2, 14차 근 (기록용, 전체)
+        const double kmax_committed = has_prediction_zone
+            ? committed_cv.kappaMax() : kmax;
+        if (kmax_committed > kappa_lim_)
         {
             c.cost = kInf; c.reason = "kappa_exact";
         }
@@ -150,7 +165,7 @@ PlanResult LocalPlanner::plan(
         {
             c.cost = kInf; c.reason = "degenerate";
         }
-        else if (!roadOk(boundary_, *c.curve, body_radius_cm_ + kRoadSafetyMarginCm,
+        else if (!roadOk(boundary_, committed_cv, body_radius_cm_ + kRoadSafetyMarginCm,
                          kRoadSampleIntervalCm))
         {
             c.cost = kInf; c.reason = "road_boundary";
