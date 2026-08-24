@@ -848,10 +848,17 @@ def main(argv=None):
     ap.add_argument('-v', '--verbose', action='store_true')
 
     ap.add_argument('--bias', type=float, default=0.10, help='m. 오른쪽 목표 offset')
-    # 반차로 = 17.68 cm. amet2026_track.json 의 lane_inner / lane_outer 가
-    # corridor_half_width_m 0.1765 / 0.1772 로 CAD 실측을 준다. 이만큼 왼쪽으로
-    # 밀면 주행면 중심선(= 노란 중앙 점선)이 아니라 안쪽 차로 한가운데를 탄다.
-    ap.add_argument('--left-bias', type=float, default=0.1768,
+    # 8.84 cm = 반차로(17.68 cm)의 절반 = 차로폭의 1/4.
+    #
+    # 반차로 17.68 cm 는 CAD 값이다 -- amet2026_track.json 의 lane_inner /
+    # lane_outer 가 corridor_half_width_m 0.1765 / 0.1772 를 준다. 그만큼 밀면
+    # 주행면 중심선(= 노란 중앙 점선)이 아니라 안쪽 차로 한가운데를 탄다.
+    #
+    # **그런데 실주행에서 17.68 cm 는 과했다** (2026-08-24, sim). 왼쪽으로 너무
+    # 붙어서 절반으로 줄였다. 원래 보정하려던 것이 차로 하나를 통째로 옮기는 게
+    # 아니라 추종/측위의 횡편향이었기 때문으로 보인다. 차로 중심을 정말 타야
+    # 하는 상황이면 --left-bias 0.1768 로 되돌린다.
+    ap.add_argument('--left-bias', type=float, default=0.0884,
                     help='m. 왼쪽 목표 offset (left_bias 변형에만 쓴다)')
     ap.add_argument('--max-offset', type=float, default=0.22, help='m. 횡오프셋 절대 상한')
     ap.add_argument('--cone-radius', type=float, default=0.09,
