@@ -3,6 +3,12 @@
 //
 // 좌측 패널의 시계열 한 줄. 최대 두 계열을 겹쳐 그린다.
 //
+// 배치 규약은 sim_common/viz.py 의 stack_plots 를 따른다.
+//     - y 축 이름은 왼쪽에 눕혀 쓴다 ("speed [m/s]")
+//     - 0 선은 옅은 회색 실선
+//     - x 축 눈금 값은 **맨 아래 플롯에만** 표시하고 나머지는 격자만
+//       (전 플롯이 같은 시간창을 쓰므로 축을 반복할 이유가 없다)
+//
 // 데시메이션 규약: 픽셀 열마다 그 열에 걸치는 표본의 min/max 를 세로선
 // 으로 긋는다. 단순 솎아내기를 하면 조향 떨림 · cte 스파이크처럼 한두
 // 표본짜리 사건이 통째로 사라지는데, 그건 디버깅에서 가장 보고 싶은
@@ -31,8 +37,8 @@ class PlotStrip : public QWidget
     Q_OBJECT
 
 public:
-    PlotStrip(
-        const QString & title, const QString & unit, QWidget * parent = nullptr);
+    // y_label 은 viz.py PANELS 의 ylabel 과 같은 형식: "speed [m/s]"
+    explicit PlotStrip(const QString & y_label, QWidget * parent = nullptr);
 
     // 계열 이름. 하나만 쓰면 b_name 을 비운다.
     void setSeriesNames(const QString & a_name, const QString & b_name);
@@ -43,6 +49,9 @@ public:
 
     // 0 을 항상 축 안에 포함시킨다 (오차 플롯용).
     void setIncludeZero(bool on);
+
+    // 맨 아래 플롯만 참으로 둔다.
+    void setShowXAxis(bool on);
 
     // window_s 는 x 축 길이. now 는 오른쪽 끝 시각.
     void setData(
@@ -61,8 +70,9 @@ private:
         QPainter & p, const Series * s, const QColor & c, const QRectF & plot,
         double lo, double hi) const;
 
-    QString title_;
-    QString unit_;
+    void drawReadout(QPainter & p, const QRectF & plot) const;
+
+    QString y_label_;
     QString a_name_;
     QString b_name_;
     QString notice_;
@@ -75,6 +85,7 @@ private:
     double min_span_ = 1.0;
 
     bool include_zero_ = true;
+    bool show_x_axis_  = false;
 };
 
 }  // namespace kau_gui

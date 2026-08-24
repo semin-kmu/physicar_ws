@@ -31,6 +31,7 @@ add_executable(kau_gui_node
   src/main.cpp
   src/ros_bridge.cpp
   src/map_view.cpp
+  src/plot_axis.cpp
   src/plot_strip.cpp
   src/status_bar.cpp
   src/main_window.cpp

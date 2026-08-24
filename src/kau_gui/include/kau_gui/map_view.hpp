@@ -7,9 +7,13 @@
 // 탑뷰 2D 뿐이라 3D 파이프라인이 통째로 불필요하기 때문이고, 이것이
 // 이 GUI 가 rviz2 보다 가벼운 유일한 이유다.
 //
-// 좌표: 월드(map 프레임, m) -> 위젯 픽셀.
-//     sx = w/2 + (wx - cx) * scale
-//     sy = h/2 - (wy - cy) * scale      y 를 뒤집는다 (월드는 y 위쪽)
+// 배치 · 배색 규약은 sim_common/viz.py 의 map_plot 을 따른다.
+//     등축 고정 · 격자 alpha 0.25 · x/y 축 이름 · 범례 우상단
+//
+// 좌표: 월드(map 프레임, m) -> plot 사각형 안의 픽셀.
+//     sx = plot.cx + (wx - cx) * scale
+//     sy = plot.cy - (wy - cy) * scale      y 를 뒤집는다 (월드는 y 위쪽)
+// 축 눈금 자리를 비워야 하므로 위젯 전체가 아니라 plot 사각형 기준이다.
 //
 // 조작: 휠 = 줌 / 드래그 = 팬 / f = 차량 추종 / r = 뷰 리셋
 // ====================================================================
@@ -19,6 +23,8 @@
 
 #include <QColor>
 #include <QPointF>
+#include <QRectF>
+#include <QString>
 #include <QWidget>
 
 #include "kau_gui/types.hpp"
@@ -38,6 +44,10 @@ public:
     explicit MapView(QWidget * parent = nullptr);
 
     void setVehicleSize(double length_m, double width_m);
+
+    // 축 표시 단위. "cm" 이면 m 값을 100 배해 보여준다 (팀 규약이 cm 고
+    // 시뮬도 cm 라 나란히 놓고 보기 쉽다). 내부 계산은 항상 m.
+    void setDisplayUnit(const QString & unit);
 
     // 렌더 타이머가 프레임마다 호출한다. 복사는 MainWindow 가 이미 했다.
     void setSnapshot(const Snapshot * s);
@@ -61,9 +71,11 @@ protected:
     void mouseReleaseEvent(QMouseEvent * e) override;
 
 private:
+    QRectF plotRect() const;
+
     QPointF toScreen(double wx, double wy) const;
 
-    void drawMap(QPainter & p);
+    void drawMap(QPainter & p, const QRectF & plot);
     void drawScan(QPainter & p);
     void drawPath(
         QPainter & p, const Latest<Polyline> & path, const QColor & c,
@@ -71,8 +83,9 @@ private:
     void drawObstacles(QPainter & p);
     void drawVehicle(QPainter & p);
     void drawLookahead(QPainter & p);
-    void drawLegend(QPainter & p);
-    void drawScaleBar(QPainter & p);
+    void drawAxes(QPainter & p, const QRectF & plot);
+    void drawLegend(QPainter & p, const QRectF & plot);
+    void drawHud(QPainter & p, const QRectF & plot);
 
     bool stale(const double stamp, double timeout) const;
 
@@ -94,6 +107,11 @@ private:
     double veh_len_ = 0.30;
 
     double veh_wid_ = 0.20;
+
+    // 축 표시 배율. cm 면 100, m 면 1.
+    double unit_mult_ = 100.0;
+
+    QString unit_name_ = "cm";
 };
 
 }  // namespace kau_gui

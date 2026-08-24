@@ -240,6 +240,18 @@ struct Obstacle
 };
 
 
+// TF 링크 하나의 상태. map->odom 은 AMCL, odom->base_link 는 EKF 소관이라
+// 나눠서 봐야 어느 쪽이 끊겼는지 짚을 수 있다 (kau_localization README).
+struct TfLink
+{
+    bool   ok  = false;     // 조회 성공 + 신선
+
+    bool   got = false;     // 한 번이라도 조회된 적이 있는가
+
+    double age = 0.0;       // s, 마지막 TF stamp 의 나이
+};
+
+
 struct Pose2D
 {
     double x   = 0.0;
@@ -306,6 +318,10 @@ struct Snapshot
     Latest<QPointF> lookahead;
 
     Pose2D pose;
+
+    // HUD 용 TF 링크. 소유자가 다르므로 따로 본다.
+    TfLink tf_map_odom;      // AMCL / cartographer
+    TfLink tf_odom_base;     // EKF
 
     // --- 플롯 패널 ---
     Series speed_target;        // m/s

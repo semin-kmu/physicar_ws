@@ -15,6 +15,9 @@
     # --- 프레임 ---
     frames:
       map: "map"
+      # map->odom 은 AMCL, odom->base 는 EKF 소관이라 HUD 에서 나눠 본다.
+      # 어느 링크가 끊겼는지가 곧 어느 노드 문제인지다.
+      odom: "odom"
       base: "base_link"
       # TF 가 이보다 오래되면 차량 자세를 STALE 로 본다
       tf_timeout_s: 0.5
@@ -28,6 +31,9 @@
       topic: "/map"
       yaml_path: ""                 # 비우면 auto/file 에서 맵 배경 없이 동작
       wait_s: 5.0
+      # 축 눈금 표시 단위. cm | m. 내부 계산은 항상 m 이고 표시만 바뀐다.
+      # 팀 규약이 cm 이고 시뮬(sim_common/viz.py)도 cm 라 나란히 보기 쉽다.
+      display_unit: "cm"
 
     # --- 구독 토픽 ---
     topics:

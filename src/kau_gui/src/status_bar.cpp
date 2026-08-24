@@ -209,7 +209,7 @@ void StatusBar::paintEvent(QPaintEvent *)
         // 바깥 옅은 링 + 안쪽 원. 작은 점만으로는 색 구분이 잘 안 된다.
         QColor halo = lamp;
 
-        halo.setAlpha(60);
+        halo.setAlpha(45);
 
         p.setBrush(halo);
 

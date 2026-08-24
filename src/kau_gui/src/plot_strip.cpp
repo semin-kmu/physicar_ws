@@ -5,9 +5,11 @@
 #include <limits>
 #include <vector>
 
+#include <QFont>
 #include <QPainter>
 #include <QPolygonF>
 
+#include "kau_gui/plot_axis.hpp"
 #include "kau_gui/theme.hpp"
 
 
@@ -17,10 +19,9 @@ namespace kau_gui
 namespace
 {
 
-constexpr int LEFT_PAD   = 46;   // y 축 눈금 글자 자리
-constexpr int RIGHT_PAD  = 8;
-constexpr int TOP_PAD    = 20;   // 제목 줄
-constexpr int BOTTOM_PAD = 6;
+constexpr int TOP_PAD    = 16;   // 현재값 읽기 줄
+constexpr int RIGHT_PAD  = 10;
+constexpr int BASE_PAD   = 6;    // x 축이 없는 플롯의 아래 여백
 
 // 마지막 표본이 이보다 오래됐으면 "값 없음" 으로 본다.
 constexpr double VALUE_STALE_S = 1.0;
@@ -34,13 +35,11 @@ QString fmtValue(double v, int digits)
 }  // namespace
 
 
-PlotStrip::PlotStrip(
-    const QString & title, const QString & unit, QWidget * parent)
+PlotStrip::PlotStrip(const QString & y_label, QWidget * parent)
 : QWidget(parent),
-  title_(title),
-  unit_(unit)
+  y_label_(y_label)
 {
-    setMinimumHeight(78);
+    setMinimumHeight(84);
 
     setAutoFillBackground(false);
 }
@@ -63,6 +62,17 @@ void PlotStrip::setMinSpan(double span)
 void PlotStrip::setIncludeZero(bool on)
 {
     include_zero_ = on;
+}
+
+
+void PlotStrip::setShowXAxis(bool on)
+{
+    show_x_axis_ = on;
+
+    // x 축이 붙는 플롯은 눈금 · 축 이름 자리만큼 더 높아야 그림 영역이
+    // 다른 플롯과 같아진다.
+    setMinimumHeight(
+        on ? 84 + axis::X_TICK_H + axis::X_LABEL_H : 84);
 }
 
 
@@ -101,16 +111,16 @@ void PlotStrip::computeRange(double * lo, double * hi) const
             continue;
         }
 
-        for (const Sample & p : s->data())
+        for (const Sample & smp : s->data())
         {
-            if (p.t < t0)
+            if (smp.t < t0)
             {
                 continue;
             }
 
-            mn = std::min(mn, p.v);
+            mn = std::min(mn, smp.v);
 
-            mx = std::max(mx, p.v);
+            mx = std::max(mx, smp.v);
         }
     }
 
@@ -128,7 +138,6 @@ void PlotStrip::computeRange(double * lo, double * hi) const
         mx = std::max(mx, 0.0);
     }
 
-    // 최소 폭 보장 + 위아래 여유
     const double span = std::max(mx - mn, min_span_);
 
     const double mid = 0.5 * (mn + mx);
@@ -189,7 +198,7 @@ void PlotStrip::drawSeries(
         col_max[i] = std::max(col_max[i], smp.v);
     }
 
-    p.setPen(QPen(c, 1.4, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+    p.setPen(QPen(c, 1.6, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
 
     // 연속 구간마다 폴리라인을 끊는다. 값이 없는 열(발행 중단)에서
     // 선을 이어 버리면 끊긴 사실이 화면에서 사라진다.
@@ -241,90 +250,17 @@ void PlotStrip::drawSeries(
 }
 
 
-void PlotStrip::paintEvent(QPaintEvent *)
+// 플롯 위쪽 줄에 계열 이름 + 현재값. 그래프를 읽지 않아도 숫자가 보여야
+// 한다. 글자 색을 선 색과 맞춰 어느 숫자가 어느 선인지 즉시 읽히게 한다.
+void PlotStrip::drawReadout(QPainter & p, const QRectF & plot) const
 {
-    QPainter p(this);
-
-    p.setRenderHint(QPainter::Antialiasing, true);
-
-    p.fillRect(rect(), theme::PANEL_BG);
-
-    // width()/height() 는 int 다. 1.0 과 그대로 섞으면 std::max 추론이 깨진다.
-    const QRectF plot(
-        LEFT_PAD, TOP_PAD,
-        std::max(1.0, static_cast<double>(width() - LEFT_PAD - RIGHT_PAD)),
-        std::max(1.0, static_cast<double>(height() - TOP_PAD - BOTTOM_PAD)));
-
-    double lo = 0.0;
-
-    double hi = 1.0;
-
-    computeRange(&lo, &hi);
-
-    // --- 테두리 ---
-    p.setPen(QPen(theme::BORDER, 1.0));
-
-    p.setBrush(Qt::NoBrush);
-
-    p.drawRect(plot);
-
-    // --- 0 선 ---
-    if (lo < 0.0 && hi > 0.0)
-    {
-        const double y =
-            plot.bottom() - (0.0 - lo) / (hi - lo) * plot.height();
-
-        p.setPen(QPen(theme::ZERO_LINE, 1.0, Qt::DashLine));
-
-        p.drawLine(QPointF(plot.left(), y), QPointF(plot.right(), y));
-    }
-
-    // --- y 눈금 (상/하한만) ---
     QFont f = p.font();
 
-    f.setPointSizeF(8.0);
+    f.setPointSizeF(8.5);
 
     p.setFont(f);
 
-    p.setPen(theme::TEXT_DIM);
-
-    const int digits = (std::max(std::abs(lo), std::abs(hi)) < 10.0) ? 2 : 1;
-
-    p.drawText(
-        QRectF(0, plot.top() - 6, LEFT_PAD - 6, 12),
-        Qt::AlignRight | Qt::AlignVCenter, fmtValue(hi, digits));
-
-    p.drawText(
-        QRectF(0, plot.bottom() - 6, LEFT_PAD - 6, 12),
-        Qt::AlignRight | Qt::AlignVCenter, fmtValue(lo, digits));
-
-    // --- 계열 ---
-    drawSeries(p, a_, theme::SERIES_A, plot, lo, hi);
-
-    drawSeries(p, b_, theme::SERIES_B, plot, lo, hi);
-
-    // --- 제목 + 현재값 ---
-    f.setPointSizeF(9.0);
-
-    f.setBold(true);
-
-    p.setFont(f);
-
-    p.setPen(theme::TEXT);
-
-    p.drawText(
-        QRectF(LEFT_PAD, 1, plot.width() * 0.5, TOP_PAD - 2),
-        Qt::AlignVCenter | Qt::AlignLeft,
-        unit_.isEmpty() ? title_ : (title_ + "  [" + unit_ + "]"));
-
-    f.setBold(false);
-
-    p.setFont(f);
-
-    // 오른쪽 위에 현재값. 그래프를 읽지 않아도 숫자는 바로 보여야 한다.
-    QString right;
-
-    const auto valueText = [this](const Series * s, const QString & name)
+    const auto text = [this](const Series * s, const QString & name)
         {
             if (s == nullptr || !s->got())
             {
@@ -338,55 +274,109 @@ void PlotStrip::paintEvent(QPaintEvent *)
             return name.isEmpty() ? v : (name + " " + v);
         };
 
-    const QString ta = valueText(a_, a_name_);
+    const QString ta = text(a_, a_name_);
 
-    const QString tb = valueText(b_, b_name_);
+    const QString tb = text(b_, b_name_);
 
-    if (!ta.isEmpty() && !tb.isEmpty())
+    const QRectF band(plot.left(), 0, plot.width(), TOP_PAD - 1.0);
+
+    if (!tb.isEmpty())
     {
-        right = ta + "   " + tb;
-    }
-    else
-    {
-        right = ta + tb;
-    }
-
-    // 계열 색과 글자 색을 맞추면 어느 숫자가 어느 선인지 즉시 읽힌다.
-    if (!ta.isEmpty() && !tb.isEmpty())
-    {
-        const QRectF box(
-            LEFT_PAD + plot.width() * 0.35, 1,
-            plot.width() * 0.65, TOP_PAD - 2);
-
-        const int mid = static_cast<int>(box.width() * 0.5);
+        const double half = band.width() * 0.5;
 
         p.setPen(theme::SERIES_A);
 
         p.drawText(
-            QRectF(box.left(), box.top(), mid, box.height()),
-            Qt::AlignVCenter | Qt::AlignRight, ta + "  ");
+            QRectF(band.left(), band.top(), half, band.height()),
+            Qt::AlignVCenter | Qt::AlignRight, ta + "   ");
 
         p.setPen(theme::SERIES_B);
 
         p.drawText(
-            QRectF(box.left() + mid, box.top(), mid, box.height()),
+            QRectF(band.left() + half, band.top(), half, band.height()),
             Qt::AlignVCenter | Qt::AlignRight, tb);
     }
     else
     {
         p.setPen(theme::SERIES_SINGLE);
 
-        p.drawText(
-            QRectF(
-                LEFT_PAD + plot.width() * 0.4, 1,
-                plot.width() * 0.6, TOP_PAD - 2),
-            Qt::AlignVCenter | Qt::AlignRight, right);
+        p.drawText(band, Qt::AlignVCenter | Qt::AlignRight, ta);
     }
+}
+
+
+void PlotStrip::paintEvent(QPaintEvent *)
+{
+    QPainter p(this);
+
+    p.setRenderHint(QPainter::Antialiasing, true);
+
+    p.fillRect(rect(), theme::PANEL_BG);
+
+    const double bottom_pad = show_x_axis_
+        ? (axis::TICK_LEN + axis::X_TICK_H + axis::X_LABEL_H)
+        : BASE_PAD;
+
+    // width()/height() 는 int 다. 1.0 과 그대로 섞으면 std::max 추론이 깨진다.
+    const QRectF plot(
+        axis::LEFT_MARGIN, TOP_PAD,
+        std::max(1.0, static_cast<double>(width() - axis::LEFT_MARGIN - RIGHT_PAD)),
+        std::max(1.0, height() - TOP_PAD - bottom_pad));
+
+    double lo = 0.0;
+
+    double hi = 1.0;
+
+    computeRange(&lo, &hi);
+
+    const double t0 = now_ - window_;
+
+    const std::vector<double> yt = axis::niceTicks(lo, hi, 4);
+
+    const std::vector<double> xt = axis::niceTicks(t0, now_, 6);
+
+    // --- 격자 ---
+    axis::drawGrid(p, plot, xt, t0, now_, yt, lo, hi, 77);   // viz alpha 0.3
+
+    // --- 0 선. 격자보다 진하게 (부호가 바뀌는 지점이 곧 판단 기준) ---
+    if (lo < 0.0 && hi > 0.0)
+    {
+        const double y =
+            plot.bottom() - (0.0 - lo) / (hi - lo) * plot.height();
+
+        p.setPen(QPen(theme::ZERO_LINE, 1.2));
+
+        p.drawLine(QPointF(plot.left(), y), QPointF(plot.right(), y));
+    }
+
+    // --- 계열 ---
+    drawSeries(p, a_, theme::SERIES_A, plot, lo, hi);
+
+    drawSeries(p, b_, theme::SERIES_B, plot, lo, hi);
+
+    // --- 축 ---
+    axis::drawFrame(p, plot);
+
+    axis::drawYAxis(p, plot, yt, lo, hi, y_label_);
+
+    if (show_x_axis_)
+    {
+        axis::drawXAxis(p, plot, xt, t0, now_, "t [s]");
+    }
+
+    // --- 현재값 ---
+    drawReadout(p, plot);
 
     // --- 안내 문구 ---
     if (!notice_.isEmpty())
     {
-        p.setPen(theme::WARN);
+        QFont f = p.font();
+
+        f.setPointSizeF(9.0);
+
+        p.setFont(f);
+
+        p.setPen(theme::FAULT);
 
         p.drawText(plot, Qt::AlignCenter, notice_);
     }

@@ -129,6 +129,7 @@ void RosBridge::declareAll()
     history_s_  = declare_parameter<double>("history_s", 30.0);
 
     map_frame_  = declare_parameter<std::string>("frames.map", "map");
+    odom_frame_ = declare_parameter<std::string>("frames.odom", "odom");
     base_frame_ = declare_parameter<std::string>("frames.base", "base_link");
     tf_timeout_ = declare_parameter<double>("frames.tf_timeout_s", 0.5);
 
@@ -136,6 +137,7 @@ void RosBridge::declareAll()
     declare_parameter<std::string>("map.topic", "/map");
     map_yaml_   = declare_parameter<std::string>("map.yaml_path", "");
     map_wait_s_ = declare_parameter<double>("map.wait_s", 5.0);
+    declare_parameter<std::string>("map.display_unit", "cm");
 
     declare_parameter<std::string>("topics.scan", "/scan_filtered");
     declare_parameter<std::string>(
@@ -597,14 +599,28 @@ void RosBridge::onPoseTimer()
     }
     catch (const tf2::TransformException &)
     {
+        // 전체 체인이 안 되더라도 링크별 상태는 알려줘야 원인이 짚인다.
+        const TfLink mo = lookupLink(map_frame_, odom_frame_);
+
+        const TfLink ob = lookupLink(odom_frame_, base_frame_);
+
         std::lock_guard<std::mutex> lk(mu_);
 
         snap_.pose.valid = false;
+
+        snap_.tf_map_odom = mo;
+
+        snap_.tf_odom_base = ob;
 
         return;
     }
 
     const double age = (now() - rclcpp::Time(tf.header.stamp)).seconds();
+
+    // HUD 용. 차량 자세와 별개로 링크별로 본다.
+    const TfLink mo = lookupLink(map_frame_, odom_frame_);
+
+    const TfLink ob = lookupLink(odom_frame_, base_frame_);
 
     Pose2D p;
 
@@ -619,6 +635,38 @@ void RosBridge::onPoseTimer()
     std::lock_guard<std::mutex> lk(mu_);
 
     snap_.pose = p;
+
+    snap_.tf_map_odom = mo;
+
+    snap_.tf_odom_base = ob;
+}
+
+
+// 링크 하나만 본다. map->base 전체가 되는지와 달리, 어느 구간이 끊겼는지
+// 알 수 있어야 AMCL 문제인지 EKF 문제인지 갈린다.
+TfLink RosBridge::lookupLink(
+    const std::string & parent, const std::string & child) const
+{
+    TfLink out;
+
+    geometry_msgs::msg::TransformStamped tf;
+
+    try
+    {
+        tf = tf_buffer_->lookupTransform(parent, child, tf2::TimePointZero);
+    }
+    catch (const tf2::TransformException &)
+    {
+        return out;
+    }
+
+    out.got = true;
+
+    out.age = (now() - rclcpp::Time(tf.header.stamp)).seconds();
+
+    out.ok = (out.age >= 0.0 && out.age <= tf_timeout_);
+
+    return out;
 }
 
 

@@ -11,6 +11,7 @@
 #include <QWidget>
 
 #include "kau_gui/map_view.hpp"
+#include "kau_gui/plot_axis.hpp"
 #include "kau_gui/plot_strip.hpp"
 #include "kau_gui/status_bar.hpp"
 #include "kau_gui/theme.hpp"
@@ -74,31 +75,32 @@ void MainWindow::buildUi()
 
     lv->setSpacing(6);
 
-    plot_speed_ = new PlotStrip("speed", "m/s", left);
+    // 이름 · 단위 표기는 viz.py PANELS 를 그대로 따른다.
+    plot_speed_ = new PlotStrip("speed [m/s]", left);
 
     plot_speed_->setSeriesNames("target", "real");
 
     plot_speed_->setMinSpan(0.5);
 
-    plot_steer_ = new PlotStrip("steer", "deg", left);
+    plot_steer_ = new PlotStrip("steer [deg]", left);
 
     plot_steer_->setSeriesNames("raw", "cmd");
 
     plot_steer_->setMinSpan(10.0);
 
-    plot_ld_ = new PlotStrip("lookahead distance", "cm", left);
+    plot_ld_ = new PlotStrip("lookahead [cm]", left);
 
     plot_ld_->setSeriesNames("Ld", "");
 
     plot_ld_->setMinSpan(50.0);
 
-    plot_heading_ = new PlotStrip("heading error", "deg", left);
+    plot_heading_ = new PlotStrip("heading error [deg]", left);
 
     plot_heading_->setSeriesNames("", "");
 
     plot_heading_->setMinSpan(10.0);
 
-    plot_cte_ = new PlotStrip("cross track error", "cm", left);
+    plot_cte_ = new PlotStrip("cross track error [cm]", left);
 
     plot_cte_->setSeriesNames("", "");
 
@@ -110,13 +112,18 @@ void MainWindow::buildUi()
         lv->addWidget(s, 1);
     }
 
+    // x 축 눈금은 맨 아래 하나만. 전 플롯이 같은 시간창을 쓰므로 축을
+    // 반복할 이유가 없다 (viz.stack_plots 규약).
+    plot_cte_->setShowXAxis(true);
+
     hint_ = new QLabel(
         "space 일시정지   ·   r 뷰 리셋   ·   f 차량 추종   ·   "
         "휠 줌 / 드래그 팬", left);
 
     hint_->setStyleSheet(
-        QString("color: %1; font-size: 11px;")
-            .arg(theme::TEXT_DIM.name()));
+        QString("color: %1; font-size: 11px; padding: 2px 0 0 %2px;")
+            .arg(theme::TEXT_DIM.name())
+            .arg(axis::LEFT_MARGIN));
 
     lv->addWidget(hint_, 0);
 
@@ -127,15 +134,20 @@ void MainWindow::buildUi()
     map_->setVehicleSize(
         bridge_->vehicleLengthM(), bridge_->vehicleWidthM());
 
+    map_->setDisplayUnit(
+        QString::fromStdString(
+            bridge_->get_parameter("map.display_unit").as_string()));
+
     split->addWidget(left);
 
     split->addWidget(map_);
 
-    split->setStretchFactor(0, 35);
+    // viz.py 의 setColumnStretchFactor(0, 95) / (1, 125)
+    split->setStretchFactor(0, 95);
 
-    split->setStretchFactor(1, 65);
+    split->setStretchFactor(1, 125);
 
-    split->setSizes({520, 980});
+    split->setSizes({640, 860});
 
     root->addWidget(split, 1);
 

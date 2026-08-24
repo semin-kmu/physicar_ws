@@ -94,6 +94,10 @@ private:
 
     bool loadMapFile(const std::string & yaml_path, MapImage * out);
 
+    // TF 링크 하나의 신선도. HUD 가 어느 링크가 끊겼는지 짚는 데 쓴다.
+    TfLink lookupLink(
+        const std::string & parent, const std::string & child) const;
+
     void declareAll();
 
     void makeDisplaySubs();
@@ -110,6 +114,7 @@ private:
     double veh_wid_      = 0.20;
 
     std::string map_frame_;
+    std::string odom_frame_;
     std::string base_frame_;
 
     // 감시 대상. 네 배열의 같은 index 가 한 노드를 이룬다.
