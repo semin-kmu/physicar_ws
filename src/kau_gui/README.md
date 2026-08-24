@@ -15,10 +15,9 @@
 
 ```
 ┌─────────────────┬────────────────────────────────┐
-│ speed  [m/s]    │  map (rowspan 5)               │
+│ speed  [m/s]    │  map (rowspan 4)               │
 │ steer  [deg]    │   scan · TF · obstacle         │
-│ L_d    [cm]     │   global / local / lane        │
-│ CTE    [cm]     │   [HUD]                        │
+│ CTE    [cm]     │   global / local / lane        │
 │ θ_err  [deg]    │                                │
 └─────────────────┴────────────────────────────────┘
      95          :               125
@@ -47,23 +46,6 @@ z 축(파랑)은 생략한다.
 맵 배경은 `kau_localization` 이 share 에 설치하는 `maps/` 에서 `map.name`
 (기본 `kau_v3`) 으로 찾는다. `bringup.yaml` 이 `map_server` 에 주는 지도와 같다.
 `map.yaml_path` 를 주면 그쪽이 우선한다.
-
-### HUD (맵 좌상단)
-
-맵에 그려지는 것들의 수신 상태만 담는다. 제어 수치는 좌측 플롯 소관이다.
-
-```
-global path    412 pt   0.0s
-local path      98 pt   0.1s
-lane center         --
-tf map               0.0s
-tf odom              0.0s
-tf base_link         2.4s  STALE
-obstacles        3 EA   0.1s
-```
-
-프레임별로 나눠 본다. `map→odom` 은 AMCL, `odom→base_link` 는 EKF 소관이라
-어디서 끊겼는지가 곧 어느 노드 문제인지다 (`kau_localization/README.md`).
 
 ## 2. 설치 — venv
 
@@ -121,7 +103,7 @@ ros2 run kau_gui kau_gui --ros-args \
 | target speed | `/speed` | `std_msgs/Float64` |
 | real speed | `/odom` | `nav_msgs/Odometry` |
 | cmd steer | `/steering` | `std_msgs/Float64` [rad] → deg |
-| raw steer · Ld · heading err · cte | `/debug/steer` | `kau_msgs/SteerDebug` |
+| raw steer · heading err · cte | `/debug/steer` | `kau_msgs/SteerDebug` |
 
 `/odometry/filtered` 는 **존재하지 않는다.** `bringup.yaml` 이 `/odom` 으로 remap 한다.
 

@@ -91,17 +91,6 @@ def stack_plots(win, panels, col: int = 0, row0: int = 0,
     return out
 
 
-def hud(plot, x: int = 8, y: int = 8) -> pg.TextItem:
-    """ViewBox 픽셀 좌표에 고정되는 텍스트 상자."""
-    t = pg.TextItem(anchor=(0, 0), color="k",
-                    fill=pg.mkBrush(255, 255, 255, 220),
-                    border=pg.mkPen("#bbbbbb"))
-    t.textItem.setFont(QtGui.QFont("monospace", 9))
-    t.setParentItem(plot.getViewBox())
-    t.setPos(x, y)
-    return t
-
-
 def car_shape(x: float, y: float, yaw: float):
     """차체 외곽 폴리라인 [cm]. x, y 도 cm."""
     pts = np.array([[CAR_REAR, -CAR_HALF_W], [CAR_FRONT, -CAR_HALF_W],

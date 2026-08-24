@@ -35,20 +35,16 @@ from .bridge import Bridge           # noqa: E402
 PANELS = [
     ("speed_target", "speed [m/s]"),
     ("steer_raw", "steer [deg]"),
-    ("lookahead", "L_d [cm]"),
     ("cross_track", "CTE [cm]"),
     ("heading_err", "\u03b8_err [deg]"),
 ]
 
 COL_REF, COL_TRUTH_ERR, COL_EMA = "#1f77b4", "#d62728", "#2ca02c"
 
-# full_simulation.OVERLAY 와 같은 규약. key -> (보조 key, 색, 설명, 점선 여부)
+# 같은 패널에 겹쳐 그리는 보조 계열. key -> (보조 key, 색, 점선 여부)
 OVERLAY = {
-    "speed_target": ("speed_real", COL_EMA,
-                     "blue = target (/speed),  green = measured (/odom)",
-                     False),
-    "steer_raw": ("steer_cmd", COL_TRUTH_ERR,
-                  "blue = raw,  red dotted = commanded (/steering)", True),
+    "speed_target": ("speed_real", COL_EMA, False),
+    "steer_raw": ("steer_cmd", COL_TRUTH_ERR, True),
 }
 
 STALE_S = 1.0
@@ -64,8 +60,7 @@ def _run(bridge: Bridge, fps: float) -> None:
     curves = {}
     for key, p in panels.items():
         if key in OVERLAY:
-            alt, col, note, dashed = OVERLAY[key]
-            p.setTitle(note, size="8pt")
+            alt, col, dashed = OVERLAY[key]
             style = QtCore.Qt.DotLine if dashed else QtCore.Qt.SolidLine
             curves[alt] = p.plot([], [], pen=pg.mkPen(col, width=2,
                                                       style=style))
@@ -91,7 +86,6 @@ def _run(bridge: Bridge, fps: float) -> None:
     body = m.plot([], [], pen=pg.mkPen(viz.COL_CAR, width=2))
     m.disableAutoRange()
 
-    hud = viz.hud(m)
     state = {"paused": False}
 
     first = next(iter(panels.values()))
@@ -130,8 +124,6 @@ def _run(bridge: Bridge, fps: float) -> None:
         base = s["tf_poses"][2]
         body.setData(*(viz.car_shape(*base) if base is not None else EMPTY))
 
-        hud.setText(_hud_text(s, now, bridge.tf_timeout))
-
     def key(ev):
         k = ev.key()
         if k == QtCore.Qt.Key_Space:
@@ -149,43 +141,6 @@ def _run(bridge: Bridge, fps: float) -> None:
     timer.start(int(round(1000.0 / fps)))
     viz.run(win, "KAU AMET GUI")
 
-
-def _hud_text(s, now, tf_timeout) -> str:
-    """맵에 그려지는 것들의 수신 상태. 제어 수치는 왼쪽 패널 소관이다."""
-    lines = []
-
-    def age(stamp):
-        return "      " if stamp is None else f"{now - stamp:5.1f}s"
-
-    def path(label, key, timeout=STALE_S):
-        xy, st = s[key]
-        if xy is None:
-            lines.append(f"{label:<13}      --")
-            return
-        ok = st is not None and (now - st) <= timeout
-        lines.append(f"{label:<13} {len(xy[0]):4d} pt {age(st)}"
-                     f"{'' if ok else '  STALE'}")
-
-    path("global path", "path_global", timeout=1e9)
-    path("local path", "path_local")
-    path("lane center", "path_lane")
-
-    for name, a in zip(("tf map", "tf odom", "tf base_link"), s["tf_ages"]):
-        if a is None:
-            lines.append(f"{name:<13}      --")
-        else:
-            lines.append(f"{name:<13}      {a:5.1f}s"
-                         f"{'' if a <= tf_timeout else '  STALE'}")
-
-    obs, st = s["obstacles"]
-    if obs is None:
-        lines.append(f"{'obstacles':<13}      --")
-    else:
-        ok = st is not None and (now - st) <= STALE_S
-        lines.append(f"{'obstacles':<13} {len(obs):4d} EA {age(st)}"
-                     f"{'' if ok else '  STALE'}")
-
-    return "\n".join(lines)
 
 
 def main(args=None):

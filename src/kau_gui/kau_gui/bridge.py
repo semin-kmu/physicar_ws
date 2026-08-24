@@ -118,7 +118,6 @@ class Bridge(Node):
         self.speed_real = Series(w)
         self.steer_raw = Series(w)
         self.steer_cmd = Series(w)
-        self.lookahead = Series(w)
         self.heading_err = Series(w)
         self.cross_track = Series(w)
 
@@ -129,10 +128,6 @@ class Bridge(Node):
         self.obstacles = Latest()
 
         self.tf_poses = [None, None, None]      # map / odom / base_link
-        self.tf_ages = [None, None, None]
-
-        self.tracking_ok = False
-        self.steer_debug_alive = False
 
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
@@ -158,7 +153,6 @@ class Bridge(Node):
         self.map_frame = d("frames.map", "map").value
         self.odom_frame = d("frames.odom", "odom").value
         self.base_frame = d("frames.base", "base_link").value
-        self.tf_timeout = d("frames.tf_timeout_s", 0.5).value
 
         # 맵 배경. 기본은 kau_localization 이 share 에 설치하는 maps/ 에서
         # 이름으로 찾는다 (bringup.yaml 의 "@kau_localization:maps/..." 와
@@ -300,14 +294,11 @@ class Bridge(Node):
     def _on_debug(self, m: SteerDebug):
         t = self._now()
         with self._lock:
-            self.steer_debug_alive = True
-            self.tracking_ok = bool(m.tracking_ok)
             # 추종 실패 tick 의 0 을 쌓으면 플롯이 0 으로 끌려 내려가
             # 오차가 사라진 것처럼 보인다. 값을 넣지 않고 선을 끊는다.
             if not m.tracking_ok:
                 return
             self.steer_raw.push(t, m.raw_steer_deg)
-            self.lookahead.push(t, m.lookahead_cm)
             self.heading_err.push(t, m.heading_error_rad * RAD2DEG)
             self.cross_track.push(t, m.cross_track_cm)
 
@@ -327,15 +318,6 @@ class Bridge(Node):
                          1.0 - 2.0 * (q.y * q.y + q.z * q.z))
         return (tf.transform.translation.x, tf.transform.translation.y, yaw)
 
-    def _link_age(self, parent: str, child: str):
-        try:
-            tf = self.tf_buffer.lookup_transform(
-                parent, child, rclpy.time.Time())
-        except Exception:
-            return None
-        stamp = (tf.header.stamp.sec + tf.header.stamp.nanosec * 1e-9)
-        return self._now() - stamp
-
     def _on_tf(self):
         """map 기준 세 프레임의 자세. map 은 항상 원점이다."""
         odom = self._lookup(self.map_frame, self.odom_frame)
@@ -347,15 +329,8 @@ class Bridge(Node):
         if base is not None:
             poses[2] = (base[0] * CM_PER_M, base[1] * CM_PER_M, base[2])
 
-        # HUD 용. map->odom 은 AMCL, odom->base 는 EKF 소관이라 나눠 봐야
-        # 어느 쪽이 끊겼는지 짚인다 (kau_localization README).
-        ages = [0.0,
-                self._link_age(self.map_frame, self.odom_frame),
-                self._link_age(self.odom_frame, self.base_frame)]
-
         with self._lock:
             self.tf_poses = poses
-            self.tf_ages = ages
 
     # ------------------------------------------------------------------
     # 스냅샷
@@ -373,25 +348,12 @@ class Bridge(Node):
                 "path_lane": (self.path_lane.value, self.path_lane.stamp),
                 "obstacles": (self.obstacles.value, self.obstacles.stamp),
                 "tf_poses": list(self.tf_poses),
-                "tf_ages": list(self.tf_ages),
                 "series": {
                     "speed_target": self.speed_target.arrays(),
                     "speed_real": self.speed_real.arrays(),
                     "steer_raw": self.steer_raw.arrays(),
                     "steer_cmd": self.steer_cmd.arrays(),
-                    "lookahead": self.lookahead.arrays(),
                     "heading_err": self.heading_err.arrays(),
                     "cross_track": self.cross_track.arrays(),
                 },
-                "last": {
-                    "speed_target": self.speed_target.last,
-                    "speed_real": self.speed_real.last,
-                    "steer_raw": self.steer_raw.last,
-                    "steer_cmd": self.steer_cmd.last,
-                    "lookahead": self.lookahead.last,
-                    "heading_err": self.heading_err.last,
-                    "cross_track": self.cross_track.last,
-                },
-                "tracking_ok": self.tracking_ok,
-                "steer_debug_alive": self.steer_debug_alive,
             }

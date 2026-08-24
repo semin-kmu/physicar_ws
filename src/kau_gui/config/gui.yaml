@@ -18,8 +18,6 @@
       map: "map"
       odom: "odom"
       base: "base_link"
-      # TF 가 이보다 오래되면 HUD 에 STALE 로 표시한다
-      tf_timeout_s: 0.5
 
     # 맵의 TF 축 마커 길이 [cm]
     tf_axis_cm: 20.0
