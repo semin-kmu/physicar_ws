@@ -14,15 +14,14 @@
 `full_simulation.show_realtime` 과 같은 배치다.
 
 ```
-row 0  제목 줄 (colspan 2, 11pt)
-┌─────────────────────┬────────────────────────────┐
-│ target speed        │  map (rowspan 5)           │
-│ target steer        │   scan · TF · obstacle     │
-│ lookahead distance  │   global / local / lane    │
-│ cross track error   │              [HUD] [범례]  │
-│ heading error       │                            │
-└─────────────────────┴────────────────────────────┘
-       95            :            125
+┌─────────────────┬────────────────────────────────┐
+│ speed  [m/s]    │  map (rowspan 5)               │
+│ steer  [deg]    │   scan · TF · obstacle         │
+│ L_d    [cm]     │   global / local / lane        │
+│ CTE    [cm]     │   [HUD]                        │
+│ θ_err  [deg]    │                                │
+└─────────────────┴────────────────────────────────┘
+     95          :               125
 ```
 
 시뮬과 다를 수밖에 없는 것은 하나뿐이다. 시뮬은 배치 재생이라 전체 로그를

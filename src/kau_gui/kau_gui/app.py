@@ -3,8 +3,7 @@
 화면 구성은 KAU_AMET_Test/src/full_simulation.py 의 show_realtime 을 그대로
 따른다. 시뮬과 실차를 나란히 놓고 보므로 같은 자리에 같은 것이 있어야 한다.
 
-    row 0        제목 줄 (colspan 2, 11pt)
-    row 1..5     왼쪽 지표 패널 5 개 / 오른쪽 map (rowspan 5)
+    row 0..4     왼쪽 지표 패널 5 개 / 오른쪽 map (rowspan 5)
     열 비율      95 : 125
 
 시뮬과 다를 수밖에 없는 것은 하나뿐이다. 시뮬은 배치 재생이라 전체 로그를
@@ -34,11 +33,11 @@ from .bridge import Bridge           # noqa: E402
 
 # full_simulation.PANELS 와 같은 구성 · 같은 순서 · 같은 라벨
 PANELS = [
-    ("speed_target", "target speed [m/s]"),
-    ("steer_raw", "target steer [deg]"),
-    ("lookahead", "lookahead distance [cm]"),
-    ("cross_track", "cross track error [cm]"),
-    ("heading_err", "heading error [deg]"),
+    ("speed_target", "speed [m/s]"),
+    ("steer_raw", "steer [deg]"),
+    ("lookahead", "L_d [cm]"),
+    ("cross_track", "CTE [cm]"),
+    ("heading_err", "\u03b8_err [deg]"),
 ]
 
 COL_REF, COL_TRUTH_ERR, COL_EMA = "#1f77b4", "#d62728", "#2ca02c"
@@ -60,12 +59,8 @@ EMPTY = (np.empty(0), np.empty(0))
 def _run(bridge: Bridge, fps: float) -> None:
     viz.init("KAU AMET GUI")
     win = pg.GraphicsLayoutWidget()
-    win.addLabel(f"map={bridge.map_frame}  odom={bridge.odom_frame}  "
-                 f"base={bridge.base_frame}  |  render={fps:g} Hz  |  "
-                 f"history={bridge.history_s:g} s",
-                 row=0, col=0, colspan=2, size="11pt")
 
-    panels = viz.stack_plots(win, PANELS, col=0, row0=1, xlabel="t [s]")
+    panels = viz.stack_plots(win, PANELS, col=0, row0=0, xlabel="t [s]")
     curves = {}
     for key, p in panels.items():
         if key in OVERLAY:
@@ -76,8 +71,7 @@ def _run(bridge: Bridge, fps: float) -> None:
                                                       style=style))
         curves[key] = p.plot([], [], pen=pg.mkPen(COL_REF, width=2))
 
-    m = viz.map_plot(win, row=1, col=1, rowspan=len(PANELS), title="map")
-    m.addLegend(offset=(-10, 10), labelTextSize="8pt")
+    m = viz.map_plot(win, row=0, col=1, rowspan=len(PANELS), title="map")
 
     if bridge.map_yaml:
         try:
@@ -87,16 +81,11 @@ def _run(bridge: Bridge, fps: float) -> None:
             print(f"[kau_gui] 맵 배경 로드 실패 ({bridge.map_yaml}): {e}")
 
     scan_pts = m.plot([], [], pen=None, symbol="o", symbolSize=2,
-                      symbolBrush=viz.COL_SCAN, symbolPen=None, name="scan")
-    global_line = m.plot([], [], pen=pg.mkPen(viz.COL_GLOBAL, width=2),
-                         name="global path")
-    lane_line = m.plot([], [], pen=pg.mkPen(viz.COL_LANE, width=3),
-                       name="lane detection")
-    local_line = m.plot([], [], pen=pg.mkPen(viz.COL_LOCAL, width=3),
-                        name="local path")
+                      symbolBrush=viz.COL_SCAN, symbolPen=None)
+    global_line = m.plot([], [], pen=pg.mkPen(viz.COL_GLOBAL, width=2))
+    lane_line = m.plot([], [], pen=pg.mkPen(viz.COL_LANE, width=3))
+    local_line = m.plot([], [], pen=pg.mkPen(viz.COL_LOCAL, width=3))
     obstacles = viz.Obstacles(m, color=viz.COL_OBS)
-    m.plot([], [], pen=None, symbol="o", symbolSize=7,
-           symbolBrush=viz.COL_OBS, symbolPen=None, name="obstacle")
     tf = viz.TfChain(m, ("map", "odom", "base_link"),
                      length_cm=bridge.tf_axis_cm)
     body = m.plot([], [], pen=pg.mkPen(viz.COL_CAR, width=2))
