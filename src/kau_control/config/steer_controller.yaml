@@ -67,3 +67,11 @@ steer_controller:
     viz:
       enabled: true
       samples_per_seg: 20
+
+    # --- 디버깅 GUI (kau_gui) ---
+    # 제어 루프가 이미 구하는 값(clamp 전후 조향각, Ld, 추종오차)을 그대로
+    # 내보낸다. 계산이 늘지 않고, 구독자가 없어도 제어에 영향이 없다.
+    # QoS 는 BEST_EFFORT 고정 (재전송 비용을 제어 tick 에 얹지 않는다).
+    debug:
+      enabled: true
+      topic: "/debug/steer"

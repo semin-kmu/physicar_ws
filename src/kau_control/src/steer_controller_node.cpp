@@ -9,6 +9,9 @@
 //
 // 속도는 speed_controller 가 따로 낸다. 이 노드는 조향만 책임진다.
 // 단위: 내부 cm / deg, 발행 직전에만 rad.
+//
+// 발행: /steering (제어) · /viz/path/{tracked,lookahead} (RViz)
+//       /debug/steer (kau_msgs/SteerDebug, 디버깅 GUI 전용)
 // ====================================================================
 
 #include <algorithm>
@@ -22,6 +25,8 @@
 #include <geometry_msgs/msg/point_stamped.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <std_msgs/msg/float64.hpp>
+
+#include "kau_msgs/msg/steer_debug.hpp"
 
 #include "kau_control/params.hpp"
 #include "kau_control/path_tracker.hpp"
@@ -50,6 +55,10 @@ public:
         declare_parameter<bool>("viz.enabled", true);
         declare_parameter<int>("viz.samples_per_seg", 20);
 
+        // 디버깅 GUI 전용 발행. 끄면 publisher 자체를 만들지 않는다.
+        declare_parameter<bool>("debug.enabled", true);
+        declare_parameter<std::string>("debug.topic", "/debug/steer");
+
         load();
 
 
@@ -62,6 +71,15 @@ public:
         viz_target_pub_ =
             create_publisher<geometry_msgs::msg::PointStamped>(
                 "/viz/path/lookahead", 1);
+
+        // 관측 전용이므로 BEST_EFFORT. 제어 tick 이 GUI 구독자 때문에
+        // 재전송 비용을 떠안지 않게 한다 (docs/09 section 10).
+        if (get_parameter("debug.enabled").as_bool())
+        {
+            debug_pub_ = create_publisher<kau_msgs::msg::SteerDebug>(
+                get_parameter("debug.topic").as_string(),
+                rclcpp::QoS(1).best_effort());
+        }
 
         // Ld 가 속도에 비례하므로 현재 속도 명령을 본다.
         // 첫 메시지 전에는 v=0 -> Ld=ld_min 이라 안전한 쪽으로 붙는다.
@@ -161,14 +179,19 @@ private:
 
         const Point2 tgt = cv.point(cv.lookahead(r.s, ld));
 
-        const double deg = std::clamp(
-            pure_pursuit::steerCommand(
-                r.x, r.y, r.yaw, tgt.x, tgt.y, ld, vehicle_),
-            -vehicle_.max_steer, vehicle_.max_steer);
+        // clamp 전후를 나눠 둔다. 둘이 갈라지는 구간이 곧 조향 포화이고,
+        // 이건 튜닝할 때 가장 먼저 봐야 하는 신호다.
+        const double raw = pure_pursuit::steerCommand(
+            r.x, r.y, r.yaw, tgt.x, tgt.y, ld, vehicle_);
+
+        const double deg =
+            std::clamp(raw, -vehicle_.max_steer, vehicle_.max_steer);
 
         publishSteering(deg2rad(deg));
 
         publishVizTarget(tgt);
+
+        publishDebug(r, raw, deg, ld);
 
         RCLCPP_DEBUG_THROTTLE(
             get_logger(), *get_clock(), 500,
@@ -181,6 +204,10 @@ private:
     void stop(const std::string & reason)
     {
         publishSteering(0.0);
+
+        // 실패 tick 에도 debug 는 계속 내보낸다. 발행이 멈추면 GUI 가
+        // "노드가 죽음" 과 "추종 불가" 를 구분할 수 없다.
+        publishDebugIdle();
 
         if (!reason.empty())
         {
@@ -233,6 +260,61 @@ private:
         viz_path_pub_->publish(p);
     }
 
+    // 값은 전부 위에서 이미 구한 것이다. 여기서 새로 계산하지 않는다.
+    void publishDebug(
+        const TrackResult & r, double raw_deg, double cmd_deg, double ld)
+    {
+        if (!debug_pub_)
+        {
+            return;
+        }
+
+        kau_msgs::msg::SteerDebug m;
+
+        m.header.frame_id = tracker_.frame();
+
+        m.header.stamp = now();
+
+        m.tracking_ok = true;
+
+        m.path_source = tracker_.source();
+
+        m.raw_steer_deg = raw_deg;
+
+        m.cmd_steer_deg = cmd_deg;
+
+        m.lookahead_cm = ld;
+
+        m.heading_error_rad = r.head_err;
+
+        m.cross_track_cm = r.cte;
+
+        m.s_cm = r.s;
+
+        debug_pub_->publish(m);
+    }
+
+    // 추종 불가 tick. 수치는 전부 0 이고 tracking_ok 로만 구분한다.
+    void publishDebugIdle()
+    {
+        if (!debug_pub_)
+        {
+            return;
+        }
+
+        kau_msgs::msg::SteerDebug m;
+
+        m.header.frame_id = tracker_.frame();
+
+        m.header.stamp = now();
+
+        m.tracking_ok = false;
+
+        m.path_source = tracker_.source();
+
+        debug_pub_->publish(m);
+    }
+
     void publishVizTarget(const Point2 & tgt)
     {
         if (!viz_enabled_)
@@ -269,6 +351,9 @@ private:
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr    viz_path_pub_;
     rclcpp::Publisher<geometry_msgs::msg::PointStamped>::SharedPtr
         viz_target_pub_;
+
+    // debug.enabled=false 면 null 로 남는다.
+    rclcpp::Publisher<kau_msgs::msg::SteerDebug>::SharedPtr debug_pub_;
 
     rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr speed_sub_;
 

@@ -9,6 +9,9 @@
 | message | 용도 |
 | --- | --- |
 | `msg/KauPath.msg` | 함수형 경로 — quintic Bezier segment 열. Global / Local / Lane 공용 |
+| `msg/ObstacleCircle.msg` | 원형 근사 장애물 1개. 길이 단위 **m** (KauPath 와 다름) |
+| `msg/ObstacleCircleArray.msg` | 한 관측 주기의 Object List + status |
+| `msg/SteerDebug.msg` | `steer_controller` 내부 상태. 디버깅 전용, 제어 미사용 |
 
 표준 `nav_msgs/Path` 는 `PoseStamped[]` 이산 좌표 집합이므로 대전제 위반 → custom message
 

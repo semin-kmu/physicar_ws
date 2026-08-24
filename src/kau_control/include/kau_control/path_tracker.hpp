@@ -72,6 +72,11 @@ struct TrackResult
 
     double s   = 0.0;   // cm, 경로 시작점부터의 호길이
     double cte = 0.0;   // cm, 좌측 +
+
+    // rad, 차량 yaw - 경로 접선. 좌측 +.
+    // 제어에는 쓰지 않는다 (Pure Pursuit 는 LookAhead 점만 본다). cte 와
+    // 같은 호출에서 어차피 나오는 값이라 디버깅용으로 같이 실어 보낸다.
+    double head_err = 0.0;
 };
 
 
@@ -358,9 +363,7 @@ public:
             return r;
         }
 
-        double head_err = 0.0;
-
-        curve_->errors(r.x, r.y, r.yaw, track_, r.cte, head_err);
+        curve_->errors(r.x, r.y, r.yaw, track_, r.cte, r.head_err);
 
         if (std::abs(r.cte) > cte_abort_)
         {
@@ -410,6 +413,14 @@ public:
     const char * activeName() const
     {
         return active_ < 0 ? "-" : slots_[active_].name;
+    }
+
+    // 지금 따라가는 경로의 KauPath.source (SRC_GLOBAL / SRC_LOCAL / SRC_LANE).
+    // 순위(primary/fallback/lane)와 별개다. 설정에 따라 primary 순위로
+    // global 경로가 올 수도 있으므로 발행측이 붙인 값을 그대로 쓴다.
+    uint8_t source() const
+    {
+        return active_ < 0 ? 0 : slots_[active_].source;
     }
 
 private:

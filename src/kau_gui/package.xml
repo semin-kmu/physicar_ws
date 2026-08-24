@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>kau_gui</name>
+  <version>0.1.0</version>
+  <description>주행 디버깅 GUI. map + 추종오차 플롯 + 노드 상태를 한 화면에. 관측 전용(read-only)</description>
+  <maintainer email="eiffeltower1206@gmail.com">Jeon Semin</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <!-- Qt5 Widgets. ROS 2 desktop 이 rviz2/rqt 때문에 이미 끌고 오는 패키지라
+       이 GUI 를 위해 새로 설치되는 것은 없다. -->
+  <depend>qtbase5-dev</depend>
+
+  <depend>rclcpp</depend>
+  <depend>tf2</depend>
+  <depend>tf2_ros</depend>
+  <depend>tf2_geometry_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>visualization_msgs</depend>
+  <depend>kau_msgs</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

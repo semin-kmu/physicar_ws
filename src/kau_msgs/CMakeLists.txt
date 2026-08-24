@@ -9,6 +9,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/KauPath.msg"
   "msg/ObstacleCircle.msg"
   "msg/ObstacleCircleArray.msg"
+  "msg/SteerDebug.msg"
   DEPENDENCIES std_msgs
 )
 
