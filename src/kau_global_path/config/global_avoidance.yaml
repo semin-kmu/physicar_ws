@@ -1,0 +1,25 @@
+global_avoidance_publisher:
+  ros__parameters:
+    publish_hz: 1.0
+    obstacle_hold_s: 1.0
+
+    # local_planner.yaml과 동일한 차량 물리값. 길이 단위는 KauPath와 같은 cm.
+    body_radius_cm: 11.0353
+    kappa_max_vehicle: 0.020221
+    kappa_margin: 0.95
+
+    # Object Detection의 물리 반경에 차량 반경과 아래 여유를 더한다.
+    # Local Planner(4 cm)보다 작은 2 cm로 시작하고 실차에서 올린다.
+    safety_margin_cm: 2.0
+    activation_margin_cm: 3.0
+    collision_tolerance_cm: 0.5
+
+    max_offset_cm: 35.0
+    avoidance_half_length_cm: 120.0
+    fit_spacing_cm: 35.0
+    projection_step_cm: 5.0
+    derivative_step_cm: 1.0
+
+    global_topic: /path/global
+    obstacle_topic: /perception/obstacles
+    output_topic: /path/global_avoidance

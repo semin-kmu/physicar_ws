@@ -6,6 +6,7 @@ find_package(ament_cmake REQUIRED)
 install(PROGRAMS
   scripts/record_trajectory.py
   scripts/global_path_publisher.py
+  scripts/global_avoidance_publisher.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

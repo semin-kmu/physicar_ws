@@ -29,6 +29,11 @@ ros2 run kau_global_path record_trajectory.py --lane inner   # -> data/inner_2.c
 python3 src/kau_global_path/scripts/gen_lane_variants.py
 ros2 launch kau_global_path global_path.launch.py lane:=right_bias
 
+# 같은 launch에서 장애물 회피 기준 경로도 함께 발행한다 (기본 활성화)
+# /path/global은 그대로, /path/global_avoidance는 1 Hz
+ros2 launch kau_global_path global_path.launch.py lane:=lane_graph
+# 정적 경로만 필요하면 avoidance:=false
+
 # 경로 검사 — 발행해도 되는 파일인지 ROS 없이 판정한다
 python3 src/kau_global_path/scripts/check_path.py
 python3 src/kau_global_path/scripts/check_path.py --plot /tmp/path.png -v
@@ -45,6 +50,23 @@ python3 src/kau_global_path/test/test_recorder.py # 바퀴 자르기 (ROS 불필
 | `lane_graph.yaml` | 이 패키지의 발행 노드 (3단계) |
 | `right_bias_lane.yaml` · `last_obstacle_lane.yaml` · `every_obstacle_lane.yaml` | 같은 발행 노드. `path` 만 갈아끼운다 (4.7) |
 | `kau_v3_track.yaml` | `kau_object_detection/config/` — ROI (4.6) |
+
+### Global avoidance 출력
+
+`global_avoidance_publisher.py`는 `/path/global`과 Object Detection의
+`/perception/obstacles`(`map`, m)를 받아 `/path/global_avoidance`
+(`kau_msgs/KauPath`, cm)를 1 Hz로 발행한다. 원본 `/path/global`은 바꾸지 않는다.
+
+- `STATUS_OK`인 Object List만 갱신에 사용한다. non-OK는 센서/pose/TF 문제라서
+  "장애물 없음"으로 해석하지 않는다.
+- 마지막 정상 관측은 기본 1초 유지한다. 그 뒤에는 원본 Global Path로 복귀한다.
+- 물리 장애물 반경 + 차량 반경 11.0353 cm + 안전 여유 2 cm를 충돌 반경으로 쓴다.
+- quintic Bezier, 차량 곡률 한계 0.020221 1/cm를 지키는 후보만 정상 발행한다.
+- 안전 후보가 없으면 원본 경로를 `confidence=0`으로 발행한다. Local Planner는
+  이 경우 자체 장애물 회피를 계속 수행해야 한다.
+
+튜닝값은 `config/global_avoidance.yaml`에 모여 있다. 특히 실차에서는
+`safety_margin_cm`, `avoidance_half_length_cm`, `max_offset_cm` 순서로 조정한다.
 
 ## 1. 지금 하려는 것
 

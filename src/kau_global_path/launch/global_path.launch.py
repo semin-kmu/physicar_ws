@@ -19,6 +19,7 @@ from ament_index_python.packages import get_package_share_directory
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
+from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
@@ -75,7 +76,16 @@ def launch_setup(context, *unused):
             'kappa_limit': float(cfg['kappa_limit']),
         }],
     )
-    return [node]
+    avoidance = Node(
+        package='kau_global_path',
+        executable='global_avoidance_publisher.py',
+        name='global_avoidance_publisher',
+        output='screen',
+        parameters=[str(Path(get_package_share_directory('kau_global_path')) /
+                        'config' / 'global_avoidance.yaml')],
+        condition=IfCondition(LaunchConfiguration('avoidance')),
+    )
+    return [node, avoidance]
 
 
 def generate_launch_description():
@@ -95,6 +105,8 @@ def generate_launch_description():
                               description='Hz. 0 이면 1 회만 발행 (latched 라 그래도 받는다)'),
         DeclareLaunchArgument('kappa_limit', default_value='1.8199',
                               description='1/m. 넘으면 경고만 낸다 (README 6.4)'),
+        DeclareLaunchArgument('avoidance', default_value='true',
+                              description='/path/global_avoidance 노드도 함께 실행'),
     ]
 
     return LaunchDescription(args + [OpaqueFunction(function=launch_setup)])
