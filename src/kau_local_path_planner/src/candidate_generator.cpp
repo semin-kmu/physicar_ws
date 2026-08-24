@@ -73,13 +73,13 @@ CandidateGenerator::CandidateGenerator(
 {
 }
 
-std::array<std::pair<double, double>, 7> CandidateGenerator::corridorOffsets(
-    const std::array<Frame, 2> & frames) const
+std::array<std::array<double, 3>, 7> CandidateGenerator::corridorOffsets(
+    const std::array<Frame, 3> & frames) const
 {
     const double footprint = body_radius_cm_ + kRoadSafetyMarginCm;
-    std::array<std::array<double, 7>, 2> offsets{};
+    std::array<std::array<double, 7>, 3> offsets{};
 
-    for (int f = 0; f < 2; ++f)
+    for (int f = 0; f < 3; ++f)
     {
         const Point2 normal{-std::sin(frames[f].heading), std::cos(frames[f].heading)};
         const double safe_lower = -marginAlongNormal(
@@ -93,32 +93,29 @@ std::array<std::pair<double, double>, 7> CandidateGenerator::corridorOffsets(
         }
     }
 
-    std::array<std::pair<double, double>, 7> pairs;
+    std::array<std::array<double, 3>, 7> pairs{};
     for (std::size_t i = 0; i < 7; ++i)
     {
-        pairs[i] = {offsets[0][i], offsets[1][i]};
+        pairs[i] = {offsets[0][i], offsets[1][i], offsets[2][i]};
     }
     return pairs;
 }
 
 Candidate CandidateGenerator::candidate(
     const Point2 & p, double yaw, double kappa0,
-    const std::array<Frame, 2> & frames,
-    const std::pair<double, double> & offsets,
+    const std::vector<Frame> & frames, const std::vector<double> & offsets,
     double s0, const Curve * previous_path) const
 {
-    const std::array<double, 2> dd{offsets.first, offsets.second};
-
     std::vector<Knot> knots;
     knots.push_back(Knot{p, yaw, kappa0});
     double peak = 0.0;
-    for (int i = 0; i < 2; ++i)
+    for (std::size_t i = 0; i < frames.size(); ++i)
     {
-        const double d = dd[static_cast<std::size_t>(i)];
-        const Frame & fr = frames[static_cast<std::size_t>(i)];
+        const double d = offsets[i];
+        const Frame & fr = frames[i];
         if (std::abs(d * fr.kappa) > params_.cusp_guard)
         {
-            Candidate c; c.d = offsets.second; c.reason = "cusp"; c.cost = kInf;
+            Candidate c; c.d = offsets.back(); c.reason = "cusp"; c.cost = kInf;
             return c;
         }
         const Point2 n{-std::sin(fr.heading), std::cos(fr.heading)};
@@ -137,7 +134,7 @@ Candidate CandidateGenerator::candidate(
         auto [seg_opt, kb] = fitSegment(knots[i], knots[i + 1], params_.bound_depth);
         if (!seg_opt)
         {
-            Candidate c; c.d = offsets.second; c.reason = "degenerate"; c.cost = kInf;
+            Candidate c; c.d = offsets.back(); c.reason = "degenerate"; c.cost = kInf;
             return c;
         }
         segs.push_back(std::move(*seg_opt));
@@ -147,26 +144,26 @@ Candidate CandidateGenerator::candidate(
     Curve cv(segs, false);
     if (bound > kappa_lim_)
     {
-        Candidate c; c.d = offsets.second; c.curve = cv; c.reason = "kappa_bound";
+        Candidate c; c.d = offsets.back(); c.curve = cv; c.reason = "kappa_bound";
         c.cost = kInf;
         return c;
     }
     if (!roadOk(boundary_, cv, body_radius_cm_ + kRoadSafetyMarginCm,
                kRoadSampleIntervalCm))
     {
-        Candidate c; c.d = offsets.second; c.curve = cv; c.reason = "road_boundary";
+        Candidate c; c.d = offsets.back(); c.curve = cv; c.reason = "road_boundary";
         c.cost = kInf;
         return c;
     }
     const double clear = clearance(cv, obstacles_, body_radius_cm_, params_.clear_target);
     if (clear < params_.obs_margin)
     {
-        Candidate c; c.d = offsets.second; c.curve = cv; c.reason = "obstacle";
+        Candidate c; c.d = offsets.back(); c.curve = cv; c.reason = "obstacle";
         c.cost = kInf;
         return c;
     }
 
-    const double d_final = offsets.second;
+    const double d_final = offsets.back();
     const double preview = previewClear(
         global_path_, stations_, d_final, kEndRatio, s0, params_.l_plan,
         params_.preview, body_radius_cm_);
@@ -177,6 +174,127 @@ Candidate CandidateGenerator::candidate(
 
     Candidate c; c.d = d_final; c.curve = cv; c.cost = c_cost; c.reason = "";
     return c;
+}
+
+Candidate CandidateGenerator::candidate(
+    const Point2 & p, double yaw, double kappa0,
+    const std::array<Frame, 2> & frames,
+    const std::pair<double, double> & offsets,
+    double s0, const Curve * previous_path) const
+{
+    return candidate(
+        p, yaw, kappa0,
+        std::vector<Frame>{frames[0], frames[1]},
+        std::vector<double>{offsets.first, offsets.second},
+        s0, previous_path);
+}
+
+std::vector<Candidate> CandidateGenerator::obstacleOffsetCandidates(
+    const Point2 & p, double yaw, double kappa0,
+    const std::array<Frame, 2> & frames, double s0,
+    const Curve * previous_path) const
+{
+    struct Fwd { double advance; double station_s; const Obstacle * obstacle; };
+    std::vector<Fwd> forward;
+    for (const auto & st : stations_)
+    {
+        const double advance = global_path_.deltaS(s0, st.station_s);
+        if (advance >= 20.0 && advance <= params_.l_plan + 80.0)
+        {
+            forward.push_back({advance, st.station_s, &st.obstacle});
+        }
+    }
+    if (forward.empty())
+    {
+        return {};
+    }
+    std::sort(forward.begin(), forward.end(),
+             [](const Fwd & a, const Fwd & b) { return a.advance < b.advance; });
+
+    const double advance = forward.front().advance;
+    const double station = forward.front().station_s;
+    const Obstacle & obstacle = *forward.front().obstacle;
+    const double required =
+        obstacle.radius + body_radius_cm_ + params_.obs_margin + 0.5;
+    const double footprint = body_radius_cm_ + kRoadSafetyMarginCm;
+    const Frame & term_frame = frames[1];
+
+    const auto build = [&](double lead, double ratio, double side) -> Candidate
+    {
+        Frame mid_frame;
+        if (advance <= params_.l_plan - 20.0)
+        {
+            mid_frame = referenceFrame(global_path_, global_path_.wrapS(station - lead));
+        }
+        else
+        {
+            mid_frame = frames[0];
+        }
+        const std::array<Frame, 2> obstacle_frames{mid_frame, term_frame};
+        std::array<double, 2> offsets{};
+        for (int k = 0; k < 2; ++k)
+        {
+            const Frame & fr = obstacle_frames[static_cast<std::size_t>(k)];
+            const Point2 normal{-std::sin(fr.heading), std::cos(fr.heading)};
+            const double lateral =
+                (obstacle.center.x - fr.point.x) * normal.x +
+                (obstacle.center.y - fr.point.y) * normal.y;
+            const double safe_lower =
+                -marginAlongNormal(boundary_, fr.point, normal, -1.0, footprint);
+            const double safe_upper =
+                marginAlongNormal(boundary_, fr.point, normal, 1.0, footprint);
+            const double scale = (k == 0) ? ratio : 1.0;
+            const double target = lateral + side * required * scale;
+            offsets[static_cast<std::size_t>(k)] =
+                std::clamp(target, safe_lower, safe_upper);
+        }
+        return candidate(
+            p, yaw, kappa0, obstacle_frames,
+            std::make_pair(offsets[0], offsets[1]), s0, previous_path);
+    };
+
+    const std::array<double, 3> leads{
+        std::min(60.0, 0.35 * advance),
+        std::min(90.0, 0.55 * advance),
+        std::min(35.0, 0.20 * advance)};
+    // 2026-08-24 (grid 축소, KAU_AMET_Test 세션): 원래 6-combo(leads x
+    // ratios) 중 (leads[1],1.0)/(leads[2],0.82) 는 selected/sole_rescuer/
+    // loo_change 전부 0 -- 정적으로 제거해도 결과가 완전히 동일함을 1-lap
+    // 실측으로 확인해 4-combo 로 축소했다 (계산량 -33%).
+    const std::array<std::pair<double, double>, 4> combos{{
+        {leads[0], 1.0}, {leads[0], 0.82}, {leads[1], 0.82}, {leads[2], 1.0}}};
+
+    std::vector<Candidate> cands;
+    cands.reserve(2);
+    for (double side : {-1.0, 1.0})
+    {
+        std::vector<Candidate> pool;
+        pool.reserve(combos.size());
+        for (const auto & combo : combos)
+        {
+            pool.push_back(build(combo.first, combo.second, side));
+        }
+        std::vector<Candidate> feasible;
+        for (auto & c : pool)
+        {
+            if (c.reason.empty())
+            {
+                feasible.push_back(c);
+            }
+        }
+        if (!feasible.empty())
+        {
+            cands.push_back(*std::min_element(
+                feasible.begin(), feasible.end(),
+                [](const Candidate & a, const Candidate & b)
+                { return a.cost < b.cost; }));
+        }
+        else
+        {
+            cands.push_back(build(leads[0], 1.0, side));
+        }
+    }
+    return cands;
 }
 
 Candidate CandidateGenerator::primitiveCandidate(
@@ -334,12 +452,12 @@ std::vector<Candidate> CandidateGenerator::obstaclePrimitives(
 }
 
 std::vector<int> CandidateGenerator::directTargetIndices(
-    double s0, const std::array<std::pair<double, double>, 7> & offset_pairs) const
+    double s0, const std::array<std::array<double, 3>, 7> & offset_pairs) const
 {
     std::array<double, 7> absolute_targets;
     for (std::size_t i = 0; i < 7; ++i)
     {
-        absolute_targets[i] = offset_pairs[i].second;
+        absolute_targets[i] = offset_pairs[i].back();
     }
 
     struct Fwd { double advance; double lateral; };
@@ -510,7 +628,7 @@ Candidate CandidateGenerator::directCandidate(
 
 std::vector<Candidate> CandidateGenerator::directFamily(
     const Point2 & p, double yaw, double kappa0, const Frame & terminal_frame,
-    const std::array<std::pair<double, double>, 7> & offset_pairs,
+    const std::array<std::array<double, 3>, 7> & offset_pairs,
     std::vector<Candidate> base_candidates, double s0,
     const Curve * previous_path)
 {
@@ -520,7 +638,7 @@ std::vector<Candidate> CandidateGenerator::directFamily(
 
     for (int index : directTargetIndices(s0, offset_pairs))
     {
-        const double target = offset_pairs[static_cast<std::size_t>(index)].second;
+        const double target = offset_pairs[static_cast<std::size_t>(index)].back();
         const Point2 terminal{
             terminal_frame.point.x + target * normal.x,
             terminal_frame.point.y + target * normal.y};

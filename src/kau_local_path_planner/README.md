@@ -35,7 +35,7 @@ src/local_planner_node.cpp   ROS2 wiring (구독/발행/TF/파라미터) 만 담
 | Python (`planner.py`) | C++ |
 |---|---|
 | `LocalPlanner._project` / `_ref_frame` | `ReferenceFusion` |
-| `_candidate` / `_corridor_offsets` / `_obstacle_primitives` / `_direct_family` | `CandidateGenerator` |
+| `_candidate` / `_corridor_offsets` / `_obstacle_offset_candidates`(Smart K1) / `_obstacle_primitives` / `_direct_family` | `CandidateGenerator` |
 | `_cost` / `_continuity_cost` / `_path_preview_cost` / `_least_violation` | `path_evaluator.hpp` |
 | `_clearance` / `_near` / `_preview_clear` | `collision_checker.hpp` |
 | `_road_ok` / `_road_clearance` / `_road_coordinates` | `boundary_checker.hpp` (알고리즘 재설계, 아래 참조) |
@@ -56,6 +56,40 @@ src/local_planner_node.cpp   ROS2 wiring (구독/발행/TF/파라미터) 만 담
   divider 기준 절대좌표를 다시 구했는데, 이미 station 계산 시점에 구해둔
   global-path 기준 lateral (`ObstacleStation.lateral`, 원본 `_station()`과
   동일 정의)을 재사용한다 (부호만 필요하므로 실질적으로 동등).
+
+### 2026-08-24 KAU_AMET_Test 알고리즘 반영 (이번 포팅 세션)
+
+- **corridor 0.625L reference knot**: corridor 가 2-frame(0.25L, 1.0L)에서
+  3-frame(0.25L, 0.625L, 1.0L)으로 확장됐다 — 긴 2-segment chord 가 도로
+  굴곡을 한 번에 가로질러 `road_boundary` 를 자주 위반하던 문제 완화
+  (KAU_AMET_Test 1-lap 실측: road-valid 전멸 100→45). `corridorOffsets`/
+  `candidate()` 를 N-frame(가변 길이 `std::vector<Frame>`/
+  `std::vector<double>`) 지원하도록 일반화했다. obstacle_offsets/
+  primitives/direct_family/K2 는 기존 2-frame `frames` 그대로.
+- **Smart K1** (`_obstacle_offset_candidates` → `CandidateGenerator::
+  obstacleOffsetCandidates`): 장애물 회피 시 middle knot(K1) 의
+  longitudinal 위치를 장애물 station 기준 lead/ratio 4-combo 격자로
+  탐색해 hard-check 통과하는 cost 최소 후보를 고른다. corridor 7개 +
+  이 2개 = 9개로 여전히 "새 candidate family" 가 아니라 기존 후보군에
+  합류하는 것 (6-combo → 4-combo 로 축소된 최신 버전 — KAU_AMET_Test
+  세션 실측: 두 조합(leads[1]×ratio=1.0, leads[2]×ratio=0.82)이 selected/
+  loo_change 전부 0 이라 제거해도 결과 완전 동일, 계산량 -33%).
+- **`_least_violation` 버그 수정**: 이전 포팅은 장애물/도로/곡률 위반을
+  동일 가중치로 정규화 합산했는데, 이는 KAU_AMET_Test 세션에서 이미
+  "`obs_margin` 을 키울수록 오히려 collision 이 잦아지는" 안전 버그로
+  판명되어 폐기된 방식이었다 (정규화 분모가 커지며 상대적 obstacle
+  penalty 가 작아지는 부작용). `leastViolation()` 을 obstacle_violation
+  최소 후보군으로 먼저 좁힌 뒤 그 안에서 road+kappa 위반 최소를 고르는
+  현재 Python 로직으로 맞췄다 — 장애물 충돌은 항상 최우선으로 회피.
+- **토픽 예외처리**: KAU_AMET_Test 의 "Lane/Global/Object 두절" 3가지
+  대응(`plan()` docstring)이 이미 이 포트에 구조적으로 반영돼 있음을
+  이번에 확인했다 (추가 수정 불필요) — Lane 은 `lane_curve_` 가
+  `std::optional` 이라 두절 시 자연히 `nullptr` 로 전파(fuse 로직이 이미
+  global-only 로 폴백); Global Path 는 `TRANSIENT_LOCAL` QoS 로 latched
+  라 ROS 구조상 "이번 사이클만 두절"이라는 개념 자체가 성립하지 않음
+  (`planner_` 가 최초 1회 생성된 뒤로는 항상 유효); Object 는
+  `latest_obstacles_` 캐시가 새 메시지 없으면 마지막 관측을 그대로
+  유지해 `updateObstacles()` 가 매 사이클 그 캐시를 재사용한다.
 
 ## 인터페이스
 
@@ -92,10 +126,13 @@ src/local_planner_node.cpp   ROS2 wiring (구독/발행/TF/파라미터) 만 담
   불변 확인 (원인 아님).
 - `w_continuity=10.0`: switching 감소와 안전이 동시에 최적인 지점. 20
   이상부터 회피 반응이 지연되어 안전이 악화된다 (실측).
-- `_least_violation`(degraded 최후수단)은 장애물/도로/곡률 위반 사이에
-  우선순위를 두지 않고 정규화 합산한다 — 세 조건을 동시에 만족하는
-  후보를 못 찾는 게 자주 발생한다면, 이 채점 방식이 아니라 candidate
-  생성/탐색 범위(l_plan, corridor, preview, segment 수)를 먼저 의심할 것.
+- `_least_violation`(degraded 최후수단)은 obstacle_violation 최소인
+  후보군으로 먼저 좁힌 뒤 그 안에서 road+kappa 위반 최소를 고른다 (장애물
+  충돌 항상 최우선, 2026-08-24 세션에 이전 포팅의 정규화-합산 버그를
+  수정 — 위 "2026-08-24 KAU_AMET_Test 알고리즘 반영" 참고). 세 조건을
+  동시에 만족하는 후보를 못 찾는 게 자주 발생한다면, 이 채점 방식이
+  아니라 candidate 생성/탐색 범위(l_plan, corridor, preview, segment 수)
+  를 먼저 의심할 것.
 
 ## 빌드 / 실행 / 테스트
 

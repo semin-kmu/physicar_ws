@@ -67,15 +67,40 @@ PlanResult LocalPlanner::plan(
         ref_fusion_.evalFrame(
             s0_frames + params_.l_plan, lane_curve, lane_confidence),
     };
+    // corridor 전용 3-frame (0.25L/0.625L/1.0L, 2026-08-24 KAU_AMET_Test
+    // 알고리즘 반영): 긴 2-segment chord 가 도로 굴곡을 한 번에 가로질러
+    // road_boundary 를 자주 위반하던 문제를 완화하려고 중간 reference
+    // knot 을 하나 더 둔다. obstacle_offsets/primitives/direct_family/K2
+    // 는 기존 2-frame `frames` 를 그대로 쓴다 (corridor 만 변경).
+    const std::array<Frame, 3> corridor_frames{
+        ref_fusion_.evalFrame(
+            s0_frames + 0.25 * params_.l_plan, lane_curve, lane_confidence),
+        ref_fusion_.evalFrame(
+            s0_frames + 0.625 * params_.l_plan, lane_curve, lane_confidence),
+        ref_fusion_.evalFrame(
+            s0_frames + params_.l_plan, lane_curve, lane_confidence),
+    };
 
-    const auto offset_pairs = candidate_gen_.corridorOffsets(frames);
+    const auto offset_pairs = candidate_gen_.corridorOffsets(corridor_frames);
 
     std::vector<Candidate> cands;
-    cands.reserve(offset_pairs.size());
+    cands.reserve(offset_pairs.size() + 2);
     for (const auto & pair : offset_pairs)
     {
         cands.push_back(candidate_gen_.candidate(
-            p, yaw, kappa0, frames, pair, s0, previous_path_ ? &*previous_path_ : nullptr));
+            p, yaw, kappa0,
+            std::vector<Frame>{corridor_frames[0], corridor_frames[1], corridor_frames[2]},
+            std::vector<double>{pair[0], pair[1], pair[2]},
+            s0, previous_path_ ? &*previous_path_ : nullptr));
+    }
+    // Smart K1 (2026-08-24 KAU_AMET_Test 알고리즘 반영): 장애물 회피 시
+    // middle knot longitudinal 위치를 장애물 station 기준으로 정한 후보
+    // 2개. corridor 후보군에 합류할 뿐 새 candidate family 가 아니다.
+    {
+        auto obstacle_cands = candidate_gen_.obstacleOffsetCandidates(
+            p, yaw, kappa0, frames, s0,
+            previous_path_ ? &*previous_path_ : nullptr);
+        cands.insert(cands.end(), obstacle_cands.begin(), obstacle_cands.end());
     }
 
     const auto aliveOf = [](const std::vector<Candidate> & v)

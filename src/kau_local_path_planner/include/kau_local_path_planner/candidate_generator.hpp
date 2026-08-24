@@ -1,13 +1,14 @@
 // ====================================================================
 // candidate_generator.hpp
 //
-// 후보 quintic Bezier 경로 생성 -- 기본 corridor 7개 + 실패 시 fallback
-// (obstacle_primitives, direct_family).
+// 후보 quintic Bezier 경로 생성 -- 기본 corridor 7개 + obstacle_offset
+// (Smart K1) 2개 + 실패 시 fallback (obstacle_primitives, direct_family).
 //
 // 원본: KAU_AMET_Test / src/kau_local_path_planner/test/planner.py 의
-//       LocalPlanner._candidate / _corridor_offsets / _obstacle_primitives
-//       / _direct_family / _direct_target_indices / _direct_candidate /
-//       _primitive_candidate, 그리고 fit_segment / _station (module 함수)
+//       LocalPlanner._candidate / _corridor_offsets / _obstacle_offset_
+//       candidates / _obstacle_primitives / _direct_family /
+//       _direct_target_indices / _direct_candidate / _primitive_candidate,
+//       그리고 fit_segment / _station (module 함수)
 //
 // 차이점 (boundary_checker 재설계에 따른 것, KAU_AMET_ROS 세션 결정):
 //   - Python 은 corridor 폭을 track.py 의 divider-relative 사전계산으로
@@ -19,6 +20,21 @@
 //     우리는 이미 station 계산 시점에 구해둔 global-path 기준 lateral
 //     (ObstacleStation.lateral, 원본의 _station() 과 동일 정의) 을 그대로
 //     재사용한다 -- 어느 쪽이든 "부호(좌/우)"만 쓰므로 실질적으로 동등하다.
+//
+// 2026-08-24 KAU_AMET_Test 세션 알고리즘 반영 (이번 포팅 세션):
+//   - corridor 가 2-frame(0.25L, 1.0L)에서 3-frame(0.25L, 0.625L, 1.0L)
+//     으로 확장됐다 (긴 2-segment chord 가 도로 굴곡을 한 번에 가로질러
+//     road_boundary 를 자주 위반하던 문제 완화, 실측: road-valid 전멸
+//     100->45). `corridorOffsets`/`candidate()` 를 N-frame(가변 길이)
+//     지원하도록 일반화했다 -- Python 의 `zip(*offsets)`/`zip(offsets,
+//     frames)` 제네릭 패턴과 동일 원리. obstacle_offsets/primitives/
+//     direct_family/K2 는 기존 2-frame 그대로 (corridor 만 변경).
+//   - `_obstacle_offset_candidates`("Smart K1") 를 새로 포팅했다: 장애물
+//     회피 시 middle knot(K1) 의 longitudinal 위치를 장애물 station 기준
+//     lead/ratio 4-combo 격자(2026-08-24 세션에 6->4 로 축소, 계산량
+//     -33% 이면서 결과 동일함을 실측 확인)로 탐색해 hard-check 통과하는
+//     cost 최소 후보를 고른다. corridor 7개 + 이 2개 = 9개로 여전히
+//     "새 candidate family" 가 아니라 기존 후보군에 합류하는 것.
 // ====================================================================
 
 #ifndef KAU_LOCAL_PATH_PLANNER__CANDIDATE_GENERATOR_HPP_
@@ -85,17 +101,38 @@ public:
     CandidateGenerator(CandidateGenerator &&) = delete;
     CandidateGenerator & operator=(CandidateGenerator &&) = delete;
 
-    // Python: _corridor_offsets(frames). frames[0]=0.25*l_plan 지점,
-    // frames[1]=l_plan(종점) 지점. 반환은 7개 (offset0, offset1) 쌍.
-    std::array<std::pair<double, double>, 7> corridorOffsets(
-        const std::array<Frame, 2> & frames) const;
+    // Python: _corridor_offsets(frames), N-frame 일반화(2026-08-24).
+    // frames[0]=0.25*l_plan, frames[1]=0.625*l_plan, frames[2]=l_plan(종점).
+    // 반환은 7개 (offset_at_frame0, offset_at_frame1, offset_at_frame2) 쌍
+    // -- 마지막 원소만 direct_family/direct_target_indices 가 terminal
+    // 값으로 읽는다 (Python 의 pair[-1] 과 동일 원리).
+    std::array<std::array<double, 3>, 7> corridorOffsets(
+        const std::array<Frame, 3> & frames) const;
 
-    // Python: _candidate(p, yaw, kappa0, frames, offsets).
+    // Python: _candidate(p, yaw, kappa0, frames, offsets). N-knot 일반형
+    // (corridor 의 3-frame 호출에 쓰인다).
+    Candidate candidate(
+        const Point2 & p, double yaw, double kappa0,
+        const std::vector<Frame> & frames, const std::vector<double> & offsets,
+        double s0, const Curve * previous_path) const;
+
+    // 2-frame 전용 오버로드 (obstacle_offsets/primitives 등 기존 경로).
+    // 내부적으로 위 N-knot 버전에 위임한다.
     Candidate candidate(
         const Point2 & p, double yaw, double kappa0,
         const std::array<Frame, 2> & frames,
         const std::pair<double, double> & offsets,
         double s0, const Curve * previous_path) const;
+
+    // Python: _obstacle_offset_candidates(p, yaw, kappa0, frames) --
+    // "Smart K1". 가장 가까운 장애물의 station 기준 lead/ratio 4-combo
+    // 격자로 middle knot(K1) longitudinal 위치를 정해 side(근접/원접)당
+    // 완성 후보 1개씩, 총 2개(빈 벡터면 장애물이 preview 밖). corridor
+    // 후보군에 합류할 뿐 새 candidate family 가 아니다.
+    std::vector<Candidate> obstacleOffsetCandidates(
+        const Point2 & p, double yaw, double kappa0,
+        const std::array<Frame, 2> & frames, double s0,
+        const Curve * previous_path) const;
 
     // Python: _obstacle_primitives(start, yaw, kappa0, terminal_frame).
     // 기본 7개가 전멸했을 때만 호출. 가장 가까운 장애물 앞에 apex knot 을
@@ -110,7 +147,7 @@ public:
     std::vector<Candidate> directFamily(
         const Point2 & p, double yaw, double kappa0,
         const Frame & terminal_frame,
-        const std::array<std::pair<double, double>, 7> & offset_pairs,
+        const std::array<std::array<double, 3>, 7> & offset_pairs,
         std::vector<Candidate> base_candidates, double s0,
         const Curve * previous_path);
 
@@ -123,7 +160,7 @@ private:
     // 튜플을 반환한다 -- 고정 배열 대신 vector 로 그 가변성을 그대로 둔다.
     std::vector<int> directTargetIndices(
         double s0,
-        const std::array<std::pair<double, double>, 7> & offset_pairs) const;
+        const std::array<std::array<double, 3>, 7> & offset_pairs) const;
 
     Candidate directCandidate(
         const Point2 & start, double yaw, double kappa0,
