@@ -2,13 +2,17 @@
 
 from dataclasses import dataclass, field
 
-# 현 구현 범위는 순차 spawn + 관문 프로세스(wait)뿐이다. 재시도·evidence 키는
-# 두지 않는다.
+# 현 구현 범위는 순차 spawn + 관문 프로세스(wait) + 기동 후 상시 감시
+# (respawn·critical)다. evidence 키는 두지 않는다.
 _ROOT_KEYS = {'run', 'stages'}
 _RUN_KEYS = {'log_dir'}
 _STAGE_KEYS = {'id', 'delay_sec', 'nodes'}
 _NODE_KEYS = {'name', 'package', 'executable', 'ros', 'wait', 'when',
+              'respawn', 'respawn_delay', 'critical',
               'param_files', 'params', 'remap', 'args'}
+
+# respawn 기본 대기. ekf.launch.py 의 Node(respawn_delay=2.0) 과 같은 값이다.
+_RESPAWN_DELAY = 2.0
 
 # when: 이 노드를 언제 띄우는가. 시계 소스로만 가른다 (docs/01 section 10).
 _WHEN = ('always', 'sim', 'real')
@@ -26,6 +30,14 @@ class NodeSpec:
     # 0 이 아니면 기동을 중단한다 (clock_gate.py 처럼 조건을 재는 프로세스용).
     wait: bool = False
     when: str = 'always'
+    # 죽으면 respawn_delay 초 뒤 다시 띄운다. launch 의 Node(respawn=True) 와
+    # 같은 뜻이다. platform_ekf_pause 가 우리 EKF 를 죽여 되살리는 복구
+    # 경로가 이것에 의존한다 (ekf.launch.py 주석 참고).
+    respawn: bool = False
+    respawn_delay: float = _RESPAWN_DELAY
+    # 죽으면 기동 전체를 내린다. launch 의 on_exit=Shutdown 과 같은 뜻이다.
+    # 이 프로세스 없이 계속 도는 것이 조용한 열화가 되는 경우에만 쓴다.
+    critical: bool = False
     param_files: tuple = ()
     params: dict = field(default_factory=dict)
     remap: dict = field(default_factory=dict)
@@ -74,6 +86,17 @@ def _node(data, where):
     if when not in _WHEN:
         raise ValueError(f'{where}: when 은 {list(_WHEN)} 중 하나 (받은 값: {when!r})')
 
+    respawn = bool(data.get('respawn', False))
+    critical = bool(data.get('critical', False))
+    if bool(data.get('wait', False)) and (respawn or critical):
+        raise ValueError(f'{where}: 관문(wait)은 끝나는 게 정상이라 '
+                         'respawn·critical 과 같이 쓸 수 없다')
+
+    respawn_delay = float(data.get('respawn_delay', _RESPAWN_DELAY))
+    if respawn_delay < 0.0:
+        raise ValueError(f'{where}: respawn_delay 는 0 이상 '
+                         f'(받은 값: {respawn_delay})')
+
     return NodeSpec(
         name=str(data['name']),
         package=str(data['package']),
@@ -81,6 +104,9 @@ def _node(data, where):
         ros=bool(data.get('ros', True)),
         wait=bool(data.get('wait', False)),
         when=when,
+        respawn=respawn,
+        respawn_delay=respawn_delay,
+        critical=critical,
         param_files=tuple(str(ref) for ref in data.get('param_files') or ()),
         params=dict(_mapping(data.get('params') or {}, f'{where}.params')),
         remap=dict(_mapping(data.get('remap') or {}, f'{where}.remap')),

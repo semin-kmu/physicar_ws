@@ -111,12 +111,21 @@ class Bridge(Node):
 
         self._lock = threading.Lock()
 
+        # 플롯 시간축의 원점. 절대 시각을 그대로 쓰면 축이 못 읽는 값이 된다 --
+        # 벽시계면 1.78e9 라 30 초 창을 구분하려고 소수점 8 자리가 붙고,
+        # sim 시계면 sim 이 켜져 있던 시간이 그대로 나온다. 기동 시점을 0 으로
+        # 두면 "몇 초째" 가 되어 그대로 읽힌다.
+        #
+        # None 인 동안은 아직 시계를 못 잡은 것이다. use_sim_time 이면 첫
+        # /clock 이 오기 전까지 시각이 0 이라, 그때 원점을 잡으면 이후 값이
+        # sim 절대시각이 되어 버린다. 0 이 아닌 첫 값에서 잡는다.
+        self._t0 = None
+
         self._declare()
 
         w = self.history_s
         self.speed_target = Series(w)
         self.speed_real = Series(w)
-        self.steer_raw = Series(w)
         self.steer_cmd = Series(w)
         self.heading_err = Series(w)
         self.cross_track = Series(w)
@@ -175,6 +184,12 @@ class Bridge(Node):
 
         self.tf_axis_cm = d("tf_axis_cm", 20.0).value
 
+        # 점군 거리색의 양 끝 [m]. 이 밖은 끝 색으로 뭉갠다.
+        # 고정값이라 차가 움직여도 같은 거리가 같은 색으로 남는다.
+        self.scan_near_m = d("scan.near_m", 0.0).value
+        self.scan_far_m = d("scan.far_m", 12.0).value
+        self.scan_size = d("scan.point_size", 3.0).value
+
 
     def _resolve_map(self, override: str) -> str:
         if override:
@@ -195,7 +210,16 @@ class Bridge(Node):
         return str(path)
 
     def _now(self):
-        return self.get_clock().now().nanoseconds * 1e-9
+        """기동 시점 기준 경과 초. 표시·신선도 판정에 쓰는 유일한 시각이다.
+
+        차이만 쓰는 곳(신선도·롤링 창)은 원점을 옮겨도 값이 안 변한다.
+        """
+        t = self.get_clock().now().nanoseconds * 1e-9
+        if self._t0 is None:
+            if t <= 0.0:
+                return 0.0
+            self._t0 = t
+        return t - self._t0
 
     # ------------------------------------------------------------------
     # 구독
@@ -208,10 +232,15 @@ class Bridge(Node):
         self.create_subscription(
             MarkerArray, t["obstacles"], self._on_markers, observe_qos())
 
-        # 발행측이 latched 다. 맞춰야 GUI 를 나중에 띄워도 전역 경로가 온다.
+        # latched 인 것은 /path/global (KauPath) 이고, 여기서 보는
+        # /viz/path/global (nav_msgs/Path) 은 아니다. 발행측이 RViz 기본에
+        # 맞춰 VOLATILE 로 낸다 (global_path_publisher.py 의 viz_pub 주석).
+        # TRANSIENT_LOCAL 로 구독하면 durability 가 안 맞아 **한 건도 안 온다**
+        # ("requesting incompatible QoS. No messages will be sent to it").
+        # 나중에 띄우면 다음 재발행까지 비지만 rate 1 Hz 라 최대 1 초다.
         self.create_subscription(
             Path, t["path_global"],
-            lambda m: self._on_path(m, self.path_global), latched_qos())
+            lambda m: self._on_path(m, self.path_global), observe_qos())
         self.create_subscription(
             Path, t["path_local"],
             lambda m: self._on_path(m, self.path_local), observe_qos())
@@ -246,13 +275,16 @@ class Bridge(Node):
             return
         idx = np.nonzero(ok)[0]
         a = m.angle_min + m.angle_increment * idx
-        lx, ly = r[idx] * np.cos(a), r[idx] * np.sin(a)
+        rr = r[idx]
+        lx, ly = rr * np.cos(a), rr * np.sin(a)
         c, s = math.cos(yaw), math.sin(yaw)
         xs = (tx + c * lx - s * ly) * CM_PER_M
         ys = (ty + s * lx + c * ly) * CM_PER_M
 
+        # 거리는 변환 전 원본 range [m] 다. 색 기준이 화면 좌표가 아니라
+        # 센서로부터의 실제 거리여야 차가 움직여도 색이 안 흔들린다.
         with self._lock:
-            self.scan.set((xs, ys), self._now())
+            self.scan.set((xs, ys, rr), self._now())
 
     def _on_markers(self, m: MarkerArray):
         out = []
@@ -288,6 +320,10 @@ class Bridge(Node):
     def _on_steering(self, m: Float64):
         # /steering 은 rad. 플롯은 deg 로 통일한다. max_steer_deg(20) 와
         # 눈으로 바로 대조하려면 deg 여야 한다.
+        #
+        # 이것이 조향 패널이 그리는 유일한 계열이다. 추종 실패 tick 에
+        # steer_controller 가 내는 0 도 그대로 들어온다 -- 실제로 차량에
+        # 나간 값이므로 감추지 않는다 (SteerDebug 계열과 다른 점이다).
         with self._lock:
             self.steer_cmd.push(self._now(), m.data * RAD2DEG)
 
@@ -298,7 +334,6 @@ class Bridge(Node):
             # 오차가 사라진 것처럼 보인다. 값을 넣지 않고 선을 끊는다.
             if not m.tracking_ok:
                 return
-            self.steer_raw.push(t, m.raw_steer_deg)
             self.heading_err.push(t, m.heading_error_rad * RAD2DEG)
             self.cross_track.push(t, m.cross_track_cm)
 
@@ -351,7 +386,6 @@ class Bridge(Node):
                 "series": {
                     "speed_target": self.speed_target.arrays(),
                     "speed_real": self.speed_real.arrays(),
-                    "steer_raw": self.steer_raw.arrays(),
                     "steer_cmd": self.steer_cmd.arrays(),
                     "heading_err": self.heading_err.arrays(),
                     "cross_track": self.cross_track.arrays(),

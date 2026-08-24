@@ -34,7 +34,7 @@ COL_KNOT = "#111111"
 COL_CTRL = "#bbbbbb"
 
 # --- 실차 전용 ---
-COL_SCAN = "#8c8c8c"       # LiDAR 점군. 배경으로 물러나야 하므로 회색
+COL_SCAN = "#8c8c8c"       # LiDAR 점군 단색 (거리색을 끌 때만 쓴다)
 COL_OBS = "#ff7f0e"        # object detection. 주황
 
 # TF 축 색은 ROS 표준을 따른다. x=빨강 y=초록 (z 는 2D 라 생략)
@@ -64,8 +64,24 @@ def map_plot(win, row: int = 0, col: int = 0, rowspan: int = 1,
     return p
 
 
+class SecondAxis(pg.AxisItem):
+    """시간축을 "12초" 처럼 읽는다.
+
+    기본 AxisItem 은 눈금값의 자릿수를 축 범위가 아니라 절대값으로 정한다.
+    GUI 가 벽시계로 돌면 t 가 1.78e9 라 30 초 창을 구분하려고 소수점 8 자리를
+    찍는다. bridge 가 시각을 기동 시점 기준 상대초로 주므로(Bridge._now)
+    값 자체는 이미 작지만, 단위를 붙여 두면 축이 무엇인지 바로 보인다.
+    """
+
+    def tickStrings(self, values, scale, spacing):
+        if spacing >= 1.0:
+            return [f"{v:.0f}초" for v in values]
+        digits = max(0, int(math.ceil(-math.log10(spacing))))
+        return [f"{v:.{digits}f}초" for v in values]
+
+
 def stack_plots(win, panels, col: int = 0, row0: int = 0,
-                xlabel: str = "t [s]"):
+                xlabel: str = "t"):
     """(key, ylabel) 목록 -> 세로로 쌓인 plot dict. x 축 연동.
 
     x 눈금 값은 맨 아래 하나만 보인다. 전 plot 이 같은 시간창을 쓰므로
@@ -73,7 +89,8 @@ def stack_plots(win, panels, col: int = 0, row0: int = 0,
     """
     out, first = {}, None
     for i, (key, ylabel) in enumerate(panels):
-        p = win.addPlot(row=row0 + i, col=col)
+        p = win.addPlot(row=row0 + i, col=col,
+                        axisItems={"bottom": SecondAxis(orientation="bottom")})
         p.showGrid(x=True, y=True, alpha=0.3)
         p.setLabel("left", ylabel)
         p.addItem(pg.InfiniteLine(angle=0, pos=0.0,
@@ -159,6 +176,77 @@ class TfChain:
             xs.append(pose[0])
             ys.append(pose[1])
         self.link.setData(xs, ys)
+
+
+# --------------------------------------------------------------------------
+# LiDAR 점군 (거리색)
+# --------------------------------------------------------------------------
+
+# 팔레트를 이 개수로 잘라 QBrush 를 미리 만들어 둔다. 점마다 QBrush 를 새로
+# 만들면 720 점 x 10 Hz = 초당 7200 개가 생겼다 사라진다. 64 단계면 12 m
+# 범위에서 한 칸이 19 cm 라 눈으로는 연속으로 보인다.
+SCAN_LUT_N = 64
+
+
+def rainbow_rgb(t: float):
+    """0..1 -> (r, g, b) 0..255. rviz 의 getRainbowColor 와 같은 식이다.
+
+    보라(가까움) -> 파랑 -> 청록 -> 초록 -> 노랑 -> 빨강(멀리). rviz 에서
+    PointCloud2 를 rainbow 로 놓고 본 것과 같은 색이 같은 거리를 가리키도록
+    구현을 그대로 옮겼다 (rviz_common/src/rviz_common/properties/color_map.cpp).
+    """
+    t = 0.0 if t < 0.0 else (1.0 if t > 1.0 else t)
+    h = t * 5.0 + 1.0
+    i = int(h)
+    f = h - i
+    if not (i & 1):                      # 짝수 구간은 진행 방향이 반대다
+        f = 1.0 - f
+    n = 1.0 - f
+    if i <= 1:
+        r, g, b = n, 0.0, 1.0
+    elif i == 2:
+        r, g, b = 0.0, n, 1.0
+    elif i == 3:
+        r, g, b = 0.0, 1.0, n
+    elif i == 4:
+        r, g, b = n, 1.0, 0.0
+    else:
+        r, g, b = 1.0, n, 0.0
+    return int(r * 255), int(g * 255), int(b * 255)
+
+
+class ScanCloud:
+    """LiDAR 점군을 센서로부터의 거리로 색칠해 그린다.
+
+    색 기준은 **화면 좌표가 아니라 측정 거리(range)** 다. 차가 움직여도 같은
+    거리의 벽은 같은 색으로 남아, 어느 반사가 가까운 것인지 한눈에 보인다.
+
+    거리 범위는 고정이다. rviz 는 기본이 매 프레임 min/max 자동인데, 그러면
+    차가 벽에 다가갈 때마다 온 화면 색이 같이 흔들려 거리를 못 읽는다.
+    """
+
+    def __init__(self, plot, size: float = 3.0,
+                 near_m: float = 0.0, far_m: float = 12.0):
+        self.near = float(near_m)
+        self.far = float(far_m)
+        self._span = max(self.far - self.near, 1e-6)
+        self._lut = [pg.mkBrush(*rainbow_rgb(i / (SCAN_LUT_N - 1)))
+                     for i in range(SCAN_LUT_N)]
+        self._item = pg.ScatterPlotItem(pen=None, size=size, pxMode=True)
+        plot.addItem(self._item)
+
+    def update(self, xs, ys, dists):
+        """xs·ys 는 화면 cm, dists 는 센서로부터의 거리 m."""
+        if xs is None or len(xs) == 0:
+            self._item.setData([], [])
+            return
+        idx = np.clip((np.asarray(dists) - self.near) / self._span, 0.0, 1.0)
+        idx = (idx * (SCAN_LUT_N - 1)).astype(np.intp)
+        lut = self._lut
+        self._item.setData(x=xs, y=ys, brush=[lut[i] for i in idx])
+
+    def clear(self):
+        self._item.setData([], [])
 
 
 # --------------------------------------------------------------------------

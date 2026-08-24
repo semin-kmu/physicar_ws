@@ -16,7 +16,9 @@ bool    tracking_ok
 
 uint8   path_source          # kau_msgs/KauPath 의 SRC_* 와 동일
 
-float64 raw_steer_deg        # [deg] Pure Pursuit 원출력. max_steer clamp 전
+# 최종 출력만 낸다. clamp 전 원출력(raw_steer_deg)은 2026-08-24 에 뺐다 --
+# 실제로 나가는 값과 다른 수치가 같이 그려지면 어느 쪽이 차량에 갔는지
+# 헷갈린다. 조향 포화는 이 값이 +-max_steer_deg 에 붙는 것으로 알 수 있다.
 float64 cmd_steer_deg        # [deg] clamp 후. /steering 과 같은 값 (rad 변환 전)
 float64 lookahead_cm         # [cm] Ld. valid_length 절단까지 반영한 최종값
 float64 heading_error_rad    # [rad] 차량 yaw - 경로 접선. 좌측 +

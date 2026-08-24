@@ -83,3 +83,44 @@ def test_reject_unknown_when():
         {'name': 'a', 'package': 'p', 'executable': 'e', 'when': 'gazebo'}]}]}
     with pytest.raises(ValueError, match='when 은'):
         parse_manifest(data)
+
+
+
+def _spec(**extra):
+    """MINIMAL 노드에 키를 얹어 NodeSpec 하나를 얻는다."""
+    node = {'name': 'a', 'package': 'p', 'executable': 'e', **extra}
+    data = {'run': {'log_dir': '/tmp'}, 'stages': [{'id': 1, 'nodes': [node]}]}
+    return parse_manifest(data).stages[0].nodes[0]
+
+
+def test_supervision_fields():
+    """respawn·critical 은 launch 의 respawn / on_exit=Shutdown 을 옮긴 것이다."""
+    spec = _spec(respawn=True, respawn_delay=5.0, critical=True)
+    assert spec.respawn is True
+    assert spec.respawn_delay == 5.0
+    assert spec.critical is True
+
+
+def test_supervision_defaults():
+    """안 적으면 감독하지 않는다. 기본 대기는 ekf.launch.py 와 같은 2 초."""
+    spec = parse_manifest(MINIMAL).stages[0].nodes[0]
+    assert spec.respawn is False
+    assert spec.critical is False
+    assert spec.respawn_delay == 2.0
+
+
+def test_reject_gate_with_respawn():
+    """관문은 끝나는 게 정상이라 되살리면 무한 반복이 된다."""
+    with pytest.raises(ValueError, match='관문'):
+        _spec(wait=True, respawn=True)
+
+
+def test_reject_gate_with_critical():
+    """관문의 정상 종료를 사망으로 보면 매번 전체가 내려간다."""
+    with pytest.raises(ValueError, match='관문'):
+        _spec(wait=True, critical=True)
+
+
+def test_reject_negative_respawn_delay():
+    with pytest.raises(ValueError, match='respawn_delay'):
+        _spec(respawn=True, respawn_delay=-1.0)

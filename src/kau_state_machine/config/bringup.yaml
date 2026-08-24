@@ -16,6 +16,12 @@
 #   wait         true 면 **관문**. 이 프로세스가 끝날 때까지 다음으로 안 넘어가고,
 #                종료 코드가 0 이 아니면 기동을 중단한다
 #   when         always(기본) · sim · real. 시계 소스로만 가른다
+#   respawn      죽으면 respawn_delay(기본 2.0) 초 뒤 다시 띄운다.
+#                launch 의 Node(respawn=True) 와 같은 뜻
+#   critical     죽으면 기동 전체를 내린다. launch 의 on_exit=Shutdown 과 같은 뜻
+#
+# respawn·critical 은 노드 파라미터가 아니라 **프로세스 감독 정책**이다.
+# 담당자 launch 파일이 갖고 있던 것을 여기로 옮겨 적은 것이라 여기 있는 게 맞다.
 #
 # 단계 필드
 #   id           단계 번호 (로그 표시용)
@@ -63,6 +69,11 @@ stages:
         package: kau_localization
         executable: platform_ekf_pause.py
         ros: false
+        # ekf.launch.py 는 이 프로세스에 on_exit=Shutdown 을 걸어 둔다.
+        # 감시자가 물러나면 플랫폼 EKF 가 깨어나 odom -> base_footprint 를
+        # 우리 EKF 와 같이 쏘거나, 우리 EKF 없이 플랫폼 기본 설정(yaw 랜덤워크)
+        # 으로 조용히 되돌아간다. 둘 다 로그 없이 나빠지는 형태라 전체를 내린다.
+        critical: true
         args:
           - physicar_bringup/config/ekf_params.yaml
           - "@kau_localization:config/ekf.yaml"
@@ -76,6 +87,12 @@ stages:
         executable: ekf_node
         param_files: ["kau_localization:config/ekf.yaml"]
         remap: { odometry/filtered: /odom }
+        # ekf.launch.py 의 Node(respawn=True, respawn_delay=2.0) 와 짝이다.
+        # robot_localization 은 시계가 거꾸로 뛰면 프로세스는 살아 있는 채로
+        # 발행만 멈춘다. 단계 1 의 감시자가 그걸 보고 이 노드를 죽이는데,
+        # 되살리는 쪽이 없으면 복구 사슬이 여기서 끊긴다.
+        respawn: true
+        respawn_delay: 2.0
 
   # 단계 3 · map -> odom
   #
@@ -84,6 +101,8 @@ stages:
   - id: 3
     delay_sec: 3.0
     nodes:
+      # yaml_filename 은 지도 파일의 절대경로라 amcl.yaml 에 못 적는다.
+      # 여기가 amcl.launch.py 의 map:=kau_v3 에 해당하는 자리다.
       - name: map_server
         package: nav2_map_server
         executable: map_server
@@ -91,21 +110,14 @@ stages:
         params:
           yaml_filename: "@kau_localization:maps/kau_v3.yaml"
 
+      # 초기 위치(set_initial_pose · initial_pose)는 amcl.yaml 에 있다.
+      # 안 주면 amcl 이 map -> odom 을 아예 안 내고 map 프레임이 없어서
+      # local_planner 와 컨트롤러까지 같이 선다. scan_topic 도 그 파일이
+      # 이미 /scan 이라 여기서 다시 주지 않는다.
       - name: amcl
         package: nav2_amcl
         executable: amcl
         param_files: ["kau_localization:config/amcl.yaml"]
-        params:
-          scan_topic: /scan
-          # 초기 위치를 안 주면 amcl 은 map -> odom 을 아예 안 낸다
-          # ("cannot publish a pose ... Please set the initial pose"). 그러면
-          # map 프레임 자체가 없어서 local_planner 까지 같이 선다.
-          # 값은 amcl.launch.py 사용 예의 start_pose:="0.23,-0.02,0.0" 과 같다.
-          # 다른 자리에서 출발하면 여기를 고치거나 RViz 로 /initialpose 를 찍는다.
-          set_initial_pose: true
-          initial_pose.x: 0.23
-          initial_pose.y: -0.02
-          initial_pose.yaw: 0.0
 
       - name: map_amcl_lifecycle_manager
         package: nav2_lifecycle_manager
@@ -116,10 +128,10 @@ stages:
   - id: 4
     delay_sec: 3.0
     nodes:
-      - name: laser_scan_validator
-        package: kau_object_detection
-        executable: laser_scan_validator_node
-        param_files: ["kau_object_detection:config/laser_scan_validator.yaml"]
+      # laser_scan_validator 는 넣지 않는다. /scan 의 모양(빔 수 · 프레임 ·
+      # intensity)을 검사해 로그만 찍는 진단 노드라 아무것도 발행하지 않고,
+      # 담당자 상시 스택에도 없다 (자기 launch 로 필요할 때만 띄운다).
+      #   ros2 launch kau_object_detection laser_scan_validator.launch.py
 
       - name: laser_scan_clusterer
         package: kau_object_detection
@@ -134,26 +146,56 @@ stages:
         executable: start_signal_detector_node
         param_files: ["kau_object_detection:config/start_signal_detector.yaml"]
 
+      # Gazebo 는 /camera/camera_info 를 내지만 플랫폼 브리지가 그것만 빼고
+      # 넘긴다 (image_raw·scan·imu·clock 은 넘긴다). 노드는 CameraInfo 가
+      # 와야 undistort 를 시작하므로, 없으면 "Waiting for CameraInfo..." 만
+      # 찍으며 /lane/center 를 영영 안 낸다 -- 프로세스는 살아 있어서 생존
+      # 판정에도 안 걸린다 (실측 2026-08-24).
+      #
+      # lane_detection.launch.py 가 같은 브리지를 camera_info_bridge 기본
+      # true 로 띄운다. 인자 문자열도 그 파일과 글자까지 같게 둔다.
+      # sim 전용이다. 실차 카메라는 자기 드라이버가 CameraInfo 를 낸다.
+      - name: camera_info_bridge
+        package: ros_gz_bridge
+        executable: parameter_bridge
+        when: sim
+        args:
+          - "/camera/camera_info@sensor_msgs/msg/CameraInfo@gz.msgs.CameraInfo"
+
       # pan_search_enable 은 lane_detection.yaml 이 이미 true 다.
       - name: kau_lane_detection_node
         package: kau_lane_detection
         executable: kau_lane_detection_node
         param_files: ["kau_lane_detection:config/lane_detection.yaml"]
 
+      # BEV 화면과 차선 검출 현황을 보는 웹 뷰어 (http://localhost:5000).
+      # lane_detection.launch.py 가 viewer 기본 true 로 같이 띄운다. 관측
+      # 전용이라 없어도 주행은 되지만, 차선 인지를 눈으로 확인할 수단이
+      # 이것뿐이라 담당자 스택과 맞춰 둔다. 끄려면 이 블록을 지운다.
+      - name: kau_lane_detection_viewer
+        package: kau_lane_detection
+        executable: lane_viewer.py
+
   # 단계 5 · 전역 경로
   - id: 5
     delay_sec: 2.0
     nodes:
+      # route·rate·topic 등은 global_path.yaml 에 있다. path 만 여기서 준다 --
+      # 파일 위치라 설치 트리마다 절대경로가 달라 정적 yaml 에 못 적는다.
+      # 다른 주행선을 쓰려면 right_bias_lane.yaml 처럼 파일명만 바꾼다
+      # (global_path.launch.py 의 lane:= 인자와 같은 선택이다).
       - name: global_path_publisher
         package: kau_global_path
         executable: global_path_publisher.py
+        param_files: ["kau_global_path:config/global_path.yaml"]
         params:
           path: "@kau_global_path:config/lane_graph.yaml"
 
-      - name: global_avoidance_publisher
-        package: kau_global_path
-        executable: global_avoidance_publisher.py
-        param_files: ["kau_global_path:config/global_avoidance.yaml"]
+      # global_avoidance_publisher 는 넣지 않는다. /path/global_avoidance 를
+      # 내는데 **구독자가 없다** -- local_planner 는 /path/global 을 보고 스스로
+      # 회피한다. 담당자도 avoidance:=false 로 끄고 쓴다.
+      # 다시 쓰려면 여기에 되살리고 소비하는 쪽을 먼저 만든다.
+      #   ros2 launch kau_global_path global_path.launch.py avoidance:=true
 
   # 단계 6 · 지역 경로. global path + 인지 입력이 있어야 한다
   - id: 6

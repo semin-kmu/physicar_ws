@@ -25,13 +25,14 @@
 """
 
 import math
+import signal
 import sys
 from pathlib import Path
 
 import rclpy
-from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.signals import SignalHandlerOptions
 
 import yaml
 from ament_index_python.packages import get_package_share_directory
@@ -285,7 +286,17 @@ class GlobalPathPublisher(Node):
 
 
 def main():
-    rclpy.init()
+    """SIGINT/SIGTERM 을 직접 받아 곱게 내려온다.
+
+    rclpy 기본 신호 처리는 컨텍스트를 **비동기로** 내린다. 신호가 온 직후
+    타이머 콜백이 한 번 더 돌면 이미 죽은 발행자에 publish 하게 되어
+    RCLError("publisher's context is invalid") 로 터진다. ExternalShutdownException
+    이 아니라서 안 잡히고, 종료 코드가 0 이 아니게 되어 kau_state_machine
+    supervisor 의 사망 판정을 오염시킨다 (global_avoidance_publisher.py 의 같은 주석 참고).
+
+    신호를 직접 받아 루프를 빠져나오면 그 창 자체가 없다.
+    """
+    rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
     try:
         node = GlobalPathPublisher()
     except LaneGraphError as e:
@@ -293,11 +304,19 @@ def main():
         rclpy.try_shutdown()
         return 1
 
+    alive = [True]
+
+    def stop(_signum, _frame):
+        alive[0] = False
+
+    signal.signal(signal.SIGINT, stop)
+    signal.signal(signal.SIGTERM, stop)
+
     try:
-        rclpy.spin(node)
-    except (KeyboardInterrupt, ExternalShutdownException):
-        pass
+        while alive[0] and rclpy.ok():
+            rclpy.spin_once(node, timeout_sec=0.1)
     finally:
+        node.destroy_node()
         rclpy.try_shutdown()
     return 0
 

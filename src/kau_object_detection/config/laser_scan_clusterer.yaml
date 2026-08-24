@@ -1,6 +1,7 @@
 laser_scan_clusterer:
   ros__parameters:
-    use_sim_time: true
+    # use_sim_time 은 여기 두지 않는다. 이 파일에 박아 두면 실기에서 끌 방법이
+    # 없다 (/clock 이 없어 now() 가 0 에 멈춘다). launch 인자나 -p 로 준다.
     input_topic: /scan_filtered
     expected_frame_id: lidar_link
     minimum_sample_count: 2

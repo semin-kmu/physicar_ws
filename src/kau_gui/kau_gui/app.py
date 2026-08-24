@@ -32,22 +32,32 @@ from . import viz                    # noqa: E402
 from .bridge import Bridge           # noqa: E402
 
 # full_simulation.PANELS 와 같은 구성 · 같은 순서 · 같은 라벨
+#
+# steer 는 /steering 을 그대로 그린다 -- 차량에 실제로 나간 값이다.
+# 예전에는 clamp 전 원출력(SteerDebug.raw_steer_deg)을 같이 겹쳐 그렸는데,
+# 실제로 나가지 않은 수치가 나란히 보여 어느 쪽이 명령인지 헷갈렸다.
+# 조향 포화는 선이 +-max_steer_deg(20) 에 붙는 것으로 그대로 보인다.
 PANELS = [
     ("speed_target", "speed [m/s]"),
-    ("steer_raw", "steer [deg]"),
+    ("steer_cmd", "steer [deg]"),
     ("cross_track", "CTE [cm]"),
     ("heading_err", "\u03b8_err [deg]"),
 ]
 
-COL_REF, COL_TRUTH_ERR, COL_EMA = "#1f77b4", "#d62728", "#2ca02c"
+COL_REF, COL_EMA = "#1f77b4", "#2ca02c"
 
 # 같은 패널에 겹쳐 그리는 보조 계열. key -> (보조 key, 색, 점선 여부)
 OVERLAY = {
     "speed_target": ("speed_real", COL_EMA, False),
-    "steer_raw": ("steer_cmd", COL_TRUTH_ERR, True),
 }
 
 STALE_S = 1.0
+
+# 선 굵기. 겹쳐 그리는 것이 많아 얇게 둔다 -- 굵으면 경로 세 개가
+# 서로를 가려 어느 것이 위에 있는지 안 보인다.
+W_PLOT = 1.5        # 좌측 지표 그래프
+W_PATH = 1.2        # 전역 경로 (배경)
+W_PATH_HI = 2.0     # lane · local (주목 대상)
 
 EMPTY = (np.empty(0), np.empty(0))
 
@@ -62,9 +72,9 @@ def _run(bridge: Bridge, fps: float) -> None:
         if key in OVERLAY:
             alt, col, dashed = OVERLAY[key]
             style = QtCore.Qt.DotLine if dashed else QtCore.Qt.SolidLine
-            curves[alt] = p.plot([], [], pen=pg.mkPen(col, width=2,
+            curves[alt] = p.plot([], [], pen=pg.mkPen(col, width=W_PLOT,
                                                       style=style))
-        curves[key] = p.plot([], [], pen=pg.mkPen(COL_REF, width=2))
+        curves[key] = p.plot([], [], pen=pg.mkPen(COL_REF, width=W_PLOT))
 
     m = viz.map_plot(win, row=0, col=1, rowspan=len(PANELS), title="map")
 
@@ -75,15 +85,15 @@ def _run(bridge: Bridge, fps: float) -> None:
             # 배경이 없다고 GUI 를 죽이지 않는다. 나머지는 그대로 보인다.
             print(f"[kau_gui] 맵 배경 로드 실패 ({bridge.map_yaml}): {e}")
 
-    scan_pts = m.plot([], [], pen=None, symbol="o", symbolSize=2,
-                      symbolBrush=viz.COL_SCAN, symbolPen=None)
-    global_line = m.plot([], [], pen=pg.mkPen(viz.COL_GLOBAL, width=2))
-    lane_line = m.plot([], [], pen=pg.mkPen(viz.COL_LANE, width=3))
-    local_line = m.plot([], [], pen=pg.mkPen(viz.COL_LOCAL, width=3))
+    scan = viz.ScanCloud(m, size=bridge.scan_size,
+                         near_m=bridge.scan_near_m, far_m=bridge.scan_far_m)
+    global_line = m.plot([], [], pen=pg.mkPen(viz.COL_GLOBAL, width=W_PATH))
+    lane_line = m.plot([], [], pen=pg.mkPen(viz.COL_LANE, width=W_PATH_HI))
+    local_line = m.plot([], [], pen=pg.mkPen(viz.COL_LOCAL, width=W_PATH_HI))
     obstacles = viz.Obstacles(m, color=viz.COL_OBS)
     tf = viz.TfChain(m, ("map", "odom", "base_link"),
                      length_cm=bridge.tf_axis_cm)
-    body = m.plot([], [], pen=pg.mkPen(viz.COL_CAR, width=2))
+    body = m.plot([], [], pen=pg.mkPen(viz.COL_CAR, width=W_PATH_HI))
     m.disableAutoRange()
 
     state = {"paused": False}
@@ -105,8 +115,11 @@ def _run(bridge: Bridge, fps: float) -> None:
         def fresh(stamp, timeout=STALE_S):
             return stamp is not None and (now - stamp) <= timeout
 
-        xy, st = s["scan"]
-        scan_pts.setData(*(xy if xy is not None and fresh(st) else EMPTY))
+        pts, st = s["scan"]
+        if pts is not None and fresh(st):
+            scan.update(*pts)
+        else:
+            scan.clear()
 
         # 전역 경로는 latched 라 한 번만 온다. 다른 것과 같은 잣대로 재면 안 된다.
         xy, _ = s["path_global"]

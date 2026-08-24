@@ -17,7 +17,10 @@
 from pathlib import Path
 
 from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -25,6 +28,9 @@ def generate_launch_description():
     detection_parameter_file = config_directory / 'laser_scan_clusterer.yaml'
     track_parameter_file = config_directory / 'amet_2026_track.yaml'
     return LaunchDescription([
+        # 시계 소스는 launch 인자로만 정한다 (laser_scan_validator.launch.py 주석 참고).
+        DeclareLaunchArgument(
+            'use_sim_time', default_value='true', description='Gazebo 는 true, 실기는 false.'),
         Node(
             package='kau_object_detection',
             executable='laser_scan_clusterer_node',
@@ -33,6 +39,8 @@ def generate_launch_description():
             parameters=[
                 str(detection_parameter_file),
                 str(track_parameter_file),
+                {'use_sim_time': ParameterValue(
+                    LaunchConfiguration('use_sim_time'), value_type=bool)},
             ],
         ),
     ])

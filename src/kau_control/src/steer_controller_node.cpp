@@ -179,19 +179,18 @@ private:
 
         const Point2 tgt = cv.point(cv.lookahead(r.s, ld));
 
-        // clamp 전후를 나눠 둔다. 둘이 갈라지는 구간이 곧 조향 포화이고,
-        // 이건 튜닝할 때 가장 먼저 봐야 하는 신호다.
-        const double raw = pure_pursuit::steerCommand(
-            r.x, r.y, r.yaw, tgt.x, tgt.y, ld, vehicle_);
-
-        const double deg =
-            std::clamp(raw, -vehicle_.max_steer, vehicle_.max_steer);
+        // 조향 포화는 deg 가 +-max_steer 에 붙는 것으로 드러난다. clamp 전
+        // 원출력은 밖으로 내보내지 않는다 (SteerDebug.msg 주석 참고).
+        const double deg = std::clamp(
+            pure_pursuit::steerCommand(
+                r.x, r.y, r.yaw, tgt.x, tgt.y, ld, vehicle_),
+            -vehicle_.max_steer, vehicle_.max_steer);
 
         publishSteering(deg2rad(deg));
 
         publishVizTarget(tgt);
 
-        publishDebug(r, raw, deg, ld);
+        publishDebug(r, deg, ld);
 
         RCLCPP_DEBUG_THROTTLE(
             get_logger(), *get_clock(), 500,
@@ -261,8 +260,7 @@ private:
     }
 
     // 값은 전부 위에서 이미 구한 것이다. 여기서 새로 계산하지 않는다.
-    void publishDebug(
-        const TrackResult & r, double raw_deg, double cmd_deg, double ld)
+    void publishDebug(const TrackResult & r, double cmd_deg, double ld)
     {
         if (!debug_pub_)
         {
@@ -278,8 +276,6 @@ private:
         m.tracking_ok = true;
 
         m.path_source = tracker_.source();
-
-        m.raw_steer_deg = raw_deg;
 
         m.cmd_steer_deg = cmd_deg;
 

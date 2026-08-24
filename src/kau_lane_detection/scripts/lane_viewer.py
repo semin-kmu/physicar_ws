@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import os
+import signal
 import threading
 import time
 import socket
@@ -10,6 +11,7 @@ import cv2
 
 import rclpy
 from rclpy.node import Node
+from rclpy.signals import SignalHandlerOptions
 
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
@@ -448,8 +450,24 @@ def main(args=None):
     # ROS2
     # ------------------------------------------------------------
 
+    # SIGINT/SIGTERM 을 직접 받는다.
+    #
+    # rclpy 기본 신호 처리(SignalHandlerOptions.ALL)는 컨텍스트를 **비동기로**
+    # 내린다. 그러면 아래 두 가지가 연달아 터진다.
+    #   1. rclpy.spin() 이 ExternalShutdownException 을 던진다 (여기서는
+    #      KeyboardInterrupt 만 잡고 있어서 그대로 빠져나간다)
+    #   2. finally 의 rclpy.shutdown() 이 이미 내려간 컨텍스트를 또 내리려다
+    #      RCLError("rcl_shutdown already called") 로 터진다
+    #
+    # 그래서 종료 코드가 1 이 되고, kau_state_machine supervisor 의 사망
+    # 판정이 오염된다 (실측 2026-08-24: 종료 시 rc=1).
+    #
+    # 신호를 직접 받아 루프를 빠져나오면 그 창 자체가 없다. 웹서버 스레드는
+    # daemon 이라 알아서 죽지만, 포트를 바로 놓아주도록 stop_view() 로
+    # 명시해 내린다 (다시 띄울 때 "port 5000 is already in use" 방지).
     rclpy.init(
-        args=args
+        args=args,
+        signal_handler_options=SignalHandlerOptions.NO
     )
 
 
@@ -470,9 +488,28 @@ def main(args=None):
 
         viewer_node.destroy_node()
 
-        rclpy.shutdown()
+        rclpy.try_shutdown()
 
         return
+
+
+    alive = [True]
+
+
+    def stop(_signum, _frame):
+
+        alive[0] = False
+
+
+    signal.signal(
+        signal.SIGINT,
+        stop
+    )
+
+    signal.signal(
+        signal.SIGTERM,
+        stop
+    )
 
 
     try:
@@ -481,14 +518,12 @@ def main(args=None):
         # ROS spin
         # --------------------------------------------------------
 
-        rclpy.spin(
-            viewer_node
-        )
+        while alive[0] and rclpy.ok():
 
-
-    except KeyboardInterrupt:
-
-        pass
+            rclpy.spin_once(
+                viewer_node,
+                timeout_sec=0.1
+            )
 
 
     finally:
@@ -503,7 +538,7 @@ def main(args=None):
         viewer_node.destroy_node()
 
 
-        rclpy.shutdown()
+        rclpy.try_shutdown()
 
 
 # ================================================================

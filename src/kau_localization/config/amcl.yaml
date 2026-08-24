@@ -185,10 +185,22 @@ amcl:
 
     # 시작 위치. launch 의 start_pose 인자가 이 값을 덮어쓴다.
     # 지도 origin 이 [-3.79, -1.76] 이라 (0,0,0) 은 방 한가운데가 아니다.
-    set_initial_pose: false
+    #
+    # 2026-08-24: false + (0,0,0) 에서 아래 값으로 바꿨다. 초기 위치를 안 주면
+    # AMCL 은 map -> odom 을 아예 발행하지 않고 ("cannot publish a pose ...
+    # Please set the initial pose") map 프레임 자체가 없어서 local_planner 와
+    # 컨트롤러까지 같이 선다. 그 값이 여기 없고 launch 인자에만 있어서,
+    # launch 를 안 쓰는 기동 경로(kau_state_machine)가 좌표를 자기 manifest 에
+    # 베껴 적고 있었다. 운용값이니 여기 있는 게 맞다.
+    #
+    # 값은 amcl.launch.py 사용 예의 start_pose:="0.23,-0.02,0.0" 과 같은
+    # 시뮬 스폰 지점이다. 다른 자리에서 출발하면 여기를 고치거나, RViz 의
+    # "2D Pose Estimate"(/initialpose) 로 덮어쓴다 -- always_reset_initial_pose
+    # 가 false 라 나중에 주입한 값이 살아남는다.
+    set_initial_pose: true
     initial_pose:
-      x: 0.0
-      y: 0.0
+      x: 0.23
+      y: -0.02
       z: 0.0
       yaw: 0.0
 
@@ -235,7 +247,11 @@ nomotion_updater:
 
 map_server:
   ros__parameters:
-    # yaml_filename 은 launch 가 map 인자로 넣는다.
+    # yaml_filename 은 이 파일에 두지 않는다. 지도 파일의 **절대경로**라
+    # 설치 트리마다 값이 달라서, 정적 yaml 에 적으면 다른 사람 환경에서 깨진다.
+    # 부르는 쪽이 채운다:
+    #   launch  ->  map:=kau_v3 인자 (기본값 없음. 지도 없이 측위는 무의미하다)
+    #   bringup ->  params 의 @kau_localization:maps/kau_v3.yaml
     topic_name: "map"
     frame_id: "map"
 

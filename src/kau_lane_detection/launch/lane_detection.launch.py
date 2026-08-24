@@ -26,6 +26,7 @@ ROS 쪽에는 image_raw 만 bridge 되어 있어서 camera_info 가 비어 있�
 
 주요 인자:
 
+    use_sim_time:=false         실기에서 실행할 때 (기본 true)
     camera_info_bridge:=false   다른 곳에서 이미 bridge 중일 때
     image_bridge:=true          image_raw 도 직접 bridge 해야 할 때
     viewer:=false               웹 뷰어(포트 5000) 없이 노드만
@@ -84,6 +85,8 @@ def generate_launch_description():
     image_bridge = LaunchConfiguration('image_bridge')
     viewer = LaunchConfiguration('viewer')
     pan_search = LaunchConfiguration('pan_search')
+    use_sim_time = ParameterValue(
+        LaunchConfiguration('use_sim_time'), value_type=bool)
 
     return LaunchDescription([
 
@@ -116,6 +119,14 @@ def generate_launch_description():
             'viewer',
             default_value='true',
             description='웹 뷰어(http://localhost:5000) 실행 여부',
+        ),
+
+        # 시계 소스. 없으면 rclcpp 기본값 false 라 시뮬에서도 이 노드만
+        # 벽시계로 돈다. 다른 런치들(ekf / amcl / global_path)과 같은 규칙이다.
+        DeclareLaunchArgument(
+            'use_sim_time',
+            default_value='true',
+            description='Gazebo 는 true, 실기는 false.',
         ),
 
         DeclareLaunchArgument(
@@ -169,6 +180,7 @@ def generate_launch_description():
                     # 여기서 넣지 않으면 나중에 켤 방법이 없다.
                     'pan_search_enable': ParameterValue(
                         pan_search, value_type=bool),
+                    'use_sim_time': use_sim_time,
                 },
             ],
         ),
@@ -182,6 +194,7 @@ def generate_launch_description():
             executable='lane_viewer.py',
             name='kau_lane_detection_viewer',
             output='screen',
+            parameters=[{'use_sim_time': use_sim_time}],
             condition=IfCondition(viewer),
         ),
     ])

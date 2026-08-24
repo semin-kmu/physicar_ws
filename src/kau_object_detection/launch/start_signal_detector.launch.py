@@ -20,6 +20,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -47,12 +48,16 @@ def generate_launch_description():
         default_value='info',
         description='Logger level of the detector node.',
     )
+    # 시계 소스는 launch 인자로만 정한다 (laser_scan_validator.launch.py 주석 참고).
+    use_sim_time_argument = DeclareLaunchArgument(
+        'use_sim_time', default_value='true', description='Gazebo 는 true, 실기는 false.')
 
     return LaunchDescription([
         parameter_file_argument,
         input_topic_argument,
         output_topic_argument,
         log_level_argument,
+        use_sim_time_argument,
         Node(
             package='kau_object_detection',
             executable='start_signal_detector_node',
@@ -63,6 +68,8 @@ def generate_launch_description():
                 {
                     'input_topic': LaunchConfiguration('input_topic'),
                     'output_topic': LaunchConfiguration('output_topic'),
+                    'use_sim_time': ParameterValue(
+                        LaunchConfiguration('use_sim_time'), value_type=bool),
                 },
             ],
             arguments=['--ros-args', '--log-level', LaunchConfiguration('log_level')],
