@@ -58,8 +58,13 @@ def _value(value) -> str:
     return text
 
 
-def build_argv(spec: NodeSpec) -> list:
-    """ROS 인자는 `--ros-args` 뒤에만 온다. ros=false 면 붙이지 않는다."""
+def build_argv(spec: NodeSpec, use_sim_time=None) -> list:
+    """ROS 인자는 `--ros-args` 뒤에만 온다. ros=false 면 붙이지 않는다.
+
+    use_sim_time 은 전 노드 공통값이라 여기서 주입한다 (docs/01 section 10:
+    시각 소스 불일치는 TF stamp 판정을 전부 무너뜨린다). 노드가 params 에
+    직접 적어두면 그쪽이 이긴다.
+    """
     argv = [resolve_exe(spec.package, spec.executable)]
     argv += [_value(arg) for arg in spec.args]
     if not spec.ros:
@@ -68,21 +73,25 @@ def build_argv(spec: NodeSpec) -> list:
     argv += ['--ros-args', '-r', f'__node:={spec.name}']
     for ref in spec.param_files:
         argv += ['--params-file', resolve_ref(ref)]
-    for key, value in spec.params.items():
+
+    params = dict(spec.params)
+    if use_sim_time is not None:
+        params.setdefault('use_sim_time', bool(use_sim_time))
+    for key, value in params.items():
         argv += ['-p', f'{key}:={_value(value)}']
     for src, dst in spec.remap.items():
         argv += ['-r', f'{src}:={dst}']
     return argv
 
 
-def spawn(spec: NodeSpec, log_dir: str) -> Child:
+def spawn(spec: NodeSpec, log_dir: str, use_sim_time=None) -> Child:
     """별도 세션으로 띄운다. 종료 시 killpg 로 자손까지 정리하기 위함.
 
     PR_SET_PDEATHSIG(01 section 9-1)는 preexec_fn 이 필요한데 스레드에서
     fork 하면 안전하지 않다. 미구현 — supervisor 가 kill -9 로 죽으면 고아가
     남는다 (01 시나리오 5). 복구 단계에서 exec 래퍼로 처리한다.
     """
-    argv = build_argv(spec)
+    argv = build_argv(spec, use_sim_time)
     log = open(os.path.join(log_dir, f'{spec.name}.out'), 'ab')
     try:
         proc = subprocess.Popen(

@@ -34,6 +34,9 @@ class SystemSupervisor(Node):
         manifest_path = self.get_parameter('bringup_yaml').value
         self._manifest = load_manifest(manifest_path)
 
+        # use_sim_time 은 rclpy 가 자동 선언한다. 기본값은 launch 가 준다.
+        self._use_sim_time = bool(self.get_parameter('use_sim_time').value)
+
         run_id = self.get_parameter('run_id').value or make_run_id()
         self._log_dir = resolve_log_dir(self._manifest.log_dir, run_id)
 
@@ -43,6 +46,7 @@ class SystemSupervisor(Node):
 
         log('supervisor', f'manifest={manifest_path}')
         log('supervisor', f'log_dir={self._log_dir}')
+        log('supervisor', f'use_sim_time={self._use_sim_time}')
 
         # spawn 은 블로킹이므로 spin 과 분리한다 (01 section 7-2).
         self._thread = threading.Thread(target=self._bringup, daemon=True)
@@ -59,7 +63,7 @@ class SystemSupervisor(Node):
             spawned = []
             for spec in stage.nodes:
                 try:
-                    child = spawn(spec, self._log_dir)
+                    child = spawn(spec, self._log_dir, self._use_sim_time)
                 except Exception as exc:  # noqa: BLE001
                     err('bringup', f'중단 · {spec.name} 실행 불가: {exc}')
                     return

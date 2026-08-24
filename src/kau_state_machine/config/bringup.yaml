@@ -9,6 +9,8 @@
 #   ros          false 면 --ros-args 를 붙이지 않는다 (ROS 노드가 아닌 프로세스)
 #   param_files  "pkg:share상대경로". **값이 아니라 위치만** 적는다
 #   params       -p key:=value. 값이 @pkg:경로 면 절대경로로 치환
+#                use_sim_time 은 여기 적지 않는다. launch 인자로 전 노드에
+#                일괄 주입된다 (docs/01 section 10: 시각 소스 일치)
 #   remap        -r from:=to
 #   args         --ros-args 앞에 붙는 인자
 #
@@ -46,7 +48,6 @@ stages:
         package: robot_localization
         executable: ekf_node
         param_files: ["kau_localization:config/ekf.yaml"]
-        params: { use_sim_time: false }
         remap: { odometry/filtered: /odom }
 
   # 단계 3 · map -> odom
@@ -61,7 +62,6 @@ stages:
         executable: map_server
         param_files: ["kau_localization:config/amcl.yaml"]
         params:
-          use_sim_time: false
           yaml_filename: "@kau_localization:maps/kau_v3.yaml"
 
       - name: amcl
@@ -69,7 +69,6 @@ stages:
         executable: amcl
         param_files: ["kau_localization:config/amcl.yaml"]
         params:
-          use_sim_time: false
           scan_topic: /scan
           # 시작 위치를 알면 켠다. 없으면 RViz 의 /initialpose 를 기다린다.
           # set_initial_pose: true
@@ -81,7 +80,6 @@ stages:
         package: nav2_lifecycle_manager
         executable: lifecycle_manager
         param_files: ["kau_localization:config/amcl.yaml"]
-        params: { use_sim_time: false }
 
   # 단계 4 · 인지. 상호 무관하므로 동시
   - id: 4
@@ -155,7 +153,6 @@ stages:
         package: kau_control
         executable: steer_controller_node
         param_files: ["kau_control:config/steer_controller.yaml"]
-        params: { use_sim_time: false }
 
   # 단계 9 · 구동. 마지막에 연다
   - id: 9
@@ -165,4 +162,3 @@ stages:
         package: kau_control
         executable: speed_controller_node
         param_files: ["kau_control:config/speed_controller.yaml"]
-        params: { use_sim_time: false }

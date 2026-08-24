@@ -107,3 +107,26 @@ def test_dead_detects_exited_child(fake_resolve, tmp_path):
     finally:
         for child in children:
             process.kill(child)
+
+
+def test_use_sim_time_injected(fake_resolve):
+    spec = NodeSpec(name='n', package='p', executable='e')
+    assert process.build_argv(spec, True)[1:] == [
+        '--ros-args', '-r', '__node:=n', '-p', 'use_sim_time:=true']
+    assert process.build_argv(spec, False)[1:] == [
+        '--ros-args', '-r', '__node:=n', '-p', 'use_sim_time:=false']
+    assert process.build_argv(spec)[1:] == ['--ros-args', '-r', '__node:=n']
+
+
+def test_node_params_override_use_sim_time(fake_resolve):
+    """노드가 직접 적으면 그쪽이 이긴다. -p 는 1개만 나가야 한다."""
+    spec = NodeSpec(name='n', package='p', executable='e',
+                    params={'use_sim_time': False})
+    argv = process.build_argv(spec, True)
+    assert argv.count('use_sim_time:=false') == 1
+    assert 'use_sim_time:=true' not in argv
+
+
+def test_use_sim_time_not_injected_for_plain_process(fake_resolve):
+    spec = NodeSpec(name='n', package='p', executable='e', ros=False, args=('x',))
+    assert process.build_argv(spec, True)[1:] == ['x']

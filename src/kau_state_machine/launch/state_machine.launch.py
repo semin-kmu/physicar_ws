@@ -7,6 +7,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 PKG = 'kau_state_machine'
 
@@ -18,6 +19,8 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument('bringup_yaml', default_value=os.path.join(cfg, 'bringup.yaml')),
         DeclareLaunchArgument('run_id', default_value='',
                               description='로그 디렉터리 이름. 비우면 기동 시각'),
+        DeclareLaunchArgument('use_sim_time', default_value='true',
+                              description='전 노드 공통. /clock 을 쓰면 true, 실기는 false'),
     ]
 
     supervisor = Node(
@@ -29,6 +32,8 @@ def generate_launch_description() -> LaunchDescription:
         parameters=[{
             'bringup_yaml': LaunchConfiguration('bringup_yaml'),
             'run_id': LaunchConfiguration('run_id'),
+            'use_sim_time': ParameterValue(
+                LaunchConfiguration('use_sim_time'), value_type=bool),
         }],
     )
 
