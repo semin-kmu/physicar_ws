@@ -249,10 +249,11 @@ void PlotStrip::paintEvent(QPaintEvent *)
 
     p.fillRect(rect(), theme::PANEL_BG);
 
+    // width()/height() 는 int 다. 1.0 과 그대로 섞으면 std::max 추론이 깨진다.
     const QRectF plot(
         LEFT_PAD, TOP_PAD,
-        std::max(1.0, width() - LEFT_PAD - RIGHT_PAD),
-        std::max(1.0, height() - TOP_PAD - BOTTOM_PAD));
+        std::max(1.0, static_cast<double>(width() - LEFT_PAD - RIGHT_PAD)),
+        std::max(1.0, static_cast<double>(height() - TOP_PAD - BOTTOM_PAD)));
 
     double lo = 0.0;
 
