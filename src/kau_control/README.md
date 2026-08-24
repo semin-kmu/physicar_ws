@@ -16,8 +16,9 @@ KAU AMET PhysiCar 용 **주행 제어** 패키지. `KauPath` 를 받아 `/speed`
 ## 1. 무엇인가
 
 ```text
- /path/local  (kau_msgs/KauPath, 2~10 Hz)
- /path/global (없으면 fallback)
+ /path/local  (kau_msgs/KauPath, 2~10 Hz)   1 순위
+ /path/global (map 프레임, TF 필요)         2 순위
+ /lane/center (base_link, TF 불필요)        3 순위
         │
         ├──────────────────────────┬───────────────────────────┐
         ▼                          ▼                           │
@@ -142,8 +143,9 @@ ros2 run kau_control fake_path.py --shape straight --origin "250,360" --yaw 82
 
 | | topic | 타입 | 비고 |
 |---|---|---|---|
-| 입력 | `/path/local` | `kau_msgs/KauPath` | RELIABLE, depth 1 |
-| 입력 | `/path/global` | `kau_msgs/KauPath` | 주 경로 끊기면 fallback |
+| 입력 | `/path/local` | `kau_msgs/KauPath` | 1 순위. RELIABLE, depth 1 |
+| 입력 | `/path/global` | `kau_msgs/KauPath` | 2 순위. 1 순위를 못 쓰면 여기로 |
+| 입력 | `/lane/center` | `kau_msgs/KauPath` | 3 순위. `base_link` 프레임이라 TF 없이 돈다 |
 | 입력 | TF `map -> base_footprint` | | 두 노드 모두 TF 를 **발행하지 않는다** |
 | 입력 | `/odometry/filtered` | `nav_msgs/Odometry` | `speed` 만. PID 피드백. **아직 발행자 없음** |
 | 입력 | `/speed` | `std_msgs/Float64` | `steer` 가 `Ld` 계산에 쓴다 |

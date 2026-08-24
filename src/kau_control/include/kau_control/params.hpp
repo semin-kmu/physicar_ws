@@ -110,7 +110,7 @@ struct ControllerParams
 // 전방 lookahead 구간의 최대 곡률로 목표 속도 결정.
 //
 //     window = [s0 + look_min, s0 + look_k * v]      look_k = look_max / v_max
-//     v_ref  = law(kappa_win) 을 [v_min, v_max] 로 clamp -> 가감속 제한
+//     v_ref  = law(kappa_win) 을 [v_min, v_max] 로 clamp -> EMA -> 가감속 제한
 //
 // 실제 발행값은 speed_controller 가 v_ref 에 PID 보정을 더해 만든다.
 //
@@ -144,6 +144,11 @@ struct SpeedParams
 
     double decel_max = 2.0;   // m/s^2, 목표속도 감소율 상한 (감속은 넉넉히)
 
+    // 목표속도 EMA 시상수 [s]. 원본 시뮬(config.py SpeedParams.ema_tau)의 값.
+    // 가감속 제한이 하드 슬루 상한이라면 이쪽은 그 위를 부드럽게 만든다.
+    // 0 이하면 EMA 를 끈다 (alpha = 1 -> 그대로 통과).
+    double ema_tau   = 0.4;   // s
+
     // cm per (m/s). v_max 에서 look_max 가 되도록.
     double look_k() const
     {
@@ -168,6 +173,18 @@ struct SpeedParams
         lo_out = look_min;
 
         hi_out = std::max(look_k() * v_ms, look_min + min_span);
+    }
+
+    // EMA 계수. 1 - exp(-dt/tau) (연속 시상수의 이산 등가).
+    // dt 에서 유도하므로 control_hz 를 바꿔도 시간 응답은 같다.
+    double emaAlpha(double dt) const
+    {
+        if (ema_tau <= 0.0)
+        {
+            return 1.0;
+        }
+
+        return 1.0 - std::exp(-dt / ema_tau);
     }
 
     // 목표속도 급변 방지. prev 에서 want 로 dt 동안 갈 수 있는 만큼만 간다.

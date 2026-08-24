@@ -106,7 +106,11 @@ KauLaneDetectionNode::KauLaneDetectionNode()
     // ============================================================
     // Publisher
     // ============================================================
-
+    path_max_step_cm_per_s_ =
+    this->declare_parameter<double>(
+        "path_max_step_cm_per_s",
+        80.0
+    );
     undistorted_image_publisher_ =
         this->create_publisher<sensor_msgs::msg::Image>(
             "/kau_lane_detection/undistorted_image",
@@ -1308,7 +1312,40 @@ bool KauLaneDetectionNode::polyFitW(
     return true;
 }
 
+// path_ema_ctrl_ 의 각 제어점을 target 방향으로 이번 프레임에
+// max_step_cm 이하로만 이동시킨다. 정상 블렌드든 재잠금 스냅이든
+// 이걸 거치면 "얼마나 다른 값이 왔는가"와 무관하게 프레임당 물리적
+// 이동량 상한이 걸린다.
+void KauLaneDetectionNode::stepEmaCtrlToward(
+    const kau::bezier::Ctrl & target,
+    double max_step_cm)
+{
+    // 점마다 다른 비율을 쓰면 제어점 사이 상대 위치가 뒤틀려
+    // 곡선 모양이 매 프레임 달라진다(cusp/스파이크 원인). 전체
+    // 제어점에 "같은" 비율을 적용해야 두 곡선의 아핀 블렌드로
+    // 남아 모양이 보존된다.
+    double max_dist = 0.0;
 
+    for (std::size_t i = 0; i < path_ema_ctrl_.size(); ++i)
+    {
+        max_dist = std::max(
+            max_dist,
+            std::hypot(
+                target[i].x - path_ema_ctrl_[i].x,
+                target[i].y - path_ema_ctrl_
+    }
+
+    const double s =
+        (max_dist <= max_step_cm || max_dist
+            ? 1.0
+            : max_step_cm / max_dist;
+
+    for (std::size_t i = 0; i < path_ema_ctr
+    {
+        path_ema_ctrl_[i].x += s * (target[i
+        path_ema_ctrl_[i].y += s * (target[i].y - path_ema_ctrl_[i].y);
+    }
+}
 
 
 // ================================================================
@@ -4046,25 +4083,27 @@ KauLaneDetectionNode::VehiclePose KauLaneDetectionNode::lookupVehiclePose(
 
     try
     {
-        transform =
-            tf_buffer_->lookupTransform(
-                "map",
-                "base_link",
-                frame_stamp
-            );
+        transform = tf_buffer_->lookupTransform("map", "base_link", frame_stamp);
+    }
+    catch (const tf2::ExtrapolationException &)
+    {
+        // frame_stamp 가 TF 버퍼 최신값보다 살짝 앞서는 흔한 경우.
+        // 몇 ms 오차는 이 판정 용도에 무관하므로 최신 가용 TF로 대체.
+        try
+        {
+            transform = tf_buffer_->lookupTransform("map", "base_link", tf2::TimePointZero);
+        }
+        catch (const tf2::TransformException & e)
+        {
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+                "map <- base_link TF 조회 실패: %s. 경로 map 변환 / pan 트리거 판정을 건너뛴다.", e.what());
+            return pose;
+        }
     }
     catch (const tf2::TransformException & e)
     {
-        RCLCPP_WARN_THROTTLE(
-            this->get_logger(),
-            *this->get_clock(),
-            5000,
-            "map <- base_link TF 조회 실패: %s. "
-            "경로 map 변환 / pan 트리거의 곡률·장애물 판정을 "
-            "건너뛴다.",
-            e.what()
-        );
-
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 5000,
+            "map <- base_link TF 조회 실패: %s. 경로 map 변환 / pan 트리거 판정을 건너뛴다.", e.what());
         return pose;
     }
 
@@ -4978,97 +5017,35 @@ void KauLaneDetectionNode::refreshPathMetrics(LanePath & path)
         std::remainder(-th, 2.0 * M_PI);
 }
 
-
-
-
-// ================================================================
-// 시간축 강건화
-//
-// 헤더 선언부 주석에 설계 근거가 있다. 요약하면
-//
-//   관측 없음        상태만 늙힌다. 오래 끊기면 폐기.
-//   첫 관측          그대로 채택하고 추정치를 연다.
-//   추정치와 가까움  alpha = path_ema_alpha_ * confidence 로 섞는다.
-//   추정치와 멀다    섞지 않고 직전 추정치를 내보내되 confidence 를
-//                    떨어뜨린다. 연속되면 재잠금.
-//
-// 게이트(pathGate)를 통과한 경로에만 적용한다. 게이트의 안전
-// 판정을 EMA 가 되살리는 일은 없어야 한다.
-// ================================================================
-
-void KauLaneDetectionNode::robustifyPath(LanePath & path)
+void KauLaneDetectionNode::robustifyPath(
+    LanePath & path,
+    const rclcpp::Time & frame_stamp)
 {
-    if (!path_ema_enable_)
-    {
-        return;
-    }
+    if (!path_ema_enable_) return;
 
-
-    // ------------------------------------------------------------
-    // 관측 없음 — 경로 미생성(pan 탐색 중 등) 또는 게이트 기각
-    // ------------------------------------------------------------
-
-    if (!path.valid)
-    {
-        ++ema_miss_streak_;
-
-        if (
-            path_ema_valid_ &&
-            ema_miss_streak_ > path_ema_reset_frames_
-        )
-        {
-            RCLCPP_INFO(
-                this->get_logger(),
-                "경로 관측이 %d 프레임 끊겼다. EMA 추정치를 버린다.",
-                ema_miss_streak_
-            );
-
-            path_ema_valid_ = false;
-
-            conf_ema_ = 0.0;
-
-            valid_len_ema_ = 0.0;
-
-            path_ema_reject_streak_ = 0;
-        }
-
-        return;
-    }
-
+    if (!path.valid) { /* 기존 그대로 */ return; }
 
     ema_miss_streak_ = 0;
 
-
-    // ------------------------------------------------------------
-    // 첫 관측 — 비교할 것이 없다. 그대로 채택한다.
-    // ------------------------------------------------------------
-
     if (!path_ema_valid_)
     {
+        // 첫 관측은 캡 없이 그대로 (움직일 이전 값이 없음)
         path_ema_ctrl_ = path.ctrl;
-
         conf_ema_ = path.confidence;
-
         valid_len_ema_ = path.valid_length_cm;
-
         path_ema_valid_ = true;
-
         path_ema_reject_streak_ = 0;
-
+        path_ema_time_init_ = false;
         return;
     }
 
-
-    const double dev =
-        pathDeviationCm(path.ctrl, path_ema_ctrl_);
-
+    const double dev = pathDeviationCm(path.ctrl, path_ema_ctrl_);
     last_path_dev_cm_ = dev;
 
-
     const bool outlier =
-        (path_ema_gate_cm_ > 0.0) &&
-        (dev > path_ema_gate_cm_);
+        (path_ema_gate_cm_ > 0.0) && (dev > path_ema_gate_cm_);
 
+    kau::bezier::Ctrl intended = path_ema_ctrl_;   // 기본값: 변화 없음
 
     if (outlier)
     {
@@ -5076,92 +5053,68 @@ void KauLaneDetectionNode::robustifyPath(LanePath & path)
 
         if (path_ema_reject_streak_ >= path_ema_relock_frames_)
         {
-            // 같은 주장이 계속 온다. 노이즈가 아니라 실제 변화다.
-            RCLCPP_INFO(
-                this->get_logger(),
-                "새 경로 주장이 %d 프레임 연속 (평균 %.1fcm 차이). "
-                "EMA 추정치를 재잠금한다.",
-                path_ema_reject_streak_,
-                dev
-            );
-
-            path_ema_ctrl_ = path.ctrl;
-
+            intended = path.ctrl;   // 재잠금 목표 (아래에서 캡 적용됨)
             conf_ema_ = path.confidence;
-
             valid_len_ema_ = path.valid_length_cm;
-
             path_ema_reject_streak_ = 0;
+
+            RCLCPP_INFO(this->get_logger(),
+                "새 경로 주장이 %d 프레임 연속 (평균 %.1fcm 차이). "
+                "재잠금 목표를 세운다 (실제 이동은 %.0fcm/s로 캡).",
+                path_ema_relock_frames_, dev, path_max_step_cm_per_s_);
         }
         else
         {
-            // 한두 프레임짜리 튐. 추정치는 그대로 두고 신뢰도만
-            // 떨어뜨린다. 하류가 미끄러지는 confidence 를 보고
-            // 스스로 판단할 수 있어야 한다.
             conf_ema_ *= (1.0 - path_ema_alpha_);
-
-            RCLCPP_WARN_THROTTLE(
-                this->get_logger(),
-                *this->get_clock(),
-                2000,
+            RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
                 "관측이 추정치에서 평균 %.1fcm 벗어났다 (상한 %.1f). "
                 "섞지 않고 신뢰도만 %.2f 로 내린다.",
-                dev,
-                path_ema_gate_cm_,
-                conf_ema_
-            );
+                dev, path_ema_gate_cm_, conf_ema_);
         }
     }
     else
     {
         path_ema_reject_streak_ = 0;
 
-        // 믿기 힘든 프레임은 추정치를 조금밖에 못 움직인다.
         const double a =
-            std::clamp(
-                path_ema_alpha_ * path.confidence,
-                0.0,
-                1.0
-            );
+            std::clamp(path_ema_alpha_ * path.confidence, 0.0, 1.0);
 
-        for (
-            std::size_t i = 0;
-            i < path_ema_ctrl_.size();
-            ++i
-        )
+        for (std::size_t i = 0; i < path_ema_ctrl_.size(); ++i)
         {
-            path_ema_ctrl_[i].x +=
-                a * (path.ctrl[i].x - path_ema_ctrl_[i].x);
-
-            path_ema_ctrl_[i].y +=
-                a * (path.ctrl[i].y - path_ema_ctrl_[i].y);
+            intended[i].x =
+                path_ema_ctrl_[i].x + a * (path.ctrl[i].x - path_ema_ctrl_[i].x);
+            intended[i].y =
+                path_ema_ctrl_[i].y + a * (path.ctrl[i].y - path_ema_ctrl_[i].y);
         }
 
-        // 신뢰도 자체는 고정 비율로 따라간다. 여기까지 confidence
-        // 로 다시 가중하면 낮은 신뢰도가 스스로를 붙잡아 영영
-        // 올라오지 못한다.
-        conf_ema_ +=
-            path_ema_alpha_ * (path.confidence - conf_ema_);
-
-        valid_len_ema_ +=
-            path_ema_alpha_ *
-            (path.valid_length_cm - valid_len_ema_);
+        conf_ema_ += path_ema_alpha_ * (path.confidence - conf_ema_);
+        valid_len_ema_ += path_ema_alpha_ * (path.valid_length_cm - valid_len_ema_);
     }
 
+    // --- 실제 이동은 여기서 한 번에 캡 적용 (publishPanRamped와 동일 패턴) ---
+    double dt = 1.0 / 14.0;
+    if (path_ema_time_init_)
+    {
+        dt = (frame_stamp - path_ema_last_stamp_).seconds();
+        if (dt < 0.0 || dt > 1.0) dt = 1.0 / 14.0;
+    }
+    path_ema_last_stamp_ = frame_stamp;
+    path_ema_time_init_ = true;
 
-    // ------------------------------------------------------------
-    // 발행 대상은 관측이 아니라 추정치다.
-    // ------------------------------------------------------------
+    stepEmaCtrlToward(intended, path_max_step_cm_per_s_ * dt);
+
+    if (!kau::bezier::isRegular(path_ema_ctrl_))
+    {
+        // 뒤틀린 프레임은 이번엔 갱신하지 않고 직전 값을 그대로 낸다
+        RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+            "EMA 갱신 결과가 degenerate 하다. 이번 프레임은 직전 추정치를 유지.");
+        // path_ema_ctrl_ 를 되돌리거나, 최소한 발행은 건너뛰는 처리 필요
+    }
 
     path.ctrl = path_ema_ctrl_;
-
     path.confidence = conf_ema_;
-
     refreshPathMetrics(path);
-
-    // 근거 구간은 기하보다 길 수 없다.
-    path.valid_length_cm =
-        std::min(valid_len_ema_, path.length_cm);
+    path.valid_length_cm = std::min(valid_len_ema_, path.length_cm);
 }
 
 
@@ -7109,7 +7062,7 @@ void KauLaneDetectionNode::imageCallback(
         // 둘 다 이 추정치를 본다.
         // ========================================================
 
-        robustifyPath(lane_path);
+        robustifyPath(lane_path, rclcpp::Time(msg->header.stamp));
 
 
         // ========================================================

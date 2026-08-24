@@ -3,7 +3,7 @@
 # 단위: 길이 cm / 곡률 1/cm / 속도 m/s
 #
 #   kappa_win = 전방 window 의 최대 |kappa|
-#   v_ref     = law(kappa_win) -> [v_min, v_max] -> 가감속 제한
+#   v_ref     = law(kappa_win) -> [v_min, v_max] -> EMA -> 가감속 제한
 #   /speed    = clamp(v_ref + PID(v_ref - v_meas), 0, v_max)
 #
 # 직선이면 v_max, 곡률이 클수록 낮아진다.
@@ -14,17 +14,24 @@ speed_controller:
   ros__parameters:
 
     # --- 인터페이스 (steer_controller.yaml 과 같은 경로를 봐야 한다) ---
+    # 경로 우선순위 1) local  2) global  3) lane
     path_topic: "/path/local"
     fallback_path_topic: "/path/global"
+    lane_path_topic: "/lane/center"     # "" 로 두면 3 순위를 쓰지 않는다
     map_frame: "map"
     base_frame: "base_footprint"
-    pose_source: "tf"
+    pose_source: "tf"                   # 1·2 순위용
+    lane_pose_source: "identity"        # 3 순위용. lane 경로는 차량 프레임
+    lane_frame: "base_link"             # lane_detection 의 path_frame_id 와 일치
     path_latched: false
     fallback_path_latched: true
+    lane_path_latched: false
 
     control_hz: 50.0
     tf_timeout: 0.2
     path_timeout: 1.0
+    fallback_path_timeout: 0.0          # 0 = 만료 없음 (latched 1 회 발행 대비)
+    lane_path_timeout: 0.5
     cte_abort_cm: 200.0
     goal_tol_cm: 10.0
 
@@ -37,15 +44,16 @@ speed_controller:
 
     # --- 목표속도 ---
     speed:
-      v_min: 0.5
-      v_max: 2.0                        # 하드웨어 상한은 3.0
+      v_min: 0.6
+      v_max: 2.5                        # 하드웨어 상한은 3.0
       look_min_cm: 20.0                 # 곡률 탐색 window 하한
       look_max_cm: 150.0                # v_max 에서의 window 상한
       min_span_cm: 20.0                 # window 최소 폭 (저속 퇴화 방지)
       margin: 0.8                       # v_min 기준 곡률 = margin * kappa_max
       use_sqrt_law: true                # true: 등횡가속도, false: 선형 보간
-      accel_max: 1.0                    # m/s^2, 목표속도 증가율 상한
+      accel_max: 1.5                    # m/s^2, 목표속도 증가율 상한
       decel_max: 2.0                    # m/s^2, 감속은 넉넉히 허용
+      ema_tau: 0.4                      # s, 목표속도 EMA 시상수 (0 이면 끔)
 
       # --- 속도 피드백 ---
       # ★ 오도메트리 노드가 아직 없다. 노드가 생기면 아래 topic 만 바꾸고

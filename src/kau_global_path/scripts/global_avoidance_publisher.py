@@ -5,18 +5,27 @@ Publish a slowly varying, obstacle-aware global reference path.
 The static /path/global contract is intentionally untouched.  This node consumes
 that path and the map-frame Object List, then publishes /path/global_avoidance.
 All geometry in this file is in KauPath units (centimetres).
+
+RViz has no display for KauPath, so the same curve also goes out as
+/viz/path/global_avoidance (nav_msgs/Path, metres) for visualisation only.
 """
 
 import copy
 import math
 import sys
 
+from geometry_msgs.msg import PoseStamped
+
+from kau_msgs.msg import KauPath, ObstacleCircleArray
+
+from nav_msgs.msg import Path as NavPath
+
 import rclpy
 from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 
-from kau_msgs.msg import KauPath, ObstacleCircleArray
+CM_TO_M = 0.01
 
 
 def eval_bezier(ctrl, u):
@@ -88,6 +97,45 @@ def segment_metrics(ctrl, samples=40):
         prev = p
         kmax = max(kmax, abs(kappa))
     return length, kmax
+
+
+def to_navpath(msg, spacing_cm):
+    """Convert a KauPath to nav_msgs/Path for RViz.  Metres, because nav_msgs is SI.
+
+    Point count is proportional to arc length per segment; splitting u evenly
+    thins the samples out exactly where curvature is highest.
+    """
+    out = NavPath()
+    out.header = copy.deepcopy(msg.header)
+
+    def pose(point, theta):
+        ps = PoseStamped()
+        ps.header = out.header
+        ps.pose.position.x = point[0] * CM_TO_M
+        ps.pose.position.y = point[1] * CM_TO_M
+        ps.pose.orientation.z = math.sin(theta / 2.0)
+        ps.pose.orientation.w = math.cos(theta / 2.0)
+        return ps
+
+    nctrl = msg.degree + 1
+    ctrl = []
+    for k, length in enumerate(msg.seg_length):
+        start = k * nctrl
+        ctrl = list(zip(msg.ctrl_x[start:start + nctrl],
+                        msg.ctrl_y[start:start + nctrl]))
+        count = max(2, int(math.ceil(length / spacing_cm)))
+        for i in range(count):
+            point, theta, _ = segment_frame(ctrl, i / count)
+            out.poses.append(pose(point, theta))
+
+    # u = 1.0 of each segment is the next one's u = 0.0, so it is skipped above.
+    # Only the very end needs closing: back to the start, or the last endpoint.
+    if msg.is_closed and out.poses:
+        out.poses.append(out.poses[0])
+    elif ctrl:
+        point, theta, _ = segment_frame(ctrl, 1.0)
+        out.poses.append(pose(point, theta))
+    return out
 
 
 class ReferencePath:
@@ -253,6 +301,8 @@ class GlobalAvoidancePublisher(Node):
             'global_topic': '/path/global',
             'obstacle_topic': '/perception/obstacles',
             'output_topic': '/path/global_avoidance',
+            'viz_topic': '/viz/path/global_avoidance',
+            'viz_spacing_cm': 5.0,
         }
         for name, value in defaults.items():
             self.declare_parameter(name, value)
@@ -270,6 +320,9 @@ class GlobalAvoidancePublisher(Node):
         self.obstacle_sub = self.create_subscription(
             ObstacleCircleArray, self.params['obstacle_topic'], self.on_obstacles, live)
         self.publisher = self.create_publisher(KauPath, self.params['output_topic'], latched)
+        # RViz subscribes RELIABLE/VOLATILE by default; match it so the
+        # display fills in without touching the topic's QoS in the GUI.
+        self.viz_pub = self.create_publisher(NavPath, self.params['viz_topic'], 1)
         self.timer = self.create_timer(1.0 / self.params['publish_hz'], self.publish_path)
 
     def on_global(self, msg):
@@ -310,6 +363,7 @@ class GlobalAvoidancePublisher(Node):
             self.get_logger().error('안전한 global avoidance 후보 없음; 원본 경로를 confidence=0으로 발행')
         path.header.stamp = self.get_clock().now().to_msg()
         self.publisher.publish(path)
+        self.viz_pub.publish(to_navpath(path, self.params['viz_spacing_cm']))
         self.get_logger().info(
             f'global avoidance 발행: 활성 장애물={count}, safe={safe}, max|kappa|={kmax:.6f} 1/cm',
             throttle_duration_sec=5.0)

@@ -25,6 +25,10 @@ steer_controller:
     # 전역 경로가 끼어드는 사고를 막아준다.
     fallback_path_topic: "/path/global"
 
+    # 3 순위(lane)는 주 경로와 같은 topic 이라 자동으로 비활성이다.
+    # 여기서는 lane 이 이미 1 순위이므로 명시적으로 비운다.
+    lane_path_topic: ""
+
     map_frame: "map"
 
     # ★ lane detection 이 발행하는 프레임과 반드시 같아야 한다
@@ -87,6 +91,10 @@ speed_controller:
     # 인터페이스는 steer 쪽과 같아야 한다. 두 노드가 같은 경로를 본다.
     path_topic: "/lane/center"
     fallback_path_topic: "/path/global"
+
+    # 3 순위(lane)는 주 경로와 같은 topic 이라 자동으로 비활성이다.
+    # 여기서는 lane 이 이미 1 순위이므로 명시적으로 비운다.
+    lane_path_topic: ""
     map_frame: "map"
     base_frame: "base_link"
     pose_source: "identity"
@@ -126,6 +134,7 @@ speed_controller:
       use_sqrt_law: true
       accel_max: 1.0
       decel_max: 2.0
+      ema_tau: 0.4                      # s, 목표속도 EMA 시상수 (0 이면 끔)
 
       # 오도메트리 노드가 아직 없다. 붙으면 topic 을 바꾸고 true 로.
       feedback_topic: "/odometry/filtered"

@@ -58,6 +58,7 @@ public:
         declare_parameter<bool>("speed.use_sqrt_law", true);
         declare_parameter<double>("speed.accel_max", 1.0);
         declare_parameter<double>("speed.decel_max", 2.0);
+        declare_parameter<double>("speed.ema_tau", 0.4);
 
         // 오도메트리 노드가 확정되면 이 값만 바꾼다 (nav_msgs/Odometry).
         declare_parameter<std::string>(
@@ -140,6 +141,7 @@ private:
         sp_.use_sqrt  = get_parameter("speed.use_sqrt_law").as_bool();
         sp_.accel_max = get_parameter("speed.accel_max").as_double();
         sp_.decel_max = get_parameter("speed.decel_max").as_double();
+        sp_.ema_tau   = get_parameter("speed.ema_tau").as_double();
 
         fb_timeout_ = get_parameter("speed.feedback_timeout").as_double();
         require_fb_ = get_parameter("speed.require_feedback").as_bool();
@@ -199,7 +201,17 @@ private:
         const double kappa_win =
             tracker_.curve()->kappaMaxOver(r.s + lo, r.s + hi);
 
-        v_ref_ = sp_.rateLimit(v_ref_, sp_.target(kappa_win, vehicle_), dt);
+        // EMA(목표 평활) -> 가감속 제한(하드 슬루 상한).
+        //
+        // 순서를 뒤집으면 안 된다. rateLimit 이 이미 accel_max*dt 로 잘라 놓은
+        // 증분에 EMA 가 다시 alpha 배만 다가가므로 실효 가속이
+        // alpha * accel_max 로 줄어든다 (50 Hz / tau 0.4 s 에서 0.049 m/s^2).
+        //
+        // EMA 식은 원본 시뮬(full_simulation.py)과 같다.
+        v_want_ +=
+            sp_.emaAlpha(dt) * (sp_.target(kappa_win, vehicle_) - v_want_);
+
+        v_ref_ = sp_.rateLimit(v_ref_, v_want_, dt);
 
 
         // --- PID 보정 ---
@@ -242,6 +254,8 @@ private:
 
         v_ref_ = 0.0;
 
+        v_want_ = 0.0;
+
         pid_.reset();
 
         if (!reason.empty())
@@ -266,7 +280,8 @@ private:
     SpeedParams   sp_;
     Pid           pid_;
 
-    double v_ref_      = 0.0;   // m/s, 가감속 제한을 거친 목표속도
+    double v_want_     = 0.0;   // m/s, EMA 만 거친 목표속도
+    double v_ref_      = 0.0;   // m/s, 위에 가감속 제한까지 건 최종 목표속도
     double v_meas_     = 0.0;   // m/s, 피드백
     double fb_timeout_ = 0.2;
     bool   require_fb_ = false;
