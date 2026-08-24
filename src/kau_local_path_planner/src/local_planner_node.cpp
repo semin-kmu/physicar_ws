@@ -47,6 +47,7 @@ using kau::local_path_planner::PlanStatus;
 using kau::local_path_planner::Point2;
 using kau::local_path_planner::RoadBoundary;
 using kau::local_path_planner::SimToMap;
+using kau::local_path_planner::VehicleFootprint;
 
 // Python: config.END_RATIO -- Curve -> KauPath 발행 시에는 쓰지 않지만
 // 다른 상수들과 나란히 두어 출처를 분명히 한다.
@@ -231,6 +232,12 @@ private:
         // 차량 제원 (docs/경로_형식.md 부록 B 확정값).
         declare_parameter<double>("kappa_max_vehicle", 0.020221);   // 1/cm
         declare_parameter<double>("body_radius_cm", 11.0353);
+        // 2026-08-25: hard-gate(road/obstacle) 전용 회전 사각형 차체
+        // (후륜축 기준, 실제 치수). body_radius_cm(3분할 원 근사)는 candidate
+        // 생성(offset 목표값 계산)에 그대로 남아있다.
+        declare_parameter<double>("body_front_cm", 23.0);
+        declare_parameter<double>("rear_overhang_cm", 5.0);
+        declare_parameter<double>("half_width_cm", 10.0);
         declare_parameter<double>("wheelbase_cm", 18.0);
 
         // PlannerParams -- KAU_AMET_Test 세션 최종 튜닝값.
@@ -322,10 +329,14 @@ private:
         }
 
         kau::control::Curve global_path = kau::control::curveFromKauPath(*msg);
+        VehicleFootprint body_footprint{
+            get_parameter("body_front_cm").as_double(),
+            get_parameter("rear_overhang_cm").as_double(),
+            get_parameter("half_width_cm").as_double()};
         planner_ = std::make_unique<LocalPlanner>(
             std::move(global_path), boundary_, std::vector<Obstacle>{},
             loadPlannerParams(), get_parameter("kappa_max_vehicle").as_double(),
-            get_parameter("body_radius_cm").as_double());
+            get_parameter("body_radius_cm").as_double(), body_footprint);
         RCLCPP_INFO(get_logger(),
             "/path/global 수신, LocalPlanner 생성 완료 (nseg=%d, length=%.1fcm)",
             static_cast<int>(msg->seg_length.size()), msg->total_length);

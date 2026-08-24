@@ -5,11 +5,13 @@
 
 using kau::control::Curve;
 using kau::local_path_planner::clearance;
+using kau::local_path_planner::clearanceRect;
 using kau::local_path_planner::hermiteToBezier;
 using kau::local_path_planner::minDistToPoint;
 using kau::local_path_planner::Obstacle;
 using kau::local_path_planner::obstaclesNear;
 using kau::local_path_planner::Point2;
+using kau::local_path_planner::VehicleFootprint;
 
 namespace
 {
@@ -48,6 +50,28 @@ TEST(CollisionChecker, ClearanceWithNearbyObstacle)
     const double clear = clearance(cv, obstacles, body, /*clear_target=*/15.0);
     // dist(curve, center)=10, - radius(2) - body(1) = 7
     EXPECT_NEAR(clear, 7.0, 1e-3);
+}
+
+// 2026-08-25: 회전 사각형 차체(clearanceRect)가 좁은 원 근사(clearance,
+// body=1.0)로는 놓치는 충돌을 잡아내는지 확인. 장애물이 실제 차체 오른쪽
+// 모서리(half_width=10cm) 에 거의 닿아 있는 상황.
+TEST(CollisionChecker, ClearanceRectCatchesWideBodyCollisionMissedByNarrowCircle)
+{
+    const Curve cv = straightLine();
+    std::vector<Obstacle> obstacles{Obstacle{Point2{50.0, 10.0}, 1.0}};
+
+    // 좁은 원 근사: dist(curve,center)=10, - radius(1) - body(1) = 8 -> 안전.
+    const double clear_circle =
+        clearance(cv, obstacles, /*body=*/1.0, /*clear_target=*/15.0);
+    EXPECT_NEAR(clear_circle, 8.0, 1e-3);
+
+    // 실제 차체(half_width=10cm) 기준: 오른쪽 모서리(y=10)가 장애물 중심과
+    // 겹침 -> dist(rect,center)=0, - radius(1) = -1 (충돌).
+    const VehicleFootprint body{/*body_front_cm=*/5.0, /*rear_overhang_cm=*/5.0,
+                               /*half_width_cm=*/10.0};
+    const double clear_rect = clearanceRect(
+        cv, obstacles, body, /*clear_target=*/15.0, /*sample_interval_cm=*/2.0);
+    EXPECT_NEAR(clear_rect, -1.0, 1e-3);
 }
 
 TEST(CollisionChecker, ObstaclesNearFiltersFarAway)

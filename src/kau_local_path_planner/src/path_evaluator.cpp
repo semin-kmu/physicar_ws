@@ -167,5 +167,65 @@ std::optional<std::pair<double, Curve>> leastViolation(
     return best;
 }
 
+std::optional<std::pair<double, Curve>> leastViolationRect(
+    const std::vector<Candidate> & cands,
+    const RoadBoundary & boundary, const VehicleFootprint & body,
+    double road_safety_margin_cm, double road_sample_interval_cm,
+    const std::vector<Obstacle> & obstacles, double obs_margin,
+    double clear_target_cm, double kappa_max_vehicle)
+{
+    struct Scored { double d; Curve cv; double obstacle_violation; double road_violation; double kappa_violation; };
+    std::vector<Scored> scored;
+
+    for (const Candidate & c : cands)
+    {
+        if (!c.curve.has_value() || !c.curve->isRegular())
+        {
+            continue;
+        }
+        const Curve & cv = *c.curve;
+
+        const double kappa_violation =
+            std::max(0.0, cv.kappaMax() - kappa_max_vehicle);
+        const double road_violation = std::max(
+            0.0, -roadClearanceRect(boundary, cv, body, road_safety_margin_cm,
+                                    road_sample_interval_cm));
+        const double obstacle_violation = std::max(
+            0.0, obs_margin - clearanceRect(cv, obstacles, body, clear_target_cm,
+                                            road_sample_interval_cm));
+
+        scored.push_back({c.d, cv, obstacle_violation, road_violation, kappa_violation});
+    }
+    if (scored.empty())
+    {
+        return std::nullopt;
+    }
+
+    double min_obstacle = std::numeric_limits<double>::infinity();
+    for (const Scored & s : scored)
+    {
+        min_obstacle = std::min(min_obstacle, s.obstacle_violation);
+    }
+
+    std::optional<std::pair<double, Curve>> best;
+    double best_score = std::numeric_limits<double>::infinity();
+    for (const Scored & s : scored)
+    {
+        if (s.obstacle_violation > min_obstacle + 1e-9)
+        {
+            continue;
+        }
+        const double score =
+            s.road_violation / road_safety_margin_cm
+            + s.kappa_violation / kappa_max_vehicle;
+        if (score < best_score)
+        {
+            best_score = score;
+            best = std::make_pair(s.d, s.cv);
+        }
+    }
+    return best;
+}
+
 }  // namespace local_path_planner
 }  // namespace kau

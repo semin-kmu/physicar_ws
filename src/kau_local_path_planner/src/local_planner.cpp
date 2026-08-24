@@ -20,15 +20,17 @@ constexpr double kInf = std::numeric_limits<double>::infinity();
 LocalPlanner::LocalPlanner(
     Curve global_path, RoadBoundary boundary,
     std::vector<Obstacle> obstacles, PlannerParams params,
-    double kappa_max_vehicle, double body_radius_cm)
+    double kappa_max_vehicle, double body_radius_cm,
+    VehicleFootprint body_footprint)
 : global_path_(std::move(global_path)), boundary_(std::move(boundary)),
   obstacles_(std::move(obstacles)), stations_(), params_(std::move(params)),
   kappa_lim_(kappa_max_vehicle * params_.kappa_margin),
   kappa_max_vehicle_(kappa_max_vehicle), body_radius_cm_(body_radius_cm),
+  body_footprint_(body_footprint),
   ref_fusion_(global_path_, params_.ref_mode, params_.w_lane, params_.lane_gate),
   candidate_gen_(
       global_path_, boundary_, obstacles_, stations_, params_, kappa_lim_,
-      kappa_max_vehicle_, body_radius_cm_)
+      kappa_max_vehicle_, body_radius_cm_, body_footprint_)
 {
     stations_.reserve(obstacles_.size());
     for (const Obstacle & o : obstacles_)
@@ -165,8 +167,8 @@ PlanResult LocalPlanner::plan(
         {
             c.cost = kInf; c.reason = "degenerate";
         }
-        else if (!roadOk(boundary_, committed_cv, body_radius_cm_ + kRoadSafetyMarginCm,
-                         kRoadSampleIntervalCm))
+        else if (!roadOkRect(boundary_, committed_cv, body_footprint_,
+                            kRoadSafetyMarginCm, kRoadSampleIntervalCm))
         {
             c.cost = kInf; c.reason = "road_boundary";
         }
@@ -187,8 +189,8 @@ PlanResult LocalPlanner::plan(
 
     if (!chosen)
     {
-        auto degraded = leastViolation(
-            cands, boundary_, body_radius_cm_, kRoadSafetyMarginCm,
+        auto degraded = leastViolationRect(
+            cands, boundary_, body_footprint_, kRoadSafetyMarginCm,
             kRoadSampleIntervalCm, obstacles_, params_.obs_margin,
             params_.clear_target, kappa_max_vehicle_);
         if (degraded)
@@ -199,8 +201,9 @@ PlanResult LocalPlanner::plan(
             result.status = PlanStatus::kDegraded;
             result.chosen_offset = d;
             result.kappa_max = cv.kappaMax();
-            result.clearance = clearance(
-                cv, obstacles_, body_radius_cm_, params_.clear_target);
+            result.clearance = clearanceRect(
+                cv, obstacles_, body_footprint_, params_.clear_target,
+                kRoadSampleIntervalCm);
             return result;
         }
 
@@ -224,8 +227,9 @@ PlanResult LocalPlanner::plan(
     result.status = PlanStatus::kOk;
     result.chosen_offset = c.d;
     result.kappa_max = c.curve->kappaMax();
-    result.clearance = clearance(
-        *c.curve, obstacles_, body_radius_cm_, params_.clear_target);
+    result.clearance = clearanceRect(
+        *c.curve, obstacles_, body_footprint_, params_.clear_target,
+        kRoadSampleIntervalCm);
     result.alive = static_cast<int>(alive.size());
     return result;
 }

@@ -59,6 +59,24 @@ struct PlannerParams
 };
 
 // ====================================================================
+// VehicleFootprint -- 회전 사각형 차체 (후륜축 기준), 2026-08-25.
+//
+// 원본: KAU_AMET_Test / src/sim_common/config.py 의 VehicleParams
+// (body_length=28, body_width=20, rear_overhang=5 -> body_front=23,
+// half_width=10). 3분할 원 근사(body_radius_cm, 여전히 candidate 생성
+// -- offset 목표값 계산 -- 에는 그대로 쓰인다)를 hard-gate 두 곳
+// (_clearance/_road_clearance 대응, roadClearanceRect/clearanceRect)
+// 에서만 실제 사각형으로 교체한다.
+// ====================================================================
+
+struct VehicleFootprint
+{
+    double body_front_cm    = 23.0;   // 후륜축 -> 전단
+    double rear_overhang_cm = 5.0;    // 후륜축 -> 후단
+    double half_width_cm    = 10.0;
+};
+
+// ====================================================================
 // Candidate -- 후보 offset 1 개의 평가 결과.
 // Python: (d, curve|None, cost, reason) 튜플
 // ====================================================================

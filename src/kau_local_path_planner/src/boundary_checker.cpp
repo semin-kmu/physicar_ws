@@ -232,5 +232,46 @@ double roadClearance(
     return best;
 }
 
+double roadClearanceRect(
+    const RoadBoundary & boundary, const Curve & cv,
+    const VehicleFootprint & body, double road_safety_margin_cm,
+    double sample_interval_cm)
+{
+    double best = std::numeric_limits<double>::infinity();
+    const int nseg = cv.nseg();
+    for (int i = 0; i < nseg; ++i)
+    {
+        const int count = std::max(
+            3, static_cast<int>(std::ceil(cv.segLen(i) / sample_interval_cm)) + 1);
+        const bool include_end = (i == nseg - 1);
+        const double step = include_end
+            ? 1.0 / static_cast<double>(count - 1)
+            : 1.0 / static_cast<double>(count);
+        const kau::bezier::Ctrl & seg = cv.seg(i);
+        const kau::bezier::Ctrl d1 = kau::bezier::hodograph(seg);
+        for (int k = 0; k < count; ++k)
+        {
+            const double u = static_cast<double>(k) * step;
+            const Point2 center = kau::bezier::evalSeg(seg, u);
+            const Point2 tangent = kau::bezier::evalSeg(d1, u);
+            const double heading = std::atan2(tangent.y, tangent.x);
+            const double ch = std::cos(heading);
+            const double sh = std::sin(heading);
+            for (double dx : {-body.rear_overhang_cm, body.body_front_cm})
+            {
+                for (double dy : {-body.half_width_cm, body.half_width_cm})
+                {
+                    const Point2 corner{
+                        center.x + dx * ch - dy * sh,
+                        center.y + dx * sh + dy * ch};
+                    best = std::min(
+                        best, pointClearance(boundary, corner, road_safety_margin_cm));
+                }
+            }
+        }
+    }
+    return best;
+}
+
 }  // namespace local_path_planner
 }  // namespace kau

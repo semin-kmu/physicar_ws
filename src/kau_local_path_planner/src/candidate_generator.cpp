@@ -80,10 +80,12 @@ CandidateGenerator::CandidateGenerator(
     const std::vector<Obstacle> & obstacles,
     const std::vector<ObstacleStation> & stations,
     const PlannerParams & params, double kappa_lim,
-    double kappa_max_vehicle, double body_radius_cm)
+    double kappa_max_vehicle, double body_radius_cm,
+    VehicleFootprint body_footprint)
 : global_path_(global_path), boundary_(boundary), obstacles_(obstacles),
   stations_(stations), params_(params), kappa_lim_(kappa_lim),
-  kappa_max_vehicle_(kappa_max_vehicle), body_radius_cm_(body_radius_cm)
+  kappa_max_vehicle_(kappa_max_vehicle), body_radius_cm_(body_radius_cm),
+  body_footprint_(body_footprint)
 {
 }
 
@@ -179,8 +181,8 @@ Candidate CandidateGenerator::candidate(
         }
         prediction_violation = true;   // committed 는 OK, 나머지(먼 미래)만 위반
     }
-    if (!roadOk(boundary_, cv, body_radius_cm_ + kRoadSafetyMarginCm,
-               kRoadSampleIntervalCm))
+    if (!roadOkRect(boundary_, cv, body_footprint_, kRoadSafetyMarginCm,
+                    kRoadSampleIntervalCm))
     {
         const int n_committed = committedSegmentCount(segs);
         bool committed_road_ok = false;
@@ -188,8 +190,8 @@ Candidate CandidateGenerator::candidate(
         {
             Curve committed_cv(
                 std::vector<Ctrl>(segs.begin(), segs.begin() + n_committed), false);
-            committed_road_ok = roadOk(
-                boundary_, committed_cv, body_radius_cm_ + kRoadSafetyMarginCm,
+            committed_road_ok = roadOkRect(
+                boundary_, committed_cv, body_footprint_, kRoadSafetyMarginCm,
                 kRoadSampleIntervalCm);
         }
         if (!committed_road_ok)
@@ -201,7 +203,8 @@ Candidate CandidateGenerator::candidate(
         prediction_violation = true;
     }
     // obstacle: committed/prediction 구분 없이 항상 엄격 (변경 없음)
-    const double clear = clearance(cv, obstacles_, body_radius_cm_, params_.clear_target);
+    const double clear = clearanceRect(
+        cv, obstacles_, body_footprint_, params_.clear_target, kRoadSampleIntervalCm);
     if (clear < params_.obs_margin)
     {
         Candidate c; c.d = offsets.back(); c.curve = cv; c.reason = "obstacle";
@@ -372,14 +375,15 @@ Candidate CandidateGenerator::primitiveCandidate(
         c.cost = kInf;
         return c;
     }
-    if (!roadOk(boundary_, cv, body_radius_cm_ + kRoadSafetyMarginCm,
-               kRoadSampleIntervalCm))
+    if (!roadOkRect(boundary_, cv, body_footprint_, kRoadSafetyMarginCm,
+                    kRoadSampleIntervalCm))
     {
         Candidate c; c.d = terminal_offset; c.curve = cv; c.reason = "road_boundary";
         c.cost = kInf;
         return c;
     }
-    const double clear = clearance(cv, obstacles_, body_radius_cm_, params_.clear_target);
+    const double clear = clearanceRect(
+        cv, obstacles_, body_footprint_, params_.clear_target, kRoadSampleIntervalCm);
     if (clear < params_.obs_margin)
     {
         Candidate c; c.d = terminal_offset; c.curve = cv; c.reason = "obstacle";
@@ -642,14 +646,15 @@ Candidate CandidateGenerator::directCandidate(
         }
 
         Curve candidate_curve(std::vector<Ctrl>{ctrl}, false);
-        if (!roadOk(boundary_, candidate_curve, body_radius_cm_ + kRoadSafetyMarginCm,
-                   kRoadSampleIntervalCm))
+        if (!roadOkRect(boundary_, candidate_curve, body_footprint_, kRoadSafetyMarginCm,
+                        kRoadSampleIntervalCm))
         {
             best_reason = "road_boundary";
             continue;
         }
-        const double clear = clearance(
-            candidate_curve, obstacles_, body_radius_cm_, params_.clear_target);
+        const double clear = clearanceRect(
+            candidate_curve, obstacles_, body_footprint_, params_.clear_target,
+            kRoadSampleIntervalCm);
         if (clear < params_.obs_margin)
         {
             best_reason = "obstacle";

@@ -101,6 +101,31 @@ src/local_planner_node.cpp   ROS2 wiring (구독/발행/TF/파라미터) 만 담
   boundary violation 503→403 rows(-20%), collision 없음 유지,
   min_clearance +7.989→+7.138cm, steer-rate 오히려 개선(mean/p95/max
   18.51/57.57/222.38→17.01/52.36/222.38 deg/s).
+- **회전 사각형 차체 (3분할 원 근사 대체, 2026-08-25)**: road/obstacle
+  hard-gate 두 곳(`roadClearance`/`roadOk` → `roadClearanceRect`/
+  `roadOkRect`, `clearance` → `clearanceRect`, `leastViolation` →
+  `leastViolationRect`)에서, 상수 반경(`body_radius_cm`, 3분할 원 근사 -
+  candidate 생성의 offset 목표값 계산에는 그대로 남아있음)을 실제 차체
+  치수(28x20cm, 후륜축 기준, `VehicleFootprint{body_front_cm=23,
+  rear_overhang_cm=5, half_width_cm=10}`, 새 파라미터 `body_front_cm`/
+  `rear_overhang_cm`/`half_width_cm`)를 그대로 반영한 회전 사각형으로
+  교체했다. 곡선 구간에서 원 근사가 놓치던 실제 차체 전방부 초과분을
+  없앤다.
+  KAU_AMET_Test(Python)에서 먼저 검증: 회전 사각형 4 꼭짓점을 독립적으로
+  divider 기준 nearest-point 재탐색에 넣었더니 곡률이 큰 구간에서 Frenet
+  근사가 왜곡돼(꼭짓점이 centerline 밖 오프셋 점이라 재탐색 결과가 진짜
+  위치와 다른 arc-length 로 튐) vehicle boundary violation 실측이
+  오히려 악화(403→466 rows)됐고, "centerline 점만 1번 탐색 + 사각형은
+  그 결과 위에 평행이동으로 얹는" 우회로 421 rows 까지 개선했지만
+  baseline(403)에는 못 미쳤다(steer-rate max 도 222→400 로 악화). 다만
+  C++ 쪽은 이 문제가 원천적으로 없다 — `pointClearance`가 임의의 (x,y)
+  점을 실제 폴리곤과 직접 비교하는 절대 기하 계산이라 Frenet 근사/
+  nearest-point 재탐색을 전혀 거치지 않으므로, 사각형 4 꼭짓점을
+  그대로(정확한 heading 회전으로 계산) 각 `pointClearance` 에 넣으면
+  된다 — Python 이 겪은 근사 왜곡 없이 더 정확하고 더 단순하게 구현
+  가능. gtest 2개 추가(`test_boundary_checker.cpp`/
+  `test_collision_checker.cpp`, 원 근사로는 놓치는 위반을 사각형이
+  잡아내는지 확인). 61→63 tests, 0 errors, 0 failures.
 - **토픽 예외처리**: KAU_AMET_Test 의 "Lane/Global/Object 두절" 3가지
   대응(`plan()` docstring)이 이미 이 포트에 구조적으로 반영돼 있음을
   이번에 확인했다 (추가 수정 불필요) — Lane 은 `lane_curve_` 가

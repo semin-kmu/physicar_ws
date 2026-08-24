@@ -36,7 +36,8 @@ public:
     LocalPlanner(
         Curve global_path, RoadBoundary boundary,
         std::vector<Obstacle> obstacles, PlannerParams params,
-        double kappa_max_vehicle, double body_radius_cm);
+        double kappa_max_vehicle, double body_radius_cm,
+        VehicleFootprint body_footprint = VehicleFootprint{});
 
     // ref_fusion_/candidate_gen_ 이 이 객체 자신의 멤버(global_path_ 등)를
     // 참조로 들고 있으므로, 복사/이동하면 그 참조가 원본을 계속 가리켜
@@ -67,6 +68,7 @@ private:
     double kappa_lim_;
     double kappa_max_vehicle_;
     double body_radius_cm_;
+    VehicleFootprint body_footprint_;
 
     ReferenceFusion ref_fusion_;
     CandidateGenerator candidate_gen_;

@@ -22,7 +22,13 @@ local_planner_node:
 
     # 차량 제원 (docs/경로_형식.md 부록 B 확정값)
     kappa_max_vehicle: 0.020221      # 1/cm, R_min=49.455cm, delta_max=20deg
-    body_radius_cm: 11.0353          # 3분할 원 근사 반경 (body 28x20cm, rear_overhang 5cm)
+    body_radius_cm: 11.0353          # 3분할 원 근사 반경 (candidate 생성 offset 계산에 유지)
+    # 2026-08-25: road/obstacle hard-gate 전용 회전 사각형 차체 (후륜축 기준).
+    # body_radius_cm(3분할 원)의 근사 오차(곡선에서 전방부가 원보다 튀어나감)를
+    # 없애기 위해 실제 치수(28x20cm, rear_overhang 5cm)를 그대로 반영.
+    body_front_cm: 23.0              # 후륜축 -> 전단 (body_length - rear_overhang)
+    rear_overhang_cm: 5.0            # 후륜축 -> 후단
+    half_width_cm: 10.0              # body_width / 2
     wheelbase_cm: 18.0
 
     # sim world -> map 변환 (kau_global_path 확인값, 회전 없음)

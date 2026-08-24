@@ -94,6 +94,65 @@ double clearance(
     return best;
 }
 
+double clearanceRect(
+    const Curve & cv, const std::vector<Obstacle> & obstacles,
+    const VehicleFootprint & body, double clear_target_cm,
+    double sample_interval_cm, double clear_cap_cm)
+{
+    double max_radius = 0.0;
+    for (const Obstacle & o : obstacles)
+    {
+        max_radius = std::max(max_radius, o.radius);
+    }
+    // 사각형 어느 꼭짓점에서도 station 중심까지의 최대거리 (근사와 무관한
+    // 실제 대각선 절반) 를 prefilter reach 로 써서 놓치는 장애물이 없게 함.
+    const double body_reach = std::hypot(body.body_front_cm, body.half_width_cm);
+    const double reach = body_reach + clear_target_cm + max_radius;
+
+    const std::vector<Obstacle> near = obstaclesNear(cv, obstacles, reach);
+    if (near.empty())
+    {
+        return clear_cap_cm;
+    }
+
+    double best = std::numeric_limits<double>::infinity();
+    const int nseg = cv.nseg();
+    for (int i = 0; i < nseg; ++i)
+    {
+        const int count = std::max(
+            3, static_cast<int>(std::ceil(cv.segLen(i) / sample_interval_cm)) + 1);
+        const bool include_end = (i == nseg - 1);
+        const double step = include_end
+            ? 1.0 / static_cast<double>(count - 1)
+            : 1.0 / static_cast<double>(count);
+        const kau::bezier::Ctrl & seg = cv.seg(i);
+        const kau::bezier::Ctrl d1 = kau::bezier::hodograph(seg);
+        for (int k = 0; k < count; ++k)
+        {
+            const double u = static_cast<double>(k) * step;
+            const Point2 center = kau::bezier::evalSeg(seg, u);
+            const Point2 tangent = kau::bezier::evalSeg(d1, u);
+            const double heading = std::atan2(tangent.y, tangent.x);
+            const double ch = std::cos(heading);
+            const double sh = std::sin(heading);
+            for (const Obstacle & o : near)
+            {
+                const double dx = o.center.x - center.x;
+                const double dy = o.center.y - center.y;
+                const double local_x = dx * ch + dy * sh;
+                const double local_y = -dx * sh + dy * ch;
+                const double clamped_x = std::clamp(
+                    local_x, -body.rear_overhang_cm, body.body_front_cm);
+                const double clamped_y = std::clamp(
+                    local_y, -body.half_width_cm, body.half_width_cm);
+                const double dist = std::hypot(local_x - clamped_x, local_y - clamped_y);
+                best = std::min(best, dist - o.radius);
+            }
+        }
+    }
+    return best;
+}
+
 double previewClear(
     const Curve & global_path, const std::vector<ObstacleStation> & stations,
     double d, double end_ratio, double s0, double l_plan, double preview,

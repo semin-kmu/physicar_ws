@@ -113,7 +113,8 @@ public:
         const std::vector<Obstacle> & obstacles,
         const std::vector<ObstacleStation> & stations,
         const PlannerParams & params, double kappa_lim,
-        double kappa_max_vehicle, double body_radius_cm);
+        double kappa_max_vehicle, double body_radius_cm,
+        VehicleFootprint body_footprint = VehicleFootprint{});
 
     // 참조 멤버(global_path_ 등)를 들고 있어 복사/이동하면 댕글링된다.
     CandidateGenerator(const CandidateGenerator &) = delete;
@@ -195,6 +196,7 @@ private:
     double kappa_lim_;
     double kappa_max_vehicle_;
     double body_radius_cm_;
+    VehicleFootprint body_footprint_;
 
     // Python: self._direct_seed -- 직전 성공 direct_candidate 조합 warm-start.
     mutable std::optional<std::array<double, 4>> direct_seed_;

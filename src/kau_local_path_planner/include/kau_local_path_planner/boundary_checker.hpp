@@ -27,6 +27,7 @@
 #include <vector>
 
 #include "kau_control/curve.hpp"
+#include "kau_local_path_planner/types.hpp"
 
 namespace kau
 {
@@ -102,6 +103,39 @@ inline bool roadOk(
     double sample_interval_cm)
 {
     return roadClearance(boundary, cv, footprint_cm, sample_interval_cm) >= 0.0;
+}
+
+// ---------------------------------------------------------------------
+// 2026-08-25: 3분할 원 근사(`roadClearance`, 경로 위 점 + 상수 반경) 대신
+// 실제 차체(회전 사각형, 후륜축 기준)로 도로 경계를 검사한다.
+//
+// KAU_AMET_Test 세션에서 이 아이디어를 먼저 Python 으로 검증했다. 거기서는
+// 회전 사각형의 4 꼭짓점을 각각 독립적으로 (divider 기준) nearest-point
+// 재탐색에 넣었더니, 곡률이 큰 구간에서 꼭짓점(centerline 밖 오프셋 점)의
+// 재탐색이 진짜 위치와 다른 arc-length 로 튀는 Frenet 근사 왜곡이 생겨
+// vehicle boundary violation 실측이 오히려 악화됐다 (그래서 Python 쪽은
+// "centerline 점만 1 번 탐색 + 사각형은 그 결과 위에 평행이동으로 얹는"
+// 방식으로 우회했다).
+//
+// 여기(C++)는 그 문제가 원천적으로 없다: `pointClearance`/
+// `distanceToPolygonBoundary` 가 임의의 (x,y) 점을 실제 폴리곤과 직접
+// 비교하는 절대 기하 계산이라, Frenet 근사나 nearest-point 재탐색을 전혀
+// 거치지 않는다. 그래서 사각형 4 꼭짓점을 그대로(정확한 heading 회전으로
+// 계산해) 각각 `pointClearance` 에 넣으면 된다 -- 우회 없이 Python 대비
+// 더 정확하고 더 단순한 구현.
+// ---------------------------------------------------------------------
+double roadClearanceRect(
+    const RoadBoundary & boundary, const Curve & cv,
+    const VehicleFootprint & body, double road_safety_margin_cm,
+    double sample_interval_cm);
+
+inline bool roadOkRect(
+    const RoadBoundary & boundary, const Curve & cv,
+    const VehicleFootprint & body, double road_safety_margin_cm,
+    double sample_interval_cm)
+{
+    return roadClearanceRect(boundary, cv, body, road_safety_margin_cm,
+                             sample_interval_cm) >= 0.0;
 }
 
 }  // namespace local_path_planner

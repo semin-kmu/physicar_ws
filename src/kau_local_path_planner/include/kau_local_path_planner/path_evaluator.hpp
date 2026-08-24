@@ -59,6 +59,16 @@ std::optional<std::pair<double, Curve>> leastViolation(
     const std::vector<Obstacle> & obstacles, double obs_margin,
     double clear_target_cm, double kappa_max_vehicle);
 
+// 2026-08-25: `leastViolation` 과 동일하되, 3분할 원 근사 대신 실제 차체
+// (회전 사각형)로 road/obstacle 위반을 계산한다 (`roadClearanceRect`/
+// `clearanceRect`).
+std::optional<std::pair<double, Curve>> leastViolationRect(
+    const std::vector<Candidate> & cands,
+    const RoadBoundary & boundary, const VehicleFootprint & body,
+    double road_safety_margin_cm, double road_sample_interval_cm,
+    const std::vector<Obstacle> & obstacles, double obs_margin,
+    double clear_target_cm, double kappa_max_vehicle);
+
 }  // namespace local_path_planner
 }  // namespace kau
 

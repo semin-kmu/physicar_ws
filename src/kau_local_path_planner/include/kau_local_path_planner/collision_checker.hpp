@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "kau_control/curve.hpp"
+#include "kau_local_path_planner/types.hpp"
 
 namespace kau
 {
@@ -47,6 +48,15 @@ double minDistToPoint(const Curve & cv, const Point2 & p);
 double clearance(
     const Curve & cv, const std::vector<Obstacle> & obstacles,
     double body_radius_cm, double clear_target_cm, double clear_cap_cm = 999.0);
+
+// 2026-08-25: 3분할 원 근사(`clearance`) 대신 실제 차체(회전 사각형,
+// 후륜축 기준)와 장애물(원) 간 최단거리. 각 station 에서 장애물 중심을
+// heading 기준 로컬프레임으로 회전한 뒤 사각형 반폭으로 클램프하는 표준
+// rectangle-point 최단거리 공식 (KAU_AMET_Test Python 포팅과 동일 원리).
+double clearanceRect(
+    const Curve & cv, const std::vector<Obstacle> & obstacles,
+    const VehicleFootprint & body, double clear_target_cm,
+    double sample_interval_cm, double clear_cap_cm = 999.0);
 
 // Python: LocalPlanner._preview_clear. l_plan 종점 너머 preview 구간의
 // 장애물 여유 [cm]. 비용에만 반영, hard gate 아님.
