@@ -214,7 +214,7 @@ KauLaneDetectionNode::KauLaneDetectionNode()
     bev_src_top_y_ =
         this->declare_parameter<double>(
             "bev_src_top_y",
-            195.0
+            210.0
         );
 
     bev_src_bottom_y_ =
@@ -933,17 +933,25 @@ KauLaneDetectionNode::KauLaneDetectionNode()
         );
 
     // 제어점 평균거리 기준. 차로 폭(31.25)의 절반쯤을 상한으로 둔다.
+    // **공칭 14 Hz 기준값**이고, 느린 프레임에서는 dt 에 비례해
+    // 넓혀 쓴다 (robustifyPath 주석 참고).
     path_ema_gate_cm_ =
         this->declare_parameter<double>(
             "path_ema_gate_cm",
             15.0
         );
 
+    path_ema_gate_dt_scale_max_ =
+        this->declare_parameter<double>(
+            "path_ema_gate_dt_scale_max",
+            6.0
+        );
+
     path_ema_relock_frames_ =
         static_cast<int>(
             this->declare_parameter<int>(
                 "path_ema_relock_frames",
-                5
+                3
             )
         );
 
@@ -977,11 +985,19 @@ KauLaneDetectionNode::KauLaneDetectionNode()
             false
         );
 
-    // 첫 명령은 여기로 한 번에 간다. 그 뒤 pan_step_deg_ 씩 전진.
+    // 탐색 첫 목표각. 도달은 pan_rate_deg_s_ 램프로 한다
+    // (예전에는 한 프레임에 점프했다). 그 뒤 pan_step_deg_ 씩 전진.
     pan_start_deg_ =
         this->declare_parameter<double>(
             "pan_start_deg",
             15.0
+        );
+
+    // 목표각으로 다가가는 각속도 상한 [deg/s]. 근거는 선언부 주석.
+    pan_rate_deg_s_ =
+        this->declare_parameter<double>(
+            "pan_rate_deg_s",
+            30.0
         );
 
     // 시작 각도에서 못 찾았을 때의 한 스텝 회전량.
@@ -1325,27 +1341,27 @@ void KauLaneDetectionNode::stepEmaCtrlToward(
     // 제어점에 "같은" 비율을 적용해야 두 곡선의 아핀 블렌드로
     // 남아 모양이 보존된다.
     double max_dist = 0.0;
-
     for (std::size_t i = 0; i < path_ema_ctrl_.size(); ++i)
     {
         max_dist = std::max(
             max_dist,
             std::hypot(
                 target[i].x - path_ema_ctrl_[i].x,
-                target[i].y - path_ema_ctrl_
+                target[i].y - path_ema_ctrl_[i].y
+            )
+        );
     }
-
     const double s =
-        (max_dist <= max_step_cm || max_dist
+        (max_dist <= max_step_cm || max_dist < 1e-9)
             ? 1.0
             : max_step_cm / max_dist;
-
-    for (std::size_t i = 0; i < path_ema_ctr
+    for (std::size_t i = 0; i < path_ema_ctrl_.size(); ++i)
     {
-        path_ema_ctrl_[i].x += s * (target[i
+        path_ema_ctrl_[i].x += s * (target[i].x - path_ema_ctrl_[i].x);
         path_ema_ctrl_[i].y += s * (target[i].y - path_ema_ctrl_[i].y);
     }
 }
+  
 
 
 // ================================================================
@@ -2402,6 +2418,32 @@ void KauLaneDetectionNode::jointStateCallback(
 
             joint_state_received_ = true;
 
+
+            // 영상 시각의 각도를 복원하려면 스탬프가 있어야 한다.
+            // (선언부 pan_history_ 주석 참고)
+            const rclcpp::Time stamp(msg->header.stamp);
+
+            // 스탬프가 뒤로 간 경우(시뮬 재시작 등)는 이력을 버린다.
+            // 정렬이 깨지면 보간이 엉뚱한 구간을 집는다.
+            if (
+                !pan_history_.empty() &&
+                stamp < pan_history_.back().stamp
+            )
+            {
+                pan_history_.clear();
+            }
+
+            pan_history_.push_back({stamp, actual_pan_deg_});
+
+            while (
+                pan_history_.size() > 1 &&
+                (stamp - pan_history_.front().stamp).seconds() >
+                    kPanHistorySec
+            )
+            {
+                pan_history_.pop_front();
+            }
+
             break;
         }
     }
@@ -2614,9 +2656,16 @@ KauLaneDetectionNode::LaneDetectionResult KauLaneDetectionNode::detectLaneSlidin
         track_max_turn_deg_ * M_PI / 180.0;
 
 
-    // 창을 완전히 감싸는 반경 (축정렬 bounding box 용)
-    const double reach =
-        std::hypot(half, margin);
+    // 스캔 범위는 창을 감싸는 정사각형(반경 hypot(half, margin)) 이
+    // 아니라 회전 사각형의 **밀착** bounding box 다. dx = u·ct − v·st 이므로
+    // |u|<=half, |v|<=margin 인 점은 반드시
+    //   |dx| <= half|ct| + margin|st|,  |dy| <= half|st| + margin|ct|
+    // 를 만족한다 — 밀착 박스는 창의 진부분집합이 아니라 상위집합이라
+    // 결과가 비트 단위로 같다.
+    //
+    // 정사각형은 th = -pi/2 (직진) 에서 84x84 = 7056 px 를 훑는데
+    // 실제 창은 80x25 = 2000 px 뿐이다. 3.5배를 헛돌았다. 창 하나당
+    // 5천 px 씩, 프레임당 창 40~50개면 20만 px 이 순수 낭비였다.
 
 
     double cx = static_cast<double>(base_x);
@@ -2640,17 +2689,25 @@ KauLaneDetectionNode::LaneDetectionResult KauLaneDetectionNode::detectLaneSlidin
         const double st = std::sin(th);
 
 
+        // 회전 사각형의 밀착 bounding box (위 reach 주석의 근거)
+        const double ext_x =
+            half * std::abs(ct) + margin * std::abs(st);
+
+        const double ext_y =
+            half * std::abs(st) + margin * std::abs(ct);
+
+
         const int x0 =
-            std::max(0, static_cast<int>(std::floor(cx - reach)));
+            std::max(0, static_cast<int>(std::floor(cx - ext_x)));
 
         const int x1 =
-            std::min(width, static_cast<int>(std::ceil(cx + reach)) + 1);
+            std::min(width, static_cast<int>(std::ceil(cx + ext_x)) + 1);
 
         const int y0 =
-            std::max(0, static_cast<int>(std::floor(cy - reach)));
+            std::max(0, static_cast<int>(std::floor(cy - ext_y)));
 
         const int y1 =
-            std::min(height, static_cast<int>(std::ceil(cy + reach)) + 1);
+            std::min(height, static_cast<int>(std::ceil(cy + ext_y)) + 1);
 
 
         // --------------------------------------------------------
@@ -2780,7 +2837,14 @@ KauLaneDetectionNode::LaneDetectionResult KauLaneDetectionNode::detectLaneSlidin
             // ----------------------------------------------------
             // 시각화: 실제로 잡은 창만 그린다.
             // 회전 사각형이라 차선 방향이 눈으로 바로 보인다.
+            //
+            // debug_image 가 비어 있으면 (= 구독자 없음) 통째로
+            // 건너뛴다. 창 하나당 RotatedRect + cv::line 4회라
+            // 프레임당 180회쯤 되고, 전부 아무도 안 보는 그림이었다.
             // ----------------------------------------------------
+
+            if (!debug_image.empty())
+            {
 
             cv::Point2f corners[4];
 
@@ -2810,6 +2874,8 @@ KauLaneDetectionNode::LaneDetectionResult KauLaneDetectionNode::detectLaneSlidin
                     window_color,
                     1
                 );
+            }
+
             }
         }
         else
@@ -2862,6 +2928,12 @@ KauLaneDetectionNode::LaneDetectionResult KauLaneDetectionNode::detectLaneSlidin
     //
     // 다항식으로 다시 그리지 않는다. 점열 자체가 결과다.
     // ============================================================
+
+    if (debug_image.empty())
+    {
+        return result;
+    }
+
 
     for (
         std::size_t i = 1;
@@ -4402,13 +4474,112 @@ bool KauLaneDetectionNode::obstacleAheadOnSide(
 
 
 // ================================================================
-// Pan 명령 발행
+// 영상 스탬프에서의 pan 각도 [deg]
 //
-// 상태기계가 이산 스텝으로 각도를 정하고 그대로 발행한다.
-// 한때 목표/발행을 분리해 매 프레임 각속도 제한으로 다가가는
-// 연속 램프를 썼지만, 실기에서 "꺾다 말다" 하는 움직임이 나와
-// 스텝 방식으로 되돌렸다. pan_goal_deg_ 는 표시용으로만 남아
-// 발행값을 그대로 따라간다.
+// 이력을 스탬프로 이분탐색해 앞뒤 두 샘플 사이를 선형보간한다.
+// 범위 밖이면 끝값으로 자른다 (외삽하지 않는다 — 서보 거동을
+// 모르는 상태에서 외삽하면 없는 정보를 지어내는 것이다).
+//
+// 시계 주의: /joint_states 와 영상은 스탬프 출처가 같다 (시뮬은
+// Gazebo, 실기는 시스템 클록). 그래서 use_sim_time 설정과 무관하게
+// 성립한다 — CLAUDE.md §9 와 같은 근거다. 노드 클록을 섞으면
+// 안 된다.
+// ================================================================
+
+double KauLaneDetectionNode::panAngleAt(
+    const rclcpp::Time & stamp,
+    bool * out_extrapolated) const
+{
+    if (out_extrapolated)
+    {
+        *out_extrapolated = false;
+    }
+
+
+    // 이력이 없으면 명령각으로 물러난다 (드라이버 기동 전 등).
+    if (pan_history_.empty())
+    {
+        if (out_extrapolated)
+        {
+            *out_extrapolated = true;
+        }
+
+        return pan_cmd_deg_;
+    }
+
+
+    if (stamp <= pan_history_.front().stamp)
+    {
+        if (out_extrapolated)
+        {
+            *out_extrapolated = true;
+        }
+
+        return pan_history_.front().deg;
+    }
+
+
+    // 영상이 가장 최근 관절 샘플보다 앞서는 경우. 예전 동작과
+    // 같아지는 지점이라 개선의 여지가 없다 — 그래서 표시해 둔다.
+    if (stamp >= pan_history_.back().stamp)
+    {
+        if (out_extrapolated)
+        {
+            *out_extrapolated = true;
+        }
+
+        return pan_history_.back().deg;
+    }
+
+
+    // stamp 를 감싸는 첫 샘플 (이력은 스탬프 오름차순이다).
+    const auto hi =
+        std::lower_bound(
+            pan_history_.begin(),
+            pan_history_.end(),
+            stamp,
+            [](const PanSample & s, const rclcpp::Time & t)
+            {
+                return s.stamp < t;
+            }
+        );
+
+    if (hi == pan_history_.begin())
+    {
+        return hi->deg;
+    }
+
+    const auto lo = std::prev(hi);
+
+
+    const double span = (hi->stamp - lo->stamp).seconds();
+
+    if (span <= 1e-9)
+    {
+        return hi->deg;
+    }
+
+    const double u = (stamp - lo->stamp).seconds() / span;
+
+    return lo->deg + u * (hi->deg - lo->deg);
+}
+
+
+
+
+// ================================================================
+// Pan 목표각 설정
+//
+// 상태기계는 목표각만 정한다. 실제 발행은 publishPanRamped 가
+// pan_rate_deg_s_ 로 나눠서 한다.
+//
+// > 한때 이 분리를 썼다가 실기에서 "꺾다 말다" 하는 움직임이 나와
+// > 스텝 방식으로 되돌린 적이 있다. 원인은 램프 자체가 아니라
+// > **램프에 정착 대기(settled)가 없었던 것**이다 — 서보가 쫓아가는
+// > 도중의 영상으로 재검출 판정을 반복했다. 지금은 (a) settled 가
+// > "목표 도달 && 서보 정착" 을 둘 다 보고, (b) 재검출 기준이
+// > found_count>0 에서 창 6개 x 2프레임으로 올라가 있어 그 실패
+// > 모드가 막혀 있다. 그래서 램프를 다시 쓴다.
 //
 // physicar_driver_node::apply_pan 은 절대각[rad]을 받아 내부에서
 // ±30도로 한 번 더 클램프한다. 여기서도 pan_max_deg_ 로 먼저
@@ -4418,18 +4589,68 @@ bool KauLaneDetectionNode::obstacleAheadOnSide(
 // 볼 것인가)은 pan_search_dir_ 가 정하며 이것과 무관하다.
 // ================================================================
 
-void KauLaneDetectionNode::commandPan(double cmd_deg)
+void KauLaneDetectionNode::commandPan(double goal_deg)
 {
-    pan_cmd_deg_ =
+    pan_goal_deg_ =
         std::clamp(
-            cmd_deg,
+            goal_deg,
             -pan_max_deg_,
             pan_max_deg_
         );
+}
 
 
-    // 스텝 방식에서는 목표와 발행값이 같다 (표시 일관성 유지).
-    pan_goal_deg_ = pan_cmd_deg_;
+
+
+// ================================================================
+// Pan 램프 발행
+//
+// 목표각을 향해 한 프레임분(pan_rate_deg_s_ * dt)만 다가가서
+// 발행한다. 매 프레임 무조건 호출된다 — 목표가 안 바뀐 프레임에도
+// 램프가 진행 중일 수 있기 때문이다.
+//
+// dt 는 노드 클록이 아니라 영상 프레임 스탬프로 잰다. use_sim_time
+// 이 false 인데 센서가 sim time 을 달고 오면 노드 클록 기준 dt 가
+// 터무니없이 나와 램프가 한 프레임에 끝나 버린다 (CLAUDE.md §9
+// 시계 주의와 같은 함정).
+// ================================================================
+
+void KauLaneDetectionNode::publishPanRamped(
+    const rclcpp::Time & frame_stamp)
+{
+    // 첫 프레임과 스탬프가 튄 프레임은 공칭 주기로 대체한다.
+    double dt = 1.0 / 14.0;
+
+    if (pan_ramp_time_init_)
+    {
+        dt = (frame_stamp - pan_ramp_last_stamp_).seconds();
+
+        if (dt <= 0.0 || dt > 1.0)
+        {
+            dt = 1.0 / 14.0;
+        }
+    }
+
+    pan_ramp_last_stamp_ = frame_stamp;
+
+    pan_ramp_time_init_ = true;
+
+
+    const double max_step =
+        std::max(0.0, pan_rate_deg_s_) * dt;
+
+    const double remain = pan_goal_deg_ - pan_cmd_deg_;
+
+
+    // rate <= 0 이면 램프를 끄고 즉시 목표로 간다 (예전 스텝 동작).
+    if (max_step <= 0.0 || std::abs(remain) <= max_step)
+    {
+        pan_cmd_deg_ = pan_goal_deg_;
+    }
+    else
+    {
+        pan_cmd_deg_ += std::copysign(max_step, remain);
+    }
 
 
     std_msgs::msg::Float64 msg;
@@ -4511,20 +4732,36 @@ void KauLaneDetectionNode::updatePanSearch(
 
         right_miss_streak_ = 0;
 
+        // 꺼지는 중에도 원위치까지는 램프로 돌아가야 한다.
+        if (std::abs(pan_cmd_deg_ - pan_goal_deg_) > 1e-9)
+        {
+            publishPanRamped(frame_stamp);
+        }
+
         return;
     }
 
 
-    // 실제 각도가 발행한 각도에 도달했는가.
+    // 다음 스텝으로 넘어가도 되는가 — 두 가지를 **둘 다** 본다.
     //
-    // /joint_states 를 아직 못 받았으면(드라이버 기동 전 등)
-    // 확인할 방법이 없으므로 명령만 믿는다. 실기 드라이버는
-    // 서보 인코더가 없어 마지막 명령을 되쏘므로 여기서는
-    // 항상 참이 된다 (헤더 주석 참고).
-    const bool settled =
+    //  (1) 램프가 목표에 닿았는가 (at_goal)
+    //  (2) 서보가 그 명령에 도달했는가 (servo_ok)
+    //
+    // 예전에는 (2) 만 봤다. 그런데 실기 드라이버는 서보 인코더가
+    // 없어 마지막 명령을 그대로 되쏘므로 (2) 는 **항상 참**이다.
+    // 즉 실기에서는 정착 대기가 사실상 없었고, 스텝이 프레임마다
+    // 나가 서보가 끝까지 쫓기지 못한 채 각도만 앞서 갔다.
+    // (1) 이 그 공백을 메운다 — 램프는 우리가 발행하는 값이라
+    // 인코더 없이도 정직하게 여러 프레임이 걸린다.
+    const bool at_goal =
+        std::abs(pan_cmd_deg_ - pan_goal_deg_) <= 1e-9;
+
+    const bool servo_ok =
         !joint_state_received_ ||
         std::abs(actual_pan_deg_ - pan_cmd_deg_) <=
             pan_settle_tol_deg_;
+
+    const bool settled = at_goal && servo_ok;
 
 
     switch (pan_state_)
@@ -4660,15 +4897,19 @@ void KauLaneDetectionNode::updatePanSearch(
 
             pan_found_streak_ = 0;
 
-            // 첫 명령은 기어가지 않고 쓸 만한 각도로 바로 뛴다.
+            // 첫 목표는 쓸 만한 각도로 크게 잡되, 도달은 램프로 한다.
             commandPan(pan_start_deg_ * pan_search_dir_);
 
             RCLCPP_INFO(
                 this->get_logger(),
-                "Pan 탐색 시작: %s 흰선 %d프레임 연속 소실 -> %+.1fdeg",
+                "Pan 탐색 시작: %s 흰선 %d프레임 연속 소실 "
+                "-> 목표 %+.1fdeg (%.0fdeg/s 램프, 약 %.2fs)",
                 (pan_search_dir_ > 0) ? "왼쪽" : "오른쪽",
                 pan_trigger_miss_frames_,
-                pan_cmd_deg_
+                pan_goal_deg_,
+                pan_rate_deg_s_,
+                (pan_rate_deg_s_ > 0.0)
+                    ? std::abs(pan_goal_deg_) / pan_rate_deg_s_ : 0.0
             );
 
             break;
@@ -4896,42 +5137,47 @@ void KauLaneDetectionNode::updatePanSearch(
 
         case PanSearchState::Returning:
         {
+            // 목표를 0 으로 한 번만 세우고, 나머지는 램프가 한다.
+            // 예전에는 pan_step_deg_ 씩 계단으로 되돌아왔다.
+            if (std::abs(pan_goal_deg_) > 1e-9)
+            {
+                commandPan(0.0);
+
+                break;
+            }
+
+
             if (!settled)
             {
                 break;
             }
 
 
-            if (std::abs(pan_cmd_deg_) <= 1e-6)
-            {
-                pan_state_ = PanSearchState::Idle;
+            pan_state_ = PanSearchState::Idle;
 
-                pan_search_dir_ = 0;
+            pan_search_dir_ = 0;
 
-                left_miss_streak_ = 0;
+            left_miss_streak_ = 0;
 
-                right_miss_streak_ = 0;
+            right_miss_streak_ = 0;
 
-                pan_straight_streak_ = 0;
-
-                break;
-            }
-
-
-            const double step =
-                std::copysign(
-                    std::min(
-                        pan_step_deg_,
-                        std::abs(pan_cmd_deg_)
-                    ),
-                    -pan_cmd_deg_
-                );
-
-            commandPan(pan_cmd_deg_ + step);
+            pan_straight_streak_ = 0;
 
             break;
         }
     }
+
+
+    // ------------------------------------------------------------
+    // 램프 한 프레임 진행.
+    //
+    // 상태기계 뒤에 두는 이유: 이번 프레임에 목표가 새로 세워졌으면
+    // 그 즉시 첫 스텝이 나가고, 목표가 안 바뀐 프레임에도 램프가
+    // 계속 진행된다. 목표에 이미 닿아 있으면 같은 값을 재발행하는
+    // 것뿐이라 (절대각 명령이므로) 무해하다.
+    // ------------------------------------------------------------
+
+    publishPanRamped(frame_stamp);
 }
 
 
@@ -5039,11 +5285,65 @@ void KauLaneDetectionNode::robustifyPath(
         return;
     }
 
+    // ------------------------------------------------------------
+    // dt — 게이트와 이동 상한이 **둘 다** 이걸 써야 한다.
+    //
+    // 예전에는 dt 를 아래 이동 상한 직전에만 구했고, 이상치 게이트는
+    // dt 와 무관한 절대값(path_ema_gate_cm_)이었다. 두 안전장치의
+    // 단위가 어긋나 있었던 것이다:
+    //
+    //   이동 상한  path_max_step_cm_per_s * dt   [속도]  -> 자동 조정
+    //   이상치 게이트  path_ema_gate_cm            [절대]  -> 고정
+    //
+    // 14 Hz 에서 15 cm/프레임은 210 cm/s 에 해당한다. 그런데 4 Hz 로
+    // 떨어지면 같은 15 cm 가 60 cm/s 가 되어 **3.5배 더 조여진다.**
+    // 그러면 프레임이 느려질수록 멀쩡한 관측이 전부 이상치로 걷어
+    // 차이고 추정치가 얼어붙는다. 얼어붙은 추정치는 base_link 기준
+    // 고정이라, 차가 움직여도 그 자리에 머물러 화면에서는 "경로가
+    // 천천히 원래 자리로 돌아오는" 것으로 보인다.
+    //
+    // 실측 근거: 부하가 높아 프레임이 느려진 구간의 로그 60건에서
+    // 편차 중앙 30.4 cm / 최대 76.8 cm 였다 (상한 15.0). 재잠금이
+    // 105 회 걸렸다.
+    // ------------------------------------------------------------
+
+    double dt = kNominalFrameSec;
+
+    if (path_ema_time_init_)
+    {
+        dt = (frame_stamp - path_ema_last_stamp_).seconds();
+
+        if (dt < 0.0 || dt > 1.0)
+        {
+            dt = kNominalFrameSec;
+        }
+    }
+
+    path_ema_last_stamp_ = frame_stamp;
+
+    path_ema_time_init_ = true;
+
+
     const double dev = pathDeviationCm(path.ctrl, path_ema_ctrl_);
     last_path_dev_cm_ = dev;
 
+
+    // 공칭 주기(14 Hz)에서는 설정값 그대로다 — 기존 동작 보존.
+    // 느려진 만큼만 비례해 넓히고, 상한을 둬서 파이프라인이 멎었을
+    // 때 게이트가 통째로 무력화되는 것은 막는다.
+    const double gate_scale =
+        std::clamp(
+            dt / kNominalFrameSec,
+            1.0,
+            path_ema_gate_dt_scale_max_
+        );
+
+    const double gate_cm = path_ema_gate_cm_ * gate_scale;
+
+    last_path_gate_cm_ = gate_cm;
+
     const bool outlier =
-        (path_ema_gate_cm_ > 0.0) && (dev > path_ema_gate_cm_);
+        (path_ema_gate_cm_ > 0.0) && (dev > gate_cm);
 
     kau::bezier::Ctrl intended = path_ema_ctrl_;   // 기본값: 변화 없음
 
@@ -5067,9 +5367,10 @@ void KauLaneDetectionNode::robustifyPath(
         {
             conf_ema_ *= (1.0 - path_ema_alpha_);
             RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
-                "관측이 추정치에서 평균 %.1fcm 벗어났다 (상한 %.1f). "
+                "관측이 추정치에서 평균 %.1fcm 벗어났다 (상한 %.1f, "
+                "dt 보정 후). "
                 "섞지 않고 신뢰도만 %.2f 로 내린다.",
-                dev, path_ema_gate_cm_, conf_ema_);
+                dev, gate_cm, conf_ema_);
         }
     }
     else
@@ -5091,16 +5392,7 @@ void KauLaneDetectionNode::robustifyPath(
         valid_len_ema_ += path_ema_alpha_ * (path.valid_length_cm - valid_len_ema_);
     }
 
-    // --- 실제 이동은 여기서 한 번에 캡 적용 (publishPanRamped와 동일 패턴) ---
-    double dt = 1.0 / 14.0;
-    if (path_ema_time_init_)
-    {
-        dt = (frame_stamp - path_ema_last_stamp_).seconds();
-        if (dt < 0.0 || dt > 1.0) dt = 1.0 / 14.0;
-    }
-    path_ema_last_stamp_ = frame_stamp;
-    path_ema_time_init_ = true;
-
+    // --- 실제 이동은 여기서 한 번에 캡 적용 (dt 는 위에서 구했다) ---
     stepEmaCtrlToward(intended, path_max_step_cm_per_s_ * dt);
 
     if (!kau::bezier::isRegular(path_ema_ctrl_))
@@ -6289,8 +6581,23 @@ void KauLaneDetectionNode::imageCallback(
         // 8. Debug Image
         // ========================================================
 
+        // 구독자가 없으면 만들지도 그리지도 않는다.
+        //
+        // 발행만 막아 놨더니 정작 비싼 쪽이 그대로 남아 있었다:
+        // 480x360 BGR8 clone(518 KB) + 창 테두리 cv::line 약 180회
+        // (창 45개 x 4변) + 추적선 폴리라인 + putText 4~5줄 +
+        // drawPathOverlay 를 아무도 안 볼 때도 매 프레임 돌렸다.
+        // putText 는 글리프를 매번 래스터라이즈하므로 특히 비싸다.
+        //
+        // 빈 Mat 을 sentinel 로 쓴다 — 아래 그리기 지점과
+        // detectLaneSlidingWindow / drawPathOverlay 가 empty() 를 보고
+        // 건너뛰므로 시그니처를 바꿀 필요가 없다.
+        const bool want_debug =
+            debug_image_publisher_->get_subscription_count() > 0;
+
+
         cv::Mat debug_image =
-            bev_frame.clone();
+            want_debug ? bev_frame.clone() : cv::Mat();
 
 
         // ========================================================
@@ -7028,18 +7335,32 @@ void KauLaneDetectionNode::imageCallback(
         // 이 노드의 최종 산출물. 이산 좌표가 아니라 제어점 6개다.
         // 차로를 묻지 않고 중앙선(황색 점선)만 추종한다.
         //
-        // pan != 0 이어도 짓는다. buildCenterlinePath 가 실측
-        // pan 각만큼 회전 보정한다 (6-b 절, 선언부 헤더 §8 도입부
-        // 주석 참고). /joint_states 를 아직 못 받았으면 실측각
-        // 대신 마지막 명령각을 쓴다 — updatePanSearch 의 settled
-        // 판정과 같은 가정이다 (실기 드라이버는 서보 인코더가
-        // 없어 명령을 그대로 되쏜다).
+        // pan != 0 이어도 짓는다. buildCenterlinePath 가 pan 각만큼
+        // 회전 보정한다 (6-b 절, 선언부 헤더 §8 도입부 주석 참고).
+        //
+        // 각도는 **이 영상이 찍힌 시각**의 값을 쓴다. 예전에는
+        // actual_pan_deg_(= 처리 시각의 값)를 그냥 읽었는데, 카메라가
+        // 도는 중이면 그 사이 각도가 달라져 있어 경로 전체가 잘못된
+        // 각도로 회전했다. 77cm 경로 기준 Δθ 3도가 끝단 4.0cm,
+        // 15도가 19.9cm 다 — pan 중에만 나타나는 튐의 유력 원인.
+        // panAngleAt() 이 스탬프로 보간해 그 어긋남을 없앤다.
         // ========================================================
 
         std::vector<cv::Point2d> center_pts_px;
 
+        bool pan_angle_clamped = false;
+
         const double camera_yaw_deg =
-            joint_state_received_ ? actual_pan_deg_ : pan_cmd_deg_;
+            panAngleAt(
+                rclcpp::Time(msg->header.stamp),
+                &pan_angle_clamped
+            );
+
+        // 보정량 — 이 수정이 실제로 얼마나 일했는지의 지표.
+        // status 의 pdfix 로 나간다. 0 에 가까우면 이 프레임에서는
+        // 카메라가 사실상 정지해 있었다는 뜻이다.
+        const double pan_angle_fix_deg =
+            camera_yaw_deg - actual_pan_deg_;
 
         LanePath lane_path =
             buildCenterlinePath(
@@ -7080,6 +7401,18 @@ void KauLaneDetectionNode::imageCallback(
             msg->header.stamp
         );
 
+
+        // ========================================================
+        // 여기서부터 20절 직전까지는 전부 debug_image 에 그리는
+        // 일뿐이다. 구독자가 없으면 통째로 건너뛴다.
+        //
+        // status 문자열 조립(std::string 연결 3회)과 putText 4~5줄이
+        // 여기 들어 있다. 기계가 읽을 값은 21절의 status 토픽이
+        // 따로 내므로 이 블록을 건너뛰어도 잃는 정보가 없다.
+        // ========================================================
+
+        if (want_debug)
+        {
 
         if (draw_path_overlay_)
         {
@@ -7398,12 +7731,14 @@ void KauLaneDetectionNode::imageCallback(
             );
         }
 
+        }   // if (want_debug)
+
 
         // ========================================================
         // 20. Publish Debug Image
         // ========================================================
 
-        if (debug_image_publisher_->get_subscription_count() > 0)
+        if (want_debug)
         {
         auto debug_msg =
             cv_bridge::CvImage(
@@ -7433,7 +7768,10 @@ void KauLaneDetectionNode::imageCallback(
         // ========================================================
 
         {
-            char rec[320];
+            // 필드를 늘리면 여기도 같이 늘릴 것. snprintf 는 넘치면
+            // 조용히 자르고, lane_failure_logger.py 는 잘린 줄에서
+            // 뒤쪽 필드를 못 찾는다.
+            char rec[416];
 
             // 제어점 최대 횡편차. 게이트3(시야이탈)이 보는 값 그대로.
             double max_lat = 0.0;
@@ -7459,8 +7797,10 @@ void KauLaneDetectionNode::imageCallback(
                 "path=%d gate=%d win=%d band=%.2f "
                 "len=%.1f rad=%.1f maxlat=%.1f cte=%.2f yaw=%.2f "
                 "coff=%.1f csrc=%d "
-                "pan=%d pdeg=%.1f padeg=%.1f "
-                "conf=%.2f edev=%.1f erej=%d pbend=%.1f pvis=%d",
+                "pan=%d pdeg=%.1f padeg=%.1f pgdeg=%.1f "
+                "pdfix=%.2f pdext=%d "
+                "conf=%.2f edev=%.1f egate=%.1f erej=%d "
+                "pbend=%.1f pvis=%d",
                 left_lane.found_count,
                 yellow_lane.found_count,
                 right_lane.found_count,
@@ -7481,8 +7821,12 @@ void KauLaneDetectionNode::imageCallback(
                 static_cast<int>(pan_state_),
                 pan_cmd_deg_,
                 actual_pan_deg_,
+                pan_goal_deg_,
+                pan_angle_fix_deg,
+                pan_angle_clamped ? 1 : 0,
                 lane_path.confidence,
                 last_path_dev_cm_,
+                last_path_gate_cm_,
                 path_ema_reject_streak_,
                 last_bend_deg_,
                 last_visible_at_zero_

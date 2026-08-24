@@ -5,6 +5,15 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
 
+# CMake 의 기본 빌드 타입은 "빈 문자열" 이고, 그러면 GCC 에 -O 가
+# 아예 안 붙는다 (= -O0). 이 노드의 슬라이딩 윈도우는 프레임당
+# 수십만 번 도는 순수 스칼라 루프라 -O0 이면 몇 배 느려진다.
+# 지금 빌드 캐시에는 우연히 Release 가 들어 있지만, build/ 를 지우고
+# 그냥 `colcon build` 하면 -O0 으로 되돌아간다. 기본값을 박아 둔다.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+  set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
+endif()
+
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)

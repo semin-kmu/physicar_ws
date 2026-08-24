@@ -48,6 +48,7 @@
 
     #include <cstdint>
     #include <memory>
+    #include <deque>
     #include <string>
     #include <vector>
 
@@ -583,7 +584,13 @@
         // 한때 목표/발행을 분리해 매 프레임 각속도 제한으로 다가가는
         // 연속 램프를 썼지만, 실기에서 "꺾다 말다" 하는 움직임이
         // 나와 이산 스텝으로 되돌렸다.
-        void commandPan(double cmd_deg);
+        // 목표각만 세운다. 실제 발행은 publishPanRamped 가 한다.
+        void commandPan(double goal_deg);
+
+        // 목표각을 향해 pan_rate_deg_s_ 로 한 프레임분만 다가가
+        // 발행한다. 매 프레임 무조건 호출된다 (목표가 안 바뀌어도
+        // 램프가 진행 중일 수 있으므로).
+        void publishPanRamped(const rclcpp::Time & frame_stamp);
 
 
         // 좌/우 원본 검출 상태를 보고 위 상태기계를 한 프레임 굴린다.
@@ -912,7 +919,15 @@
 
         // 추정치에서 이만큼(제어점 평균거리) 벗어난 관측은 섞지 않는다.
         // 0 이하면 게이트 없이 순수 EMA.
+        //
+        // **공칭 주기(14 Hz) 기준값이다.** 프레임이 느려지면 그만큼
+        // 넓혀서 쓴다 (robustifyPath 참고) — 안 그러면 느린 프레임에서
+        // 멀쩡한 관측이 전부 걷어차여 추정치가 얼어붙는다.
         double path_ema_gate_cm_;
+
+        // 위 게이트를 dt 에 비례해 넓힐 때의 배율 상한.
+        // 파이프라인이 멎었을 때 게이트가 통째로 무력화되는 걸 막는다.
+        double path_ema_gate_dt_scale_max_;
 
         // 기각이 이만큼 연속되면 실제 변화로 보고 재잠금한다.
         int path_ema_relock_frames_;
@@ -934,6 +949,14 @@
         // 직전 프레임의 관측-추정치 편차 [cm]. 진단 전용
         // (path_ema_gate_cm 을 실측으로 잡는 근거가 된다).
         double last_path_dev_cm_ = -1.0;
+
+        // 직전 프레임에 실제로 적용된 게이트 [cm]. dt 로 넓어진
+        // 뒤의 값이라, edev 와 나란히 봐야 기각 여부가 설명된다.
+        double last_path_gate_cm_ = -1.0;
+
+        // 공칭 프레임 주기 [s]. 스탬프가 없거나 튄 프레임의 대체값
+        // 이자, 게이트를 dt 로 넓힐 때의 기준이다.
+        static constexpr double kNominalFrameSec = 1.0 / 14.0;
 
         int ema_miss_streak_ = 0;
 
@@ -1011,17 +1034,36 @@
 
         bool pan_search_enable_;
 
-        // 탐색 시작 각도 [deg]. 첫 명령은 이 각도로 한 번에 간다.
+        // 탐색 첫 목표각 [deg].
         //
         // 차선이 화면에서 빠지는 상황은 대개 코너라 몇 도로는
         // 다시 안 들어온다. 3도씩 기어가면 재검출까지 프레임을
-        // 낭비하고 그동안 경로도 끊겨 있다.
+        // 낭비하고 그동안 경로도 낡는다. 그래서 첫 목표는 크게
+        // 잡는다 — 다만 **도달은 램프로** 한다 (예전에는 이
+        // 각도로 한 프레임에 점프했다).
         double pan_start_deg_;
 
         // 시작 각도에서 못 찾았을 때의 한 스텝 회전량 [deg].
         double pan_step_deg_;
 
         double pan_max_deg_;
+
+        // 목표각으로 다가가는 각속도 상한 [deg/s].
+        //
+        // 예전에는 목표각을 그대로 한 프레임에 발행했다. 그러면
+        // 서보는 매번 "최대 슬루로 쫓아가는" 상태가 되고, 카메라가
+        // 도는 동안 찍힌 영상이 계속 들어온다. 그 영상으로 지은
+        // 경로를 회전 보정할 때 쓰는 각도(actual_pan_deg_)는 영상
+        // 시각이 아니라 처리 시각의 값이라, 슬루가 빠를수록 그
+        // 어긋남이 커진다 (77cm 경로 기준 Δθ 3도 = 끝단 4.0cm,
+        // 15도 = 19.9cm).
+        //
+        // 각속도를 묶으면 그 어긋남의 상한도 같이 묶인다:
+        //   끝단 오차 <= L * pan_rate_deg_s_ * (파이프라인 지연)
+        // 30 deg/s, 지연 50ms 면 1.5도 -> 77cm 에서 2.0cm 다.
+        // 즉 램프는 "부드러움" 뿐 아니라 **회전 보정 오차의
+        // 상한**을 준다 — 지금 방식보다 오히려 정확해진다.
+        double pan_rate_deg_s_;
 
         // |실측 - 목표| 가 이 안이면 정착으로 보고 다음 스텝으로 간다.
         double pan_settle_tol_deg_;
@@ -1112,16 +1154,70 @@
         // camera_pan_joint 는 axis +Z 라 +rad 이 왼쪽이다.
         int pan_search_dir_ = 0;
 
-        // 표시용. 스텝 방식에서는 발행값을 그대로 따라간다.
+        // 상태기계가 세운 목표각 [deg]. 발행값은 여기로 램프한다.
         double pan_goal_deg_ = 0.0;
 
         // 실제로 /camera/pan 에 발행한 각도 [deg]
         double pan_cmd_deg_ = 0.0;
 
-        // /joint_states 가 알려준 현재 각도 [deg]
+        // 램프 dt 계산용. 노드 클록이 아니라 **영상 프레임 스탬프**
+        // 로 잰다 (use_sim_time=false 인데 센서가 sim time 을 달고
+        // 오는 함정 회피 — CLAUDE.md §9 시계 주의).
+        rclcpp::Time pan_ramp_last_stamp_;
+
+        bool pan_ramp_time_init_ = false;
+
+        // /joint_states 가 알려준 **가장 최근** 각도 [deg].
+        //
+        // 이 값은 "서보가 지금 명령에 도달했는가"(servo_ok) 판정
+        // 전용이다. 경로 회전 보정에는 쓰면 안 된다 — 그건 영상이
+        // 찍힌 시각의 각도여야 하므로 panAngleAt() 을 쓴다.
         double actual_pan_deg_ = 0.0;
 
         bool joint_state_received_ = false;
+
+        // ------------------------------------------------------------
+        // pan 각도 이력 — 영상 시각의 각도를 복원하기 위한 것
+        //
+        // 예전에는 imageCallback 이 actual_pan_deg_ 를 그냥 읽었다.
+        // 그런데 그건 50 Hz 콜백이 덮어쓰는 스칼라라 **처리 시각**
+        // 의 값이고, 영상은 그보다 앞서 찍힌 것이다. 카메라가 도는
+        // 중이면 그 사이 각도가 달라져 있으므로, 길이 L 경로의 먼
+        // 끝이 L·Δθ 만큼 밀린다 (77cm 기준 3도 = 4.0cm, 15도 =
+        // 19.9cm). pan 중에만 나타나는 튐의 유력 원인이었다.
+        //
+        // 스탬프를 달아 보관하고 영상 스탬프에서 선형보간한다.
+        // 50 Hz 샘플 사이는 20 ms 이고 램프가 30 deg/s 이므로 그
+        // 구간의 각도 변화는 0.6도, 선형보간 오차는 그보다 훨씬
+        // 작다.
+        //
+        // 실기 주의: 서보 인코더가 없어 이 값들은 "실측"이 아니라
+        // 명령의 에코다. 그래도 **명령 자체가 시간에 따라 변하므로**
+        // (램프) 영상 시각의 명령각을 쓰는 것이 처리 시각의 명령각을
+        // 쓰는 것보다 정확하다. 남는 오차는 서보 추종 지연이고,
+        // 그건 인코더 없이는 관측 불가다.
+        // ------------------------------------------------------------
+
+        struct PanSample
+        {
+            rclcpp::Time stamp;
+
+            double deg;
+        };
+
+        std::deque<PanSample> pan_history_;
+
+        // 이력 보관 길이 [s]. 파이프라인 지연(수십 ms)의 10배 넘게
+        // 잡아 두면 충분하고, 50 Hz x 1 s = 50 개라 비용도 없다.
+        static constexpr double kPanHistorySec = 1.0;
+
+        // 영상 스탬프에서의 pan 각도 [deg].
+        // 이력이 비면 마지막 명령각(pan_cmd_deg_)으로 물러난다.
+        // out_extrapolated 는 스탬프가 이력 범위 밖이라 끝값으로
+        // 잘렸는지를 알려준다 (진단용).
+        double panAngleAt(
+            const rclcpp::Time & stamp,
+            bool * out_extrapolated = nullptr) const;
 
         // 좌/우 흰선이 연속으로 안 잡힌 프레임 수
         int left_miss_streak_ = 0;
