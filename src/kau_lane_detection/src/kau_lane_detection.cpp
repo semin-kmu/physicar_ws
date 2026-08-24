@@ -869,7 +869,7 @@ KauLaneDetectionNode::KauLaneDetectionNode()
     curve_ahead_kappa_thresh_ =
         this->declare_parameter<double>(
             "curve_ahead_kappa_thresh",
-            0.01
+            0.005
         );
 
     // 가려지지 않은 쪽(노란 중앙선)의 꺾임 [deg] 이 이 이상이면
@@ -878,7 +878,7 @@ KauLaneDetectionNode::KauLaneDetectionNode()
     curve_ahead_bend_deg_thresh_ =
         this->declare_parameter<double>(
             "curve_ahead_bend_deg_thresh",
-            15.0
+            5.0
         );
 
     // 소실된 쪽 전방 이 거리 [m] 안에 장애물 원이 있으면 가림으로
@@ -4594,24 +4594,16 @@ void KauLaneDetectionNode::updatePanSearch(
                 const bool curve_ahead =
                     curve_ahead_path || curve_ahead_bend;
 
-                if (
-                    !curve_ahead &&
-                    obstacleAheadOnSide(
-                        pan_search_dir_,
-                        vehicle_pose,
-                        frame_stamp)
-                )
+                if (!curve_ahead)
                 {
                     RCLCPP_INFO_THROTTLE(
                         this->get_logger(),
                         *this->get_clock(),
                         3000,
-                        "%s 흰선이 안 보이지만 그쪽 전방 %.1fm 안에 "
-                        "장애물이 있다 (경로곡률 %.4f 1/cm < %.4f, "
-                        "중앙선꺾임 %.1fdeg < %.1fdeg). 가림으로 보고 "
-                        "pan 하지 않는다.",
+                        "%s 흰선이 안 보이지만 전방이 커브가 아니다 "
+                        "(경로곡률 %.4f 1/cm < %.4f, 중앙선꺾임 %.1fdeg < %.1fdeg). "
+                        "가림으로 보고 pan 하지 않는다.",
                         (pan_search_dir_ > 0) ? "왼쪽" : "오른쪽",
-                        obstacle_ahead_max_m_,
                         (kappa_ahead >= 0.0) ? kappa_ahead : 0.0,
                         curve_ahead_kappa_thresh_,
                         yellow_bend_deg,
