@@ -1,6 +1,7 @@
 """state_machine 노드. Mission·Behavior 상태, 진행도, 속도 상한. 설계는 docs/05~06."""
 
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 
 
@@ -25,7 +26,7 @@ def main(args=None) -> None:
     node = StateMachine()
     try:
         rclpy.spin(node)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
         node.destroy_node()

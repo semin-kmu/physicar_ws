@@ -1,3 +1,167 @@
-# 기동 manifest · 게이트 · 감시 대상
-# 스키마: docs/08 section 3-1
-# 이름·주기 미정: docs/08 section 4-0
+# 기동 manifest. docs/01 section 8 · docs/08 section 3-1
+#
+# 현 구현 범위는 순차 spawn 뿐이다. 관문·재시도·evidence 는 미구현.
+#
+# 노드 필드
+#   name         ROS 노드명. `-r __node:=` 로 강제
+#   package      ament 패키지
+#   executable   lib/<package>/<executable> 을 직접 실행 (ros2 run/launch 미사용)
+#   ros          false 면 --ros-args 를 붙이지 않는다 (ROS 노드가 아닌 프로세스)
+#   param_files  "pkg:share상대경로". **값이 아니라 위치만** 적는다
+#   params       -p key:=value. 값이 @pkg:경로 면 절대경로로 치환
+#   remap        -r from:=to
+#   args         --ros-args 앞에 붙는 인자
+#
+# 단계 필드
+#   id           단계 번호 (로그 표시용)
+#   delay_sec    이 단계 spawn 후 다음 단계까지 대기
+#   nodes        동시 spawn 대상
+
+run:
+  # docs/09 는 /var/log/kau 지만 root 권한이 필요해 홈으로 둔다.
+  log_dir: ~/.ros/kau/{run_id}
+
+stages:
+
+  # 단계 1 · 플랫폼 EKF 재우기
+  #
+  # 차량 제공 EKF 와 우리 EKF 가 동시에 odom->base_footprint 를 쏘면 TF 가 깨진다.
+  # platform_ekf_pause.py 가 lib/ 로 설치되면 주석을 해제한다 (세민_노트.md A-1).
+  # - id: 1
+  #   delay_sec: 1.0
+  #   nodes:
+  #     - name: platform_ekf_pause
+  #       package: kau_localization
+  #       executable: platform_ekf_pause.py
+  #       ros: false
+  #       args:
+  #         - physicar_bringup/config/ekf_params.yaml
+  #         - "@kau_localization:config/ekf.yaml"
+
+  # 단계 2 · odom -> base_footprint
+  - id: 2
+    delay_sec: 2.0
+    nodes:
+      - name: kau_ekf
+        package: robot_localization
+        executable: ekf_node
+        param_files: ["kau_localization:config/ekf.yaml"]
+        params: { use_sim_time: false }
+        remap: { odometry/filtered: /odom }
+
+  # 단계 3 · map -> odom
+  #
+  # map_amcl_lifecycle_manager 가 autostart: true 로 map_server 와 amcl 을
+  # configure/activate 한다. 우리가 Lifecycle 전이를 호출하지 않는다.
+  - id: 3
+    delay_sec: 3.0
+    nodes:
+      - name: map_server
+        package: nav2_map_server
+        executable: map_server
+        param_files: ["kau_localization:config/amcl.yaml"]
+        params:
+          use_sim_time: false
+          yaml_filename: "@kau_localization:maps/kau_v3.yaml"
+
+      - name: amcl
+        package: nav2_amcl
+        executable: amcl
+        param_files: ["kau_localization:config/amcl.yaml"]
+        params:
+          use_sim_time: false
+          scan_topic: /scan
+          # 시작 위치를 알면 켠다. 없으면 RViz 의 /initialpose 를 기다린다.
+          # set_initial_pose: true
+          # initial_pose.x: 0.23
+          # initial_pose.y: -0.02
+          # initial_pose.yaw: 0.0
+
+      - name: map_amcl_lifecycle_manager
+        package: nav2_lifecycle_manager
+        executable: lifecycle_manager
+        param_files: ["kau_localization:config/amcl.yaml"]
+        params: { use_sim_time: false }
+
+  # 단계 4 · 인지. 상호 무관하므로 동시
+  - id: 4
+    delay_sec: 3.0
+    nodes:
+      - name: laser_scan_validator
+        package: kau_object_detection
+        executable: laser_scan_validator_node
+        param_files: ["kau_object_detection:config/laser_scan_validator.yaml"]
+
+      - name: laser_scan_clusterer
+        package: kau_object_detection
+        executable: laser_scan_clusterer_node
+        param_files:
+          - "kau_object_detection:config/laser_scan_clusterer.yaml"
+          - "kau_object_detection:config/amet_2026_track.yaml"
+
+      # input_topic·output_topic 은 노드 기본값이 이미 맞아 지정하지 않는다.
+      - name: start_signal_detector
+        package: kau_object_detection
+        executable: start_signal_detector_node
+        param_files: ["kau_object_detection:config/start_signal_detector.yaml"]
+
+      # pan_search_enable 은 lane_detection.yaml 이 이미 true 다.
+      - name: kau_lane_detection_node
+        package: kau_lane_detection
+        executable: kau_lane_detection_node
+        param_files: ["kau_lane_detection:config/lane_detection.yaml"]
+
+  # 단계 5 · 전역 경로
+  - id: 5
+    delay_sec: 2.0
+    nodes:
+      - name: global_path_publisher
+        package: kau_global_path
+        executable: global_path_publisher.py
+        params:
+          path: "@kau_global_path:config/lane_graph.yaml"
+
+      - name: global_avoidance_publisher
+        package: kau_global_path
+        executable: global_avoidance_publisher.py
+        param_files: ["kau_global_path:config/global_avoidance.yaml"]
+
+  # 단계 6 · 지역 경로. global path + 인지 입력이 있어야 한다
+  - id: 6
+    delay_sec: 2.0
+    nodes:
+      - name: local_planner_node
+        package: kau_local_path_planner
+        executable: local_planner_node
+        param_files: ["kau_local_path_planner:config/local_planner.yaml"]
+        params:
+          track_yaml_path: "@kau_object_detection:config/amet_2026_track.yaml"
+
+  # 단계 7 · 상태 머신
+  #
+  # mission_profile.yaml 은 아직 주석뿐이라 param_files 에 넣지 않는다.
+  - id: 7
+    delay_sec: 1.0
+    nodes:
+      - name: state_machine
+        package: kau_state_machine
+        executable: state_machine
+
+  # 단계 8 · 조향. 구동보다 먼저 연다 (01 section 4-2)
+  - id: 8
+    delay_sec: 1.0
+    nodes:
+      - name: steer_controller
+        package: kau_control
+        executable: steer_controller_node
+        param_files: ["kau_control:config/steer_controller.yaml"]
+        params: { use_sim_time: false }
+
+  # 단계 9 · 구동. 마지막에 연다
+  - id: 9
+    nodes:
+      - name: speed_controller
+        package: kau_control
+        executable: speed_controller_node
+        param_files: ["kau_control:config/speed_controller.yaml"]
+        params: { use_sim_time: false }

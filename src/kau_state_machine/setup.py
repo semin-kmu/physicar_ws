@@ -14,6 +14,8 @@ setup(
         ('share/' + package_name + '/config', glob('config/*.yaml')),
         ('share/' + package_name + '/launch', glob('launch/*.launch.py')),
     ],
+    # docs/01 section 13-1 범용 스텁. 기동 시퀀스 검증용
+    scripts=['test/stub/stub_node.py'],
     install_requires=['setuptools'],
     zip_safe=True,
     maintainer='Jeon Semin',

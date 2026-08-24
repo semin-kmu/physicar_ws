@@ -1,0 +1,34 @@
+# 시퀀스 검증용 manifest. 실 노드 대신 stub_node.py 를 단계별로 띄운다.
+run:
+  log_dir: /tmp/kau_stub/{run_id}
+
+stages:
+  - id: 1
+    delay_sec: 0.3
+    nodes:
+      - name: stub_a
+        package: kau_state_machine
+        executable: stub_node.py
+        ros: false
+        args: ["--print-argv"]
+
+  - id: 2
+    delay_sec: 0.3
+    nodes:
+      - name: stub_b
+        package: kau_state_machine
+        executable: stub_node.py
+        ros: false
+        args: ["--child"]
+      - name: stub_c
+        package: kau_state_machine
+        executable: stub_node.py
+        ros: false
+        args: ["--ignore-sigterm"]
+
+  - id: 3
+    nodes:
+      # 실제 ROS 노드. --ros-args 경로 검증
+      - name: stub_d
+        package: kau_state_machine
+        executable: state_machine

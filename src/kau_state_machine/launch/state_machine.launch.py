@@ -1,4 +1,4 @@
-"""본 패키지 2노드만 기동. 타 노드는 system_supervisor 가 직접 spawn (01 section 3)."""
+"""system_supervisor 1개만 기동. 나머지는 supervisor 가 spawn (01 section 2)."""
 
 import os
 
@@ -16,10 +16,8 @@ def generate_launch_description() -> LaunchDescription:
 
     args = [
         DeclareLaunchArgument('bringup_yaml', default_value=os.path.join(cfg, 'bringup.yaml')),
-        DeclareLaunchArgument('recovery_yaml', default_value=os.path.join(cfg, 'recovery.yaml')),
-        DeclareLaunchArgument(
-            'mission_profile_yaml', default_value=os.path.join(cfg, 'mission_profile.yaml')
-        ),
+        DeclareLaunchArgument('run_id', default_value='',
+                              description='로그 디렉터리 이름. 비우면 기동 시각'),
     ]
 
     supervisor = Node(
@@ -28,19 +26,10 @@ def generate_launch_description() -> LaunchDescription:
         name='system_supervisor',
         output='screen',
         emulate_tty=True,
-        parameters=[
-            LaunchConfiguration('bringup_yaml'),
-            LaunchConfiguration('recovery_yaml'),
-        ],
+        parameters=[{
+            'bringup_yaml': LaunchConfiguration('bringup_yaml'),
+            'run_id': LaunchConfiguration('run_id'),
+        }],
     )
 
-    state_machine = Node(
-        package=PKG,
-        executable='state_machine',
-        name='state_machine',
-        output='screen',
-        emulate_tty=True,
-        parameters=[LaunchConfiguration('mission_profile_yaml')],
-    )
-
-    return LaunchDescription([*args, supervisor, state_machine])
+    return LaunchDescription([*args, supervisor])
