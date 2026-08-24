@@ -313,13 +313,18 @@ void RosBridge::makeWatchSubs()
         {
             // BEST_EFFORT / VOLATILE 구독자는 어떤 발행자 QoS 와도 맞는다.
             //
-            // 콜백 인자를 auto 로 받는 이유: rclcpp 버전에 따라
-            // SerializedMessage 가 const 로 오기도 한다. 어차피 쓰지 않으므로
-            // 타입을 고정하지 않는다.
+            // 콜백 인자 타입을 명시해야 한다. auto (제네릭 람다) 로 두면
+            // operator() 가 템플릿이 되어 rclcpp 의 function_traits 가
+            // 시그니처를 읽지 못하고 컴파일이 깨진다.
+            // 여기 쓴 것은 any_subscription_callback.hpp 의
+            // SharedConstPtrSerializedMessageCallback 그대로다.
+            //
+            // 인자는 쓰지 않는다. 역직렬화 없이 수신 시각만 찍는 것이
+            // 감시 구독의 전부다.
             watch_subs_.push_back(
                 create_generic_subscription(
                     topic, type, observeQos(),
-                    [this, topic](auto)
+                    [this, topic](std::shared_ptr<const rclcpp::SerializedMessage>)
                     {
                         std::lock_guard<std::mutex> lk(mu_);
 
