@@ -143,12 +143,18 @@ src/local_planner_node.cpp   ROS2 wiring (구독/발행/TF/파라미터) 만 담
 | 구독 | `/path/global` | `kau_msgs/KauPath` | TRANSIENT_LOCAL, RELIABLE, depth 1 |
 | 구독 | `/lane/center` | `kau_msgs/KauPath` | RELIABLE, depth 1 |
 | 구독 | `/perception/obstacles` | `kau_msgs/ObstacleCircleArray` | BEST_EFFORT, depth 1, volatile |
-| 구독 | `/steering` | `std_msgs/Float64` [rad] | 기본 |
 | 구독 | TF `map -> base_footprint` | tf2 | — |
 | 발행 | `/path/local` | `kau_msgs/KauPath` (`source=SRC_LOCAL`) | RELIABLE, depth 1 |
 
 파라미터는 `config/local_planner.yaml` 하나로 관리한다. 비용 가중치
 (`w_*`)는 이 파일만 바꾸면 재빌드 없이 바로 반영된다.
+
+2026-08-25: `/steering` 구독을 없앴다. P0 곡률을 제어기 출력에서 만들면
+플래너 입력이 자기 출력의 함수가 되고(폐루프), Pure Pursuit 의 delta 는
+경로 곡률이 아니며, ±20deg clamp 가 곡률 상한을 직접 건드린다 --
+`kappa(0) == kappa0` 가 정확히 성립하므로 조향이 19.07deg 를 넘는 순간
+모든 후보가 `kappa_bound` 로 탈락했다. 이제 이전 계획 경로에서 직접
+구한다 (`config/local_planner.yaml` 의 P0 앵커 항목).
 
 ## 알려진 제약 (후속 확인 필요)
 

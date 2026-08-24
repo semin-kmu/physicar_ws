@@ -54,13 +54,46 @@ public:
     // 갱신한다. stations 도 함께 재계산.
     void updateObstacles(std::vector<Obstacle> obstacles);
 
+    // x/y/yaw 는 TF 실측 자세 (cm, rad, map frame).
     // lane_curve/lane_confidence 는 이번 사이클 lane detection 관측
-    // (없으면 lane_curve=nullptr). Python: LocalPlanner.plan(x,y,yaw,kappa0,lane_result).
+    // (없으면 lane_curve=nullptr).
+    // now_sec 은 이전 경로 나이 판정에만 쓴다 (이 클래스를 ROS-free 로 두려고
+    // 시계를 주입받는다). 단조 증가하기만 하면 어떤 기준시각이어도 된다.
+    //
+    // 2026-08-25: kappa0 인자가 사라졌다. 예전에는 노드가 /steering(제어기
+    // 출력)에서 tan(delta)/L 로 만들어 넘겼는데, 그러면 (a) 플래너 입력이
+    // 자기 출력의 함수가 되어 폐루프가 되고, (b) Pure Pursuit 의 delta 는
+    // 자차->lookahead 현의 곡률이라 경로 곡률이 아니며, (c) delta 가 +-20deg
+    // 로 clamp 되므로 kappa0 가 곡률 상한 자체를 건드린다. 특히 (c) 는
+    // kappa(0) == kappa0 가 정확히 성립하는 탓에 치명적이다 -- 조향이
+    // 19.07deg(= kappa_lim 에 해당) 를 넘는 순간 **모든 후보**가
+    // kappa_bound/kappa_exact 로 탈락한다. 이제 plan() 이 이전 경로에서
+    // 직접 구한다 (computeAnchor).
     PlanResult plan(
-        double x, double y, double yaw, double kappa0,
-        const Curve * lane_curve, float lane_confidence);
+        double x, double y, double yaw,
+        const Curve * lane_curve, float lane_confidence, double now_sec);
 
 private:
+    // P0 로 쓸 상태. 실측 자세와 이전 경로 위 최근접점을 alpha 로 섞은 것.
+    struct Anchor
+    {
+        Point2 p;                 // 위치
+        double yaw    = 0.0;      // 방위
+        double kappa  = 0.0;      // 곡률 (clamp 후)
+        double e      = 0.0;      // cm, 이전 경로에서 자차까지 횡거리
+        double alpha  = 1.0;      // 0=이전 경로, 1=실측
+        double margin = 0.0;      // cm, (1-alpha)*e -- 검사 마진에 더할 값
+    };
+
+    // kappa_ref 는 이전 경로를 못 쓸 때의 곡률 폴백 (참조 곡선의 s0 곡률).
+    // ref_fusion_.project() 이후에 호출할 것.
+    Anchor computeAnchor(
+        const Point2 & p, double yaw, double kappa_ref, double now_sec) const;
+
+    // 앵커 오프셋을 반영한 실효 마진 (CandidateGenerator 쪽과 같은 규약).
+    double roadMargin() const { return kRoadSafetyMarginCm + anchor_margin_cm_; }
+    double obsMargin() const { return params_.obs_margin + anchor_margin_cm_; }
+
     // 채택된 경로의 도로 이탈 진단을 PlanResult 에 채운다 (전 구간 / committed
     // 구간 / 처음 나간 호길이). status 만으로는 "어디서부터 나갔는지" 를 알 수
     // 없어서 튜닝 근거가 없었다.
@@ -81,6 +114,8 @@ private:
     CandidateGenerator candidate_gen_;
 
     std::optional<Curve> previous_path_;   // Python: self._previous_path
+    double prev_stamp_sec_ = 0.0;          // previous_path_ 를 채운 시각 (나이 판정)
+    double anchor_margin_cm_ = 0.0;        // 이번 틱 마진 보정 (roadMargin/obsMargin)
 };
 
 }  // namespace local_path_planner

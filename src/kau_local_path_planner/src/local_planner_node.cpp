@@ -2,7 +2,7 @@
 // local_planner_node.cpp
 //
 // ROS2 wiring: 구독(/path/global, /lane/center, /perception/obstacles,
-// /steering, TF map->base_footprint), local_planner 호출,
+// TF map->base_footprint), local_planner 호출,
 // 발행(/path/local = kau_msgs/KauPath, /viz/path/local = nav_msgs/Path).
 //
 // 알려진 단순화 (KAU_AMET_ROS 세션에서 시간 제약으로 결정, 후속 확인 필요):
@@ -24,7 +24,6 @@
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <rclcpp/rclcpp.hpp>
-#include <std_msgs/msg/float64.hpp>
 #include <tf2/utils.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include <tf2_ros/buffer.h>
@@ -171,10 +170,6 @@ public:
             "/perception/obstacles", obstacle_qos,
             std::bind(&LocalPlannerNode::onObstacles, this, std::placeholders::_1));
 
-        steering_sub_ = create_subscription<std_msgs::msg::Float64>(
-            "/steering", 10,
-            std::bind(&LocalPlannerNode::onSteering, this, std::placeholders::_1));
-
         rclcpp::QoS local_qos(rclcpp::KeepLast(1));
         local_qos.reliable();
         local_path_pub_ = create_publisher<kau_msgs::msg::KauPath>(
@@ -270,6 +265,11 @@ private:
         declare_parameter<double>("w_road", 6.0);
         declare_parameter<double>("clear_target", 15.0);
         declare_parameter<double>("d_scale", 18.0);
+
+        // 2026-08-25: P0 앵커. types.hpp PlannerParams 주석 참조.
+        declare_parameter<double>("anchor_blend_lo_cm", 5.0);
+        declare_parameter<double>("anchor_blend_hi_cm", 15.0);
+        declare_parameter<double>("anchor_max_age_sec", 0.5);
     }
 
     PlannerParams loadPlannerParams()
@@ -293,6 +293,9 @@ private:
         p.w_road = get_parameter("w_road").as_double();
         p.clear_target = get_parameter("clear_target").as_double();
         p.d_scale = get_parameter("d_scale").as_double();
+        p.anchor_blend_lo_cm = get_parameter("anchor_blend_lo_cm").as_double();
+        p.anchor_blend_hi_cm = get_parameter("anchor_blend_hi_cm").as_double();
+        p.anchor_max_age_sec = get_parameter("anchor_max_age_sec").as_double();
         return p;
     }
 
@@ -405,11 +408,6 @@ private:
         latest_obstacles_ = std::move(obstacles);
     }
 
-    void onSteering(const std_msgs::msg::Float64::SharedPtr msg)
-    {
-        current_steer_rad_ = msg->data;
-    }
-
     void onTimer()
     {
         if (!planner_)
@@ -435,15 +433,16 @@ private:
         const double y = tf.transform.translation.y * 100.0;
         const double yaw = tf2::getYaw(tf.transform.rotation);
 
-        // kappa0 = tan(delta) / L (문서 6.3 ⑤, Python: car.steer 와 동일 역할).
-        const double wheelbase_cm = get_parameter("wheelbase_cm").as_double();
-        const double kappa0 = std::tan(current_steer_rad_) / wheelbase_cm;
-
+        // 2026-08-25: /steering(제어기 출력)에서 kappa0 를 만들던 코드를
+        // 걷어냈다. P0 곡률은 plan() 이 이전 계획 경로에서 직접 구한다
+        // (local_planner.hpp 의 plan() 주석 참조). 제어기 -> 플래너 방향
+        // 의존이 사라졌다.
         planner_->updateObstacles(latest_obstacles_);
 
         const kau::control::Curve * lane_ptr =
             lane_curve_.has_value() ? &*lane_curve_ : nullptr;
-        const auto result = planner_->plan(x, y, yaw, kappa0, lane_ptr, lane_confidence_);
+        const auto result = planner_->plan(
+            x, y, yaw, lane_ptr, lane_confidence_, now().seconds());
 
         if (!result.path.has_value())
         {
@@ -470,14 +469,16 @@ private:
         // 서부터인지" 를 알 수 없었다. road_cmt 는 멀쩡한데 road_full 이 음수
         // 라면 committed horizon 이후(무검증 구간) 때문이라는 뜻이다.
         RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000,
-            "plan st=%d d=%+.1f kmax=%.5f obs=%+.1f wheels_on=%d "
+            "plan st=%d d=%+.1f k0=%+.5f kmax=%.5f obs=%+.1f wheels_on=%d "
             "road_full=%+.1f road_cmt=%+.1f viol_s=%.0f off=%.1f "
-            "alive=%d lane=%d %.1fms",
+            "e=%.1f a=%.2f m=%.1f alive=%d lane=%d %.1fms",
             static_cast<int>(result.status), result.chosen_offset,
-            result.kappa_max, result.clearance, result.min_wheels_on,
+            result.kappa0, result.kappa_max, result.clearance,
+            result.min_wheels_on,
             result.road_clear_full, result.road_clear_committed,
-            result.road_viol_s, result.road_off_len, result.alive,
-            result.lane_used ? 1 : 0, result.calc_ms);
+            result.road_viol_s, result.road_off_len,
+            result.anchor_e_cm, result.anchor_alpha, result.anchor_margin_cm,
+            result.alive, result.lane_used ? 1 : 0, result.calc_ms);
 
         if (result.min_wheels_on < 4)
         {
@@ -506,13 +507,11 @@ private:
     std::optional<kau::control::Curve> lane_curve_;
     float lane_confidence_ = 0.0f;
     std::vector<Obstacle> latest_obstacles_;
-    double current_steer_rad_ = 0.0;
     double viz_spacing_cm_ = 5.0;
 
     rclcpp::Subscription<kau_msgs::msg::KauPath>::SharedPtr global_path_sub_;
     rclcpp::Subscription<kau_msgs::msg::KauPath>::SharedPtr lane_sub_;
     rclcpp::Subscription<kau_msgs::msg::ObstacleCircleArray>::SharedPtr obstacle_sub_;
-    rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr steering_sub_;
     rclcpp::Publisher<kau_msgs::msg::KauPath>::SharedPtr local_path_pub_;
     rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr viz_path_pub_;
     rclcpp::TimerBase::SharedPtr timer_;

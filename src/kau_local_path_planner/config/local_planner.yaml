@@ -104,4 +104,36 @@ local_planner_node:
     clear_target: 15.0
     d_scale: 18.0
 
+    # --- P0 앵커 (2026-08-25) ---
+    #
+    # 문제: P0 를 실측 자세에 두면 추종오차 e 가 매 틱 계획에 실린다. 첫 knot
+    # 이 0.25*l_plan(=75cm) 이라 플래너는 e 를 75cm 안에 없애라고 요구하는데
+    # (추가 곡률 ~ 4e/d^2), Pure Pursuit 의 횡오차 수렴에는 Ld(=50cm @1m/s)의
+    # 몇 배 거리가 든다. 오차가 줄기 전에 요구가 커져 발산한다:
+    #   e   3cm ->  +10.6% kappa_max
+    #   e   5cm ->  +17.6%
+    #   e  10cm ->  +35.2%
+    # 조향 70% 코너에서 e=7.1cm 면 kappa0 가 kappa_lim 을 넘어 **전 후보**가
+    # kappa_bound 로 탈락하고 kDegraded 로 떨어진다 (kappa(0) == kappa0 가
+    # 정확히 성립하기 때문).
+    #
+    # 대책: P0 를 이전 틱 경로 위 최근접점으로 옮긴다. 이 투영은 자차 편차를
+    # 종방향(진행, 남김)과 횡방향(추종오차, 버림)으로 정확히 가른다. 횡오차
+    # 수렴은 제어기 소관이고 Pure Pursuit 이 스스로 한다.
+    #
+    #   e <= lo  -> alpha=0 : 이전 경로의 G2 순수 연장 (루프 차단)
+    #   e >= hi  -> alpha=1 : 실측 자세 (측위 점프/물리 이탈에서 복귀)
+    #   사이     -> 선형 (하드 스위치는 고장 시점에 계획이 튄다)
+    #
+    # lo 는 정상 주행 추종오차보다 커야 루프가 끊긴다. /debug/steer 의
+    # cross_track_cm 분포를 보고 잡을 것.
+    #
+    # 안전: alpha<1 이면 발행 경로가 자차에서 (1-alpha)*e 만큼 떨어진다.
+    # road/obstacle 검사는 경로를 따라 하므로 그 값을 마진에 더한다
+    # (kRoadSafetyMarginCm 이 2cm 뿐이라 빠뜨리면 마진이 음수가 된다).
+    # 이 보정값은 유계다 -- lo=5/hi=15 이면 e=7.5cm 에서 최대 5.6cm.
+    anchor_blend_lo_cm: 5.0
+    anchor_blend_hi_cm: 15.0
+    anchor_max_age_sec: 0.5          # 이전 경로가 이보다 낡으면 alpha=1
+
     track_yaml_path: ""              # launch 가 채움

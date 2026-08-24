@@ -52,16 +52,93 @@ void LocalPlanner::updateObstacles(std::vector<Obstacle> obstacles)
     // 벡터 객체를 그대로 갱신) 별도 재구성 없이 다음 plan() 부터 반영된다.
 }
 
+LocalPlanner::Anchor LocalPlanner::computeAnchor(
+    const Point2 & p, double yaw, double kappa_ref, double now_sec) const
+{
+    Anchor a;
+    a.p = p;
+    a.yaw = yaw;
+    a.kappa = std::clamp(kappa_ref, -kappa_lim_, kappa_lim_);
+
+    // 나이 가드. 이전 경로가 낡았으면(기동 직후 / kNoFeasible 연속) 앵커로
+    // 쓰지 않는다. previous_path_ 는 실패한 틱에 갱신되지 않으므로, 이
+    // 가드가 없으면 몇 초 전 경로가 계속 기준으로 남는다.
+    // 음수(시계 역행 -- bag 재생 재시작, sim time 리셋)도 폐기한다.
+    const double age = now_sec - prev_stamp_sec_;
+    const bool fresh = previous_path_.has_value() &&
+        age >= 0.0 && age <= params_.anchor_max_age_sec;
+    if (!fresh)
+    {
+        return a;
+    }
+
+    const kau::control::TrackState st = previous_path_->nearestGlobal(p);
+    if (!st.valid)
+    {
+        return a;
+    }
+
+    // 투영이 자차 편차를 가른다: 종방향은 st.s 가 흡수(진행), 횡방향 st.dist
+    // 가 추종오차. 아래 blend 가 이 횡방향만 버린다.
+    a.e = st.dist;
+
+    // 거리 가드 겸 혼합비. lo 이하는 완전 앵커(루프 차단), hi 이상은 실측
+    // (측위 점프/물리적 이탈에서 복귀 능력 유지), 사이는 선형.
+    const double lo = params_.anchor_blend_lo_cm;
+    const double hi = params_.anchor_blend_hi_cm;
+    a.alpha = (hi > lo) ? std::clamp((a.e - lo) / (hi - lo), 0.0, 1.0)
+                        : ((a.e <= lo) ? 0.0 : 1.0);   // 설정이 뒤집혀도 계단 동작
+
+    const Frame pf = referenceFrame(*previous_path_, previous_path_->wrapS(st.s));
+
+    a.p = Point2{
+        pf.point.x + a.alpha * (p.x - pf.point.x),
+        pf.point.y + a.alpha * (p.y - pf.point.y)};
+    a.yaw = pf.heading + a.alpha * kau::control::wrapPi(yaw - pf.heading);
+
+    // 이전 경로는 이미 kappa_max <= kappa_lim 으로 채택된 곡선이라 alpha=0
+    // 이면 clamp 가 걸릴 일이 없다 -- kappa0 > kappa_lim 로 전 후보가
+    // 탈락하던 문제가 구조적으로 사라진다. clamp 는 kDegraded 경로가
+    // 기준일 때만 드물게 동작하는 보험이다.
+    a.kappa = std::clamp(
+        (1.0 - a.alpha) * pf.kappa + a.alpha * kappa_ref,
+        -kappa_lim_, kappa_lim_);
+
+    // 발행 경로가 자차에서 떨어지는 거리. alpha 가 e 를 눌러주므로 유계다
+    // (lo=5/hi=15 이면 e=hi/2 에서 최대 5.6cm) -- 마진이 폭주할 수 없어
+    // 별도 상한이 필요 없다.
+    a.margin = (1.0 - a.alpha) * a.e;
+    return a;
+}
+
 PlanResult LocalPlanner::plan(
-    double x, double y, double yaw, double kappa0,
-    const Curve * lane_curve, float lane_confidence)
+    double x, double y, double yaw,
+    const Curve * lane_curve, float lane_confidence, double now_sec)
 {
     const auto t0 = std::chrono::steady_clock::now();
-    const Point2 p{x, y};
+    const Point2 p_meas{x, y};
 
-    ref_fusion_.project(p, lane_curve);
+    // 투영은 **실측** 위치로 한다. 투영이 남기는 s0 는 종방향 진행이고,
+    // 그건 버리지 않는 성분이다 (버리는 건 횡방향 추종오차뿐).
+    ref_fusion_.project(p_meas, lane_curve);
     const double s0_frames = ref_fusion_.projectedS();   // Python: s0 = state.s
     const double s0 = ref_fusion_.s0();                  // Python: self._s0
+
+    // P0. 곡률은 TF 로 관측할 수 없으므로 이전 경로(1순위) -> 참조 곡선
+    // (2순위) 순으로 계획값에서 가져온다. 위치/방위는 관측 가능하므로
+    // 실측을 섞는다 (alpha).
+    const double kappa_ref =
+        ref_fusion_.evalFrame(s0_frames, lane_curve, lane_confidence).kappa;
+    const Anchor anchor = computeAnchor(p_meas, yaw, kappa_ref, now_sec);
+    const Point2 p = anchor.p;
+    const double yaw0 = anchor.yaw;
+    const double kappa0 = anchor.kappa;
+
+    // 경로가 자차에서 떨어진 만큼 road/obstacle 검사를 보수적으로 만든다.
+    // 게이트와 후보 생성 양쪽에 **같은 값**이 걸려야 한다 (한쪽만 조이면
+    // 후보가 옛 마진에 붙어 생성돼 전멸한다).
+    anchor_margin_cm_ = anchor.margin;
+    candidate_gen_.setAnchorOffset(anchor.margin);
 
     std::array<Frame, 2> frames{
         ref_fusion_.evalFrame(
@@ -90,7 +167,7 @@ PlanResult LocalPlanner::plan(
     for (const auto & pair : offset_pairs)
     {
         cands.push_back(candidate_gen_.candidate(
-            p, yaw, kappa0,
+            p, yaw0, kappa0,
             std::vector<Frame>{corridor_frames[0], corridor_frames[1], corridor_frames[2]},
             std::vector<double>{pair[0], pair[1], pair[2]},
             s0, previous_path_ ? &*previous_path_ : nullptr));
@@ -100,7 +177,7 @@ PlanResult LocalPlanner::plan(
     // 2개. corridor 후보군에 합류할 뿐 새 candidate family 가 아니다.
     {
         auto obstacle_cands = candidate_gen_.obstacleOffsetCandidates(
-            p, yaw, kappa0, frames, s0,
+            p, yaw0, kappa0, frames, s0,
             previous_path_ ? &*previous_path_ : nullptr);
         cands.insert(cands.end(), obstacle_cands.begin(), obstacle_cands.end());
     }
@@ -122,7 +199,7 @@ PlanResult LocalPlanner::plan(
     if (alive.empty())
     {
         std::vector<Candidate> primitives = candidate_gen_.obstaclePrimitives(
-            p, yaw, kappa0, frames.back(), s0,
+            p, yaw0, kappa0, frames.back(), s0,
             previous_path_ ? &*previous_path_ : nullptr);
         cands.insert(cands.end(), primitives.begin(), primitives.end());
         alive = aliveOf(cands);
@@ -130,7 +207,7 @@ PlanResult LocalPlanner::plan(
     if (alive.empty())
     {
         cands = candidate_gen_.directFamily(
-            p, yaw, kappa0, frames.back(), offset_pairs, std::move(cands), s0,
+            p, yaw0, kappa0, frames.back(), offset_pairs, std::move(cands), s0,
             previous_path_ ? &*previous_path_ : nullptr);
         alive = aliveOf(cands);
     }
@@ -168,7 +245,7 @@ PlanResult LocalPlanner::plan(
             c.cost = kInf; c.reason = "degenerate";
         }
         else if (!roadOkWheels(boundary_, committed_cv, wheels_,
-                              kRoadSafetyMarginCm, kRoadSampleIntervalCm))
+                              roadMargin(), kRoadSampleIntervalCm))
         {
             c.cost = kInf; c.reason = "road_boundary";
         }
@@ -186,17 +263,23 @@ PlanResult LocalPlanner::plan(
     result.s0 = s0_frames;
     result.calc_ms = calc_ms;
     result.lane_used = ref_fusion_.laneUsed();
+    // 아래 세 return 경로가 모두 이 result 를 쓰므로 여기서 한 번만 채운다.
+    result.anchor_e_cm = anchor.e;
+    result.anchor_alpha = anchor.alpha;
+    result.anchor_margin_cm = anchor.margin;
+    result.kappa0 = kappa0;
 
     if (!chosen)
     {
         auto degraded = leastViolationRect(
-            cands, boundary_, body_footprint_, wheels_, kRoadSafetyMarginCm,
-            kRoadSampleIntervalCm, obstacles_, params_.obs_margin,
+            cands, boundary_, body_footprint_, wheels_, roadMargin(),
+            kRoadSampleIntervalCm, obstacles_, obsMargin(),
             params_.clear_target, kappa_max_vehicle_);
         if (degraded)
         {
             const auto & [d, cv] = *degraded;
             previous_path_ = cv;
+            prev_stamp_sec_ = now_sec;
             result.path = cv;
             result.status = PlanStatus::kDegraded;
             result.chosen_offset = d;
@@ -225,6 +308,7 @@ PlanResult LocalPlanner::plan(
 
     const Candidate & c = cands[*chosen];
     previous_path_ = *c.curve;
+    prev_stamp_sec_ = now_sec;
     result.path = *c.curve;
     result.status = PlanStatus::kOk;
     result.chosen_offset = c.d;
@@ -239,6 +323,10 @@ PlanResult LocalPlanner::plan(
 
 void LocalPlanner::fillRoadDiag(PlanResult & result, const Curve & cv) const
 {
+    // 여기만 앵커 보정 없는 kRoadSafetyMarginCm 을 쓴다. 이 값들은 게이트가
+    // 아니라 진단이라, "경로 자체의 도로 여유" 를 앵커 상태와 무관하게
+    // 재야 틱 간 비교가 된다. 게이트에 걸린 실효 마진은 anchor_margin_cm
+    // 을 더해서 보면 된다.
     const RoadReport full = roadReportWheels(
         boundary_, cv, wheels_, kRoadSafetyMarginCm, kRoadSampleIntervalCm);
     result.min_wheels_on = full.min_wheels_on;

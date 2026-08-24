@@ -72,6 +72,26 @@ struct PlannerParams
     double clear_target = 15.0;     // cm, 이 이상 여유면 장애물 항 0
 
     double d_scale = 18.0;          // cm, 후보 offset 정규화 기준 (L_plan 무관 고정값)
+
+    // --- P0 앵커 (2026-08-25) ---
+    //
+    // P0 를 실측 자세에 그대로 두면 추종오차 e 가 매 틱 계획에 실린다.
+    // 첫 knot 이 0.25*l_plan(=75cm) 이므로 플래너는 e 를 75cm 안에 없애라고
+    // 요구하는데(추가 곡률 ~ 4e/d^2), Pure Pursuit 의 횡오차 수렴은 Ld(=50cm
+    // @1m/s)의 몇 배 거리가 든다. 즉 오차가 줄기 전에 요구가 커져 발산한다:
+    //   e=7cm, 조향 70% 코너 -> kappa0 가 kappa_lim 을 넘어 전 후보 탈락.
+    //
+    // 그래서 P0 를 이전 틱 경로 위 최근접점으로 옮긴다. 이 투영은 자차 편차를
+    // 종방향(s* 에 흡수 = 진행)과 횡방향(e = 추종오차)으로 정확히 가르고,
+    // 횡방향만 버린다 -- 횡오차 수렴은 제어기 소관이다.
+    //
+    // alpha 는 두 극단을 잇는 혼합비다. e 가 크면(측위 점프, 물리적 이탈)
+    // 실측으로 되돌아가 복귀 능력을 유지한다.
+    //   e <= lo  -> alpha=0 : 이전 경로의 G2 순수 연장
+    //   e >= hi  -> alpha=1 : 실측 자세 + 참조 곡률
+    double anchor_blend_lo_cm = 5.0;    // 정상 주행 추종오차보다 커야 루프가 끊긴다
+    double anchor_blend_hi_cm = 15.0;   // 이 밖은 이전 경로를 앵커로 쓰지 않는다
+    double anchor_max_age_sec = 0.5;    // 이전 경로가 이보다 낡으면 alpha=1
 };
 
 // ====================================================================
@@ -195,6 +215,15 @@ struct PlanResult
     double road_clear_committed = 0.0;   // cm, committed 구간만 같은 값
     double road_viol_s          = -1.0;  // cm, 바퀴가 처음 완전히 나간 호길이 (없으면 음수)
     double road_off_len         = 0.0;   // cm, 이탈 적분값 (w_road 가 쓰는 값과 동일)
+
+    // --- P0 앵커 진단 (2026-08-25) ---
+    //
+    // 증폭 루프가 끊겼는지는 anchor_e_cm 이 유계인지로 판정한다. 이 값이
+    // 단조 증가하면서 kappa_max 도 같이 오르면 루프가 살아있는 것이다.
+    double anchor_e_cm     = 0.0;   // cm, 이전 경로에서 자차까지 횡거리 (추종오차)
+    double anchor_alpha    = 1.0;   // 0=이전 경로 앵커, 1=실측 자세
+    double anchor_margin_cm = 0.0;  // cm, 이번 틱 road/obstacle 마진에 더한 값
+    double kappa0          = 0.0;   // 1/cm, 이번 틱 P0 곡률 (clamp 후)
 };
 
 }  // namespace local_path_planner

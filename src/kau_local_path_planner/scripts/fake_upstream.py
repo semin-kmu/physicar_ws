@@ -3,9 +3,13 @@
 kau_local_path_planner 단독 검증용 가짜 상류 발행자.
 
 kau_control/scripts/fake_path.py 와 같은 방식(quintic Hermite -> Bezier,
-numpy 없이)으로 /path/global, /lane/center, /perception/obstacles,
-/steering 을 한 번에 발행한다. 다른 팀원 노드 없이 local_planner_node
-하나만 켜놓고 테스트할 때 쓴다 (KAU_AMET_Test 세션의 sources.py 대응).
+numpy 없이)으로 /path/global, /lane/center, /perception/obstacles 를
+한 번에 발행한다. 다른 팀원 노드 없이 local_planner_node 하나만 켜놓고
+테스트할 때 쓴다 (KAU_AMET_Test 세션의 sources.py 대응).
+
+/steering 도 같이 내지만 2026-08-25 부터 local_planner_node 는 이걸
+구독하지 않는다 (P0 곡률은 이전 계획 경로에서 온다). steer_controller
+쪽 확인용으로만 남겨둔 것이라 --steer-deg 는 플래너 결과에 영향이 없다.
 
     ros2 run kau_local_path_planner fake_upstream.py --shape circle --radius 300
 
@@ -221,7 +225,7 @@ def main():
     p.add_argument('--segments', type=int, default=12)
     p.add_argument('--frame', default='map')
     p.add_argument('--steer-deg', type=float, default=0.0,
-                   help='/steering 고정값 [deg], 좌회전 +')
+                   help='/steering 고정값 [deg], 좌회전 + (플래너는 안 쓴다)')
     p.add_argument('--obstacle', default=None,
                    help='m, "X,Y" map frame -- 지정 시 장애물 1개 계속 발행')
     args, ros_args = p.parse_known_args()

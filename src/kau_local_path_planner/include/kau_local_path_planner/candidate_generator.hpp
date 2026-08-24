@@ -123,6 +123,18 @@ public:
     CandidateGenerator(CandidateGenerator &&) = delete;
     CandidateGenerator & operator=(CandidateGenerator &&) = delete;
 
+    // 2026-08-25 (P0 앵커): P0 를 이전 경로에 앵커하면 발행 경로가 자차에서
+    // 최대 이만큼 떨어져 있다. road/obstacle 검사는 **경로를 따라** 수행되므로
+    // 그대로 두면 마진이 그만큼 잠식된다 (kRoadSafetyMarginCm 은 2cm 뿐이다).
+    // 그래서 이 값을 마진에 더해 "계획에서 벗어나 있는 만큼 더 보수적으로"
+    // 검사한다. 게이트뿐 아니라 corridor 폭/장애물 회피 목표값에도 같이
+    // 적용해야 한다 -- 게이트만 조이면 후보가 옛 마진에 딱 붙어 생성돼
+    // 전멸한다. LocalPlanner::plan() 이 매 틱 설정한다.
+    void setAnchorOffset(double offset_cm)
+    {
+        anchor_offset_cm_ = offset_cm > 0.0 ? offset_cm : 0.0;
+    }
+
     // Python: _corridor_offsets(frames), N-frame 일반화(2026-08-24).
     // frames[0]=0.25*l_plan, frames[1]=0.625*l_plan, frames[2]=l_plan(종점).
     // 반환은 7개 (offset_at_frame0, offset_at_frame1, offset_at_frame2) 쌍
@@ -174,6 +186,11 @@ public:
         const Curve * previous_path);
 
 private:
+    // 앵커 오프셋을 반영한 실효 마진. 이 두 개만 쓰고 kRoadSafetyMarginCm /
+    // params_.obs_margin 을 직접 쓰지 말 것 (마진이 갈리면 후보가 전멸한다).
+    double roadMargin() const { return kRoadSafetyMarginCm + anchor_offset_cm_; }
+    double obsMargin() const { return params_.obs_margin + anchor_offset_cm_; }
+
     Candidate primitiveCandidate(
         const std::vector<Knot> & knots, double terminal_offset, double peak,
         double s0, const Curve * previous_path) const;
@@ -199,6 +216,9 @@ private:
     double body_radius_cm_;
     VehicleFootprint body_footprint_;   // 장애물 충돌 판정 (범퍼 포함)
     WheelFootprint   wheels_;           // 도로 이탈 판정 (바퀴 4개)
+
+    // cm, 발행 경로와 자차의 최대 이격 (= (1-alpha)*e). setAnchorOffset() 참조.
+    double anchor_offset_cm_ = 0.0;
 
     // Python: self._direct_seed -- 직전 성공 direct_candidate 조합 warm-start.
     mutable std::optional<std::array<double, 4>> direct_seed_;

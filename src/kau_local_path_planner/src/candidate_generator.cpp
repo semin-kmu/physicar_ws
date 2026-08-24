@@ -92,7 +92,7 @@ CandidateGenerator::CandidateGenerator(
 std::array<std::array<double, 3>, 7> CandidateGenerator::corridorOffsets(
     const std::array<Frame, 3> & frames) const
 {
-    const double footprint = body_radius_cm_ + kRoadSafetyMarginCm;
+    const double footprint = body_radius_cm_ + roadMargin();
     std::array<std::array<double, 7>, 3> offsets{};
 
     for (int f = 0; f < 3; ++f)
@@ -185,7 +185,7 @@ Candidate CandidateGenerator::candidate(
     // 감점). hard reject 는 wheels_.min_wheels_on 미만일 때뿐이고, 그보다
     // 약한 이탈은 아래 w_road 비용으로 흡수한다.
     const RoadReport road = roadReportWheels(
-        boundary_, cv, wheels_, kRoadSafetyMarginCm, kRoadSampleIntervalCm);
+        boundary_, cv, wheels_, roadMargin(), kRoadSampleIntervalCm);
     if (road.min_wheels_on < wheels_.min_wheels_on)
     {
         const int n_committed = committedSegmentCount(segs);
@@ -195,7 +195,7 @@ Candidate CandidateGenerator::candidate(
             Curve committed_cv(
                 std::vector<Ctrl>(segs.begin(), segs.begin() + n_committed), false);
             committed_road_ok = roadOkWheels(
-                boundary_, committed_cv, wheels_, kRoadSafetyMarginCm,
+                boundary_, committed_cv, wheels_, roadMargin(),
                 kRoadSampleIntervalCm);
         }
         if (!committed_road_ok)
@@ -209,7 +209,7 @@ Candidate CandidateGenerator::candidate(
     // obstacle: committed/prediction 구분 없이 항상 엄격 (변경 없음)
     const double clear = clearanceRect(
         cv, obstacles_, body_footprint_, params_.clear_target, kRoadSampleIntervalCm);
-    if (clear < params_.obs_margin)
+    if (clear < obsMargin())
     {
         Candidate c; c.d = offsets.back(); c.curve = cv; c.reason = "obstacle";
         c.cost = kInf;
@@ -273,8 +273,8 @@ std::vector<Candidate> CandidateGenerator::obstacleOffsetCandidates(
     const double station = forward.front().station_s;
     const Obstacle & obstacle = *forward.front().obstacle;
     const double required =
-        obstacle.radius + body_radius_cm_ + params_.obs_margin + 0.5;
-    const double footprint = body_radius_cm_ + kRoadSafetyMarginCm;
+        obstacle.radius + body_radius_cm_ + obsMargin() + 0.5;
+    const double footprint = body_radius_cm_ + roadMargin();
     const Frame & term_frame = frames[1];
 
     const auto build = [&](double lead, double ratio, double side) -> Candidate
@@ -381,7 +381,7 @@ Candidate CandidateGenerator::primitiveCandidate(
         return c;
     }
     const RoadReport road = roadReportWheels(
-        boundary_, cv, wheels_, kRoadSafetyMarginCm, kRoadSampleIntervalCm);
+        boundary_, cv, wheels_, roadMargin(), kRoadSampleIntervalCm);
     if (road.min_wheels_on < wheels_.min_wheels_on)
     {
         Candidate c; c.d = terminal_offset; c.curve = cv; c.reason = "road_boundary";
@@ -390,7 +390,7 @@ Candidate CandidateGenerator::primitiveCandidate(
     }
     const double clear = clearanceRect(
         cv, obstacles_, body_footprint_, params_.clear_target, kRoadSampleIntervalCm);
-    if (clear < params_.obs_margin)
+    if (clear < obsMargin())
     {
         Candidate c; c.d = terminal_offset; c.curve = cv; c.reason = "obstacle";
         c.cost = kInf;
@@ -444,7 +444,7 @@ std::vector<Candidate> CandidateGenerator::obstaclePrimitives(
         (obstacle.center.x - ref.point.x) * normal.x +
         (obstacle.center.y - ref.point.y) * normal.y;
     const double required =
-        obstacle.radius + body_radius_cm_ + params_.obs_margin + 0.5;
+        obstacle.radius + body_radius_cm_ + obsMargin() + 0.5;
 
     std::vector<Candidate> candidates;
     for (double side : {-1.0, 1.0})
@@ -468,7 +468,7 @@ std::vector<Candidate> CandidateGenerator::obstaclePrimitives(
                 (next_obstacle->center.y - terminal_frame.point.y) * terminal_normal.y;
             const double direction = next_lateral >= 0.0 ? 1.0 : -1.0;
             const double terminal_required =
-                next_obstacle->radius + body_radius_cm_ + params_.obs_margin + 0.5;
+                next_obstacle->radius + body_radius_cm_ + obsMargin() + 0.5;
             terminal_offset = next_lateral - direction * terminal_required;
         }
         const Point2 end_point{
@@ -654,7 +654,7 @@ Candidate CandidateGenerator::directCandidate(
 
         Curve candidate_curve(std::vector<Ctrl>{ctrl}, false);
         const RoadReport road = roadReportWheels(
-            boundary_, candidate_curve, wheels_, kRoadSafetyMarginCm,
+            boundary_, candidate_curve, wheels_, roadMargin(),
             kRoadSampleIntervalCm);
         if (road.min_wheels_on < wheels_.min_wheels_on)
         {
@@ -664,7 +664,7 @@ Candidate CandidateGenerator::directCandidate(
         const double clear = clearanceRect(
             candidate_curve, obstacles_, body_footprint_, params_.clear_target,
             kRoadSampleIntervalCm);
-        if (clear < params_.obs_margin)
+        if (clear < obsMargin())
         {
             best_reason = "obstacle";
             continue;
