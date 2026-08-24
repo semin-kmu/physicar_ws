@@ -159,6 +159,7 @@ stages:
 
   # 단계 9 · 구동. 마지막에 연다
   - id: 9
+    delay_sec: 1.0        # 마지막 단계의 생존 확인 정착 시간
     nodes:
       - name: speed_controller
         package: kau_control

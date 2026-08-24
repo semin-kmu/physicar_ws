@@ -15,7 +15,7 @@ from rclpy.node import Node
 
 from kau_state_machine.log import err, log
 from kau_state_machine.ros.params import load_manifest, make_run_id, resolve_log_dir
-from kau_state_machine.ros.process import kill, spawn
+from kau_state_machine.ros.process import dead, kill, spawn
 
 PACKAGE = 'kau_state_machine'
 
@@ -38,6 +38,7 @@ class SystemSupervisor(Node):
         self._log_dir = resolve_log_dir(self._manifest.log_dir, run_id)
 
         self._children = []
+        self._reported = set()
         self._lock = threading.Lock()
 
         log('supervisor', f'manifest={manifest_path}')
@@ -48,22 +49,46 @@ class SystemSupervisor(Node):
         self._thread.start()
 
     def _bringup(self) -> None:
-        """단계 오름차순. 단계 안은 동시 spawn, 사이는 delay_sec 대기."""
+        """단계 오름차순. 단계 안은 동시 spawn, 사이는 delay_sec 대기.
+
+        delay_sec 은 다음 단계까지의 대기이자 생존 확인 전 정착 시간이다.
+        """
         total = len(self._manifest.stages)
         for index, stage in enumerate(self._manifest.stages, 1):
             log('bringup', f'stage {index}/{total} (id={stage.id})')
+            spawned = []
             for spec in stage.nodes:
                 try:
                     child = spawn(spec, self._log_dir)
                 except Exception as exc:  # noqa: BLE001
-                    err('bringup', f'중단 · {spec.name} spawn 실패: {exc}')
+                    err('bringup', f'중단 · {spec.name} 실행 불가: {exc}')
                     return
                 with self._lock:
                     self._children.append(child)
+                spawned.append(child)
                 log('spawn', f'pid={child.pid}', node=spec.name)
+
             if stage.delay_sec:
                 time.sleep(stage.delay_sec)
-        log('bringup', f'전 단계 spawn 완료 · {self._manifest.node_count}개')
+            self._report_dead(spawned, f'stage {index}/{total}')
+
+        with self._lock:
+            everything = list(self._children)
+        self._report_dead(everything, '전체')
+        alive = len(everything) - len(dead(everything))
+        log('bringup', f'spawn 완료 · 생존 {alive}/{self._manifest.node_count}')
+
+    def _report_dead(self, children, label: str) -> None:
+        """죽은 자식만 알린다. 정상은 침묵 (관문 G1, docs/01 section 3)."""
+        fresh = [c for c in dead(children) if c.name not in self._reported]
+        if not fresh:
+            return
+        for child in fresh:
+            self._reported.add(child.name)
+            err('dead', f'rc={child.proc.returncode} · '
+                        f'{self._log_dir}/{child.name}.out', node=child.name)
+        alive = len(children) - len(dead(children))
+        err('bringup', f'{label} 생존 {alive}/{len(children)}')
 
     def shutdown(self) -> None:
         """기동의 역순으로 정리. 실패해도 강행한다 (01 section 11-2)."""

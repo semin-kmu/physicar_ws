@@ -92,3 +92,18 @@ def test_kill_reaps_grandchild(fake_resolve, tmp_path):
     process.kill(child)
     time.sleep(0.3)
     assert _alive(pgid) == []
+
+
+def test_dead_detects_exited_child(fake_resolve, tmp_path):
+    live = NodeSpec(name='live', package='p', executable='e', ros=False)
+    gone = NodeSpec(name='gone', package='p', executable='e', ros=False,
+                    args=('--exit-now', '3'))
+    children = [process.spawn(live, str(tmp_path)), process.spawn(gone, str(tmp_path))]
+    try:
+        time.sleep(0.8)
+        found = process.dead(children)
+        assert [c.name for c in found] == ['gone']
+        assert found[0].proc.returncode == 3
+    finally:
+        for child in children:
+            process.kill(child)

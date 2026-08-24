@@ -26,7 +26,18 @@ stages:
         ros: false
         args: ["--ignore-sigterm"]
 
+  # 즉시 죽는 노드. G1 실패 보고 검증
   - id: 3
+    delay_sec: 0.5
+    nodes:
+      - name: stub_dead
+        package: kau_state_machine
+        executable: stub_node.py
+        ros: false
+        args: ["--exit-now", "3"]
+
+  - id: 4
+    delay_sec: 1.0
     nodes:
       # 실제 ROS 노드. --ros-args 경로 검증
       - name: stub_d

@@ -101,6 +101,11 @@ def spawn(spec: NodeSpec, log_dir: str) -> Child:
     return Child(name=spec.name, proc=proc, log=log)
 
 
+def dead(children) -> list:
+    """이미 죽은 자식. 관문 G1 (docs/01 section 3)."""
+    return [child for child in children if child.proc.poll() is not None]
+
+
 def kill(child: Child, grace: float = 3.0):
     """SIGTERM → grace 초 → SIGKILL. 행 걸린 노드가 종료를 막지 못하게 한다."""
     proc = child.proc
