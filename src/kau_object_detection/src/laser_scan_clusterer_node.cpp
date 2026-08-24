@@ -34,6 +34,7 @@
 #include "kau_object_detection/object_list.hpp"
 #include "kau_object_detection/object_list_diagnostic.hpp"
 #include "kau_object_detection/object_list_transform.hpp"
+#include "kau_object_detection/obstacle_markers.hpp"
 #include "kau_object_detection/obstacle_tracker.hpp"
 #include "kau_object_detection/track_geometry.hpp"
 #include "kau_object_detection/track_roi.hpp"
@@ -44,6 +45,7 @@
 #include "tf2/exceptions.hpp"
 #include "tf2_ros/buffer.hpp"
 #include "tf2_ros/transform_listener.hpp"
+#include "visualization_msgs/msg/marker_array.hpp"
 
 #ifdef KAU_OBJECT_DETECTION_WITH_GZ_TRANSPORT
 #include <gz/msgs/pose_v.pb.h>
@@ -132,6 +134,16 @@ public:
       "raw_diagnostic_object_list_topic", "/perception/obstacles_raw_diagnostic");
     raw_diagnostic_object_list_enabled_ =
       declare_parameter<bool>("raw_diagnostic_object_list_enabled", true);
+    // --- RViz visualisation of the published Object List ---------------------
+    // Built from the very message that goes out on object_list_topic, so the
+    // circles drawn in RViz are the circles Local Path Planning receives.
+    // Visualisation only: no consumer contract depends on this topic.
+    const auto obstacle_marker_topic = declare_parameter<std::string>(
+      "obstacle_marker_topic", "/perception/obstacle_markers");
+    obstacle_marker_enabled_ =
+      declare_parameter<bool>("obstacle_marker_enabled", true);
+    obstacle_marker_options_.lifetime_s =
+      declare_parameter<double>("obstacle_marker_lifetime_s", 0.3);
     object_list_options_.frame_id =
       declare_parameter<std::string>("object_list_frame_id", "map");
     object_list_options_.confidence = static_cast<float>(
@@ -238,6 +250,13 @@ public:
     if (object_list_options_.frame_id.empty()) {
       throw std::invalid_argument("object_list_frame_id must not be empty");
     }
+    // A non-positive lifetime would mean "never expires" to RViz, which is the
+    // opposite of the safety net the parameter exists for.
+    if (!std::isfinite(obstacle_marker_options_.lifetime_s) ||
+      obstacle_marker_options_.lifetime_s <= 0.0)
+    {
+      throw std::invalid_argument("obstacle_marker_lifetime_s must be finite and positive");
+    }
     if (watchdog_publish_period_s_ >= object_list_scan_timeout_s_) {
       throw std::invalid_argument(
               "object_list_watchdog_publish_period_s must stay below "
@@ -341,6 +360,14 @@ public:
         rclcpp::QoS(rclcpp::KeepLast(1)).best_effort().durability_volatile());
     }
 
+    // Same QoS as the Object List: the markers are the same live perception
+    // frame, so a late one is worth no more than a late obstacle list.
+    if (obstacle_marker_enabled_) {
+      obstacle_marker_publisher_ = create_publisher<visualization_msgs::msg::MarkerArray>(
+        obstacle_marker_topic,
+        rclcpp::QoS(rclcpp::KeepLast(1)).best_effort().durability_volatile());
+    }
+
     // Node clock, never a wall timer: the simulator drives /clock and a wall
     // timer would measure the LiDAR gap against the wrong time base.
     last_scan_activity_ = now();
@@ -398,6 +425,14 @@ public:
       "header=identical_to_object_list consumer=diagnostics_only",
       raw_diagnostic_object_list_enabled_ ? 1 : 0,
       raw_diagnostic_object_list_topic.c_str());
+
+    RCLCPP_INFO(
+      get_logger(),
+      "obstacle markers enabled=%d topic=%s type=visualization_msgs/MarkerArray "
+      "qos=best_effort/keep_last(1)/volatile ns=%s lifetime_s=%.3f "
+      "source=published_object_list frame_id=object_list.header.frame_id",
+      obstacle_marker_enabled_ ? 1 : 0, obstacle_marker_topic.c_str(),
+      obstacle_marker_options_.ns.c_str(), obstacle_marker_options_.lifetime_s);
 
     const auto & applied_tracker_options = obstacle_tracker_.options();
     RCLCPP_INFO(
@@ -776,6 +811,10 @@ private:
       build_object_list(status, candidates, stamp, object_list_options_);
     object_list_publisher_->publish(message);
 
+    // Drawn from the frame that has just gone out, after it has gone out: the
+    // planner is never made to wait on visualisation work.
+    publish_obstacle_markers(message);
+
     last_object_list_publish_ = now();
     if (status != last_object_list_status_) {
       RCLCPP_INFO(
@@ -785,6 +824,36 @@ private:
         static_cast<unsigned int>(status), message.obstacles.size());
       last_object_list_status_ = status;
     }
+  }
+
+  /// Publishes the RViz markers of one Object List frame.
+  ///
+  /// Visualisation only. The frame is the message just published on
+  /// `object_list_topic`, taken by const reference, so the drawn circles are by
+  /// construction the circles Local Path Planning receives and nothing here can
+  /// alter the Object List, the tracker or the smoothing state.
+  ///
+  /// `previous_obstacle_marker_count_` is the only state this path keeps. It
+  /// carries the ADD marker count of the previous frame so the builder can
+  /// delete the ids this frame no longer fills, which is what clears the stale
+  /// circles when the obstacle count drops, when the list is empty, or when the
+  /// status turns non-OK.
+  void publish_obstacle_markers(const kau_msgs::msg::ObstacleCircleArray & object_list)
+  {
+    if (!obstacle_marker_publisher_) {
+      return;
+    }
+
+    const auto frame = build_obstacle_markers(
+      object_list, previous_obstacle_marker_count_, obstacle_marker_options_);
+    previous_obstacle_marker_count_ = frame.add_marker_count;
+
+    // An empty array happens on a steady no-obstacle stream: nothing to draw
+    // and nothing left to delete.
+    if (frame.markers.markers.empty()) {
+      return;
+    }
+    obstacle_marker_publisher_->publish(frame.markers);
   }
 
   /// Publishes the raw diagnostic twin of one Object List frame.
@@ -1085,6 +1154,16 @@ private:
   bool raw_diagnostic_object_list_enabled_{true};
   rclcpp::Publisher<kau_msgs::msg::ObstacleCircleArray>::SharedPtr
     raw_diagnostic_object_list_publisher_;
+  /// RViz visualisation of the published Object List. Null while disabled,
+  /// which is the only thing that can switch it off; neither the Object List
+  /// nor its diagnostic twin is affected either way.
+  bool obstacle_marker_enabled_{true};
+  ObstacleMarkerOptions obstacle_marker_options_;
+  /// ADD marker count of the previous frame, kept so the ids this frame no
+  /// longer fills can be deleted instead of lingering in RViz.
+  std::size_t previous_obstacle_marker_count_{0U};
+  rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr
+    obstacle_marker_publisher_;
   rclcpp::TimerBase::SharedPtr watchdog_timer_;
 };
 

@@ -15,15 +15,19 @@ steer_controller:
     # 경로 우선순위. 매 tick 위에서부터 훑어 "쓸 수 있는" 첫 번째를 따라간다.
     #   1) local   map 프레임. TF 필요
     #   2) global  map 프레임. TF 필요
-    #   3) lane    base 프레임. TF 없이 돈다 -> 측위가 끊겨도 살아남는다
+    #   3) lane    base 프레임. TF 없이 돈다 -> 측위가 끊겨도 살아남는다. 아님 map프레임으로 바뀜.
     path_topic: "/path/local"           # 1 순위 (kau_msgs/KauPath)
     fallback_path_topic: "/path/global" # 2 순위
     lane_path_topic: "/lane/center"     # 3 순위. "" 로 두면 안 쓴다
     map_frame: "map"
     base_frame: "base_footprint"
     pose_source: "tf"                   # 1·2 순위용. tf | identity
-    lane_pose_source: "identity"        # 3 순위용. lane 경로는 차량 프레임
-    lane_frame: "base_link"             # lane_detection 의 path_frame_id 와 일치
+    # 3 순위도 map 프레임으로 받는다. kau_lane_detection 이 path_frame_id=map
+    # 으로 발행하고 있어 그쪽 설정을 그대로 쓰기 위해서다. 대신 lane 순위도
+    # TF 를 타므로, 측위가 끊기면 세 순위가 함께 정지한다 (의도된 선택).
+    lane_pose_source: "tf"
+    # lane_frame 은 lane_pose_source=identity 일 때만 쓰인다 (지금은 무시됨).
+    lane_frame: "base_link"
     path_latched: false                 # 발행측 durability 와 맞출 것
     fallback_path_latched: true
     lane_path_latched: false
@@ -32,7 +36,10 @@ steer_controller:
     control_hz: 50.0
     tf_timeout: 0.2                     # s, TF 가 이보다 오래되면 그 순위는 못 씀
     path_timeout: 1.0                   # s, 1 순위가 이보다 오래되면 아래로
-    fallback_path_timeout: 0.0          # s, 0 = 만료 없음 (latched 1 회 발행 대비)
+    # global 발행자가 죽으면 이 시간 뒤 3 순위로 내려간다.
+    # ★ global_path.launch.py 를 반드시 rate>0 (기본 1 Hz) 로 띄울 것.
+    #   rate:=0 (1 회 발행) 이면 정상 상태에서도 이 시간 뒤 만료된다.
+    fallback_path_timeout: 3.0          # s, 0 이면 만료 없음
     lane_path_timeout: 0.5              # s, lane 은 14 Hz 라 짧게
     cte_abort_cm: 200.0                 # cm, 발산 판정 -> 조향 0
     goal_tol_cm: 10.0                   # cm, 개곡선 종점 도달 판정

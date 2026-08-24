@@ -17,6 +17,8 @@ find_package(sensor_msgs REQUIRED)
 find_package(builtin_interfaces REQUIRED)
 find_package(kau_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
+# RViz visualisation of the published Object List.
+find_package(visualization_msgs REQUIRED)
 # tf2 supplies the map <- scan frame transform the Object List is published in.
 find_package(geometry_msgs REQUIRED)
 find_package(tf2 REQUIRED)
@@ -156,6 +158,18 @@ target_include_directories(object_list_diagnostic PUBLIC
 target_link_libraries(object_list_diagnostic object_list track_roi)
 ament_target_dependencies(object_list_diagnostic kau_msgs builtin_interfaces)
 
+# Visualisation-only builder of the RViz markers of one published Object List
+# frame. Depends on the Object List message alone, never on the pipeline that
+# produced it, so it can neither read nor disturb tracker or smoothing state.
+add_library(obstacle_markers
+  src/obstacle_markers.cpp
+)
+target_include_directories(obstacle_markers PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
+ament_target_dependencies(obstacle_markers kau_msgs visualization_msgs)
+
 add_library(start_signal_logic
   src/start_signal_logic.cpp
 )
@@ -198,6 +212,7 @@ target_link_libraries(
   object_list_diagnostic
   object_list_transform
   obstacle_tracker
+  obstacle_markers
 )
 ament_target_dependencies(
   laser_scan_clusterer_node
@@ -208,6 +223,7 @@ ament_target_dependencies(
   geometry_msgs
   tf2
   tf2_ros
+  visualization_msgs
 )
 
 add_executable(start_signal_detector_node
@@ -250,6 +266,7 @@ install(
     object_list_diagnostic
     object_list_transform
     obstacle_tracker
+    obstacle_markers
     start_signal_logic
     green_lamp_detector
     laser_scan_validator_node
@@ -390,6 +407,29 @@ if(BUILD_TESTING)
     )
   endif()
 
+  ament_add_gtest(test_obstacle_markers
+    test/test_obstacle_markers.cpp
+  )
+  if(TARGET test_obstacle_markers)
+    target_link_libraries(
+      test_obstacle_markers
+      obstacle_markers
+      object_list
+      obstacle_tracker
+      track_roi
+      track_geometry
+      cone_occupancy
+      cluster_geometry
+    )
+    ament_target_dependencies(
+      test_obstacle_markers
+      kau_msgs
+      builtin_interfaces
+      sensor_msgs
+      visualization_msgs
+    )
+  endif()
+
   ament_add_gtest(test_obstacle_tracker
     test/test_obstacle_tracker.cpp
   )
@@ -420,6 +460,6 @@ endif()
 ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)
 ament_export_dependencies(
   sensor_msgs kau_msgs builtin_interfaces std_msgs OpenCV
-  geometry_msgs tf2 tf2_ros)
+  geometry_msgs tf2 tf2_ros visualization_msgs)
 
 ament_package()

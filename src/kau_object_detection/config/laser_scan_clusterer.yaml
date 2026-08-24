@@ -73,6 +73,20 @@ laser_scan_clusterer:
     # Set false to stop advertising the diagnostic topic. Nothing about the
     # published Object List changes either way.
     raw_diagnostic_object_list_enabled: true
+    # --- RViz visualisation of the published Object List --------------------
+    # visualization_msgs/MarkerArray built from the very message published on
+    # object_list_topic, so the circles seen in RViz are the circles Local Path
+    # Planning receives. Same QoS as the Object List. Visualisation only: no
+    # consumer contract depends on this topic.
+    obstacle_marker_topic: /perception/obstacle_markers
+    # Set false to stop advertising the marker topic. Nothing about the
+    # published Object List changes either way.
+    obstacle_marker_enabled: true
+    # Seconds a marker survives in RViz without being refreshed. The explicit
+    # DELETE markers are the primary cleanup; this is the safety net for a node
+    # that stops publishing altogether. Three publish periods at 10 Hz, so a
+    # single dropped best-effort frame never makes the circles blink.
+    obstacle_marker_lifetime_s: 0.3
     # Carried on every frame, failures included, so a consumer never has to
     # branch on the status to know which frame the message speaks about.
     object_list_frame_id: map
@@ -112,9 +126,10 @@ laser_scan_clusterer:
     outlier_distance_m: 0.20
     # Weight of the newest measurement in the exponential moving average:
     # estimate = alpha * measurement + (1 - alpha) * previous_estimate.
-    # 0.4 halves the small frame-to-frame jitter within roughly two frames while
-    # still following a real correction quickly at the 10 Hz publish rate.
-    smoothing_alpha: 0.4
+    # 0.2 halves the small frame-to-frame jitter within roughly four frames at
+    # the 10 Hz publish rate: smoother than 0.4, and slower to follow a real
+    # correction.
+    smoothing_alpha: 0.2
     # Consecutive accepted observations a new track needs before it may be
     # published. 2 costs one extra frame (about 0.1 s at 10 Hz) and removes the
     # single-frame ghost candidate.

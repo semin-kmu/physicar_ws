@@ -11,8 +11,15 @@ r"""`lane_graph.yaml` 의 center 레이어에서 실험용 변형 경로를 만�
 만드는 것
 
     right_bias_lane.yaml      중심선을 진행 방향 오른쪽으로 민 것
+    left_bias_lane.yaml       왼쪽으로 반차로(17.68 cm) 민 것 = 안쪽 차로 중심
     last_obstacle_lane.yaml   마지막 콘 하나만 피하는 것 (예선)
     every_obstacle_lane.yaml  콘 6 개를 전부 피하는 것 (예선)
+
+왼쪽이 오른쪽보다 어렵다. 트랙이 반시계라 급코너가 대부분 좌회전이고, 좌회전에서
+왼쪽으로 밀면 반경이 줄어든다. 원본이 이미 조향 한계의 99.4 % 를 쓰므로 가장 급한
+좌회전(κ 1.8088)에서 가능한 왼쪽 이동은 3.4 mm 뿐이다. 그래서 left_bias 는 직선에서
+목표치를 온전히 쓰고 그 코너 두 곳에서는 0 으로, 진입/탈출을 맞추느라 오히려 오른쪽
+3 cm 까지 간다. 목표치를 평균으로 기대하면 안 된다 (실측 평균 좌 7.5 cm).
 
 레이어 이름은 전부 `center`, route 는 `center_loop` 다. 원본과 같으므로
 `route` 인자는 그대로 두고 `path` 만 바꾸면 된다.
@@ -715,8 +722,11 @@ def cone_constraints(base, cones, args, boost=None):
     return req, info
 
 
-def make_variant(name, base, args, rings, cones, klim, verbose=False):
+def make_variant(name, base, args, rings, cones, klim, verbose=False, bias=None):
     """d(s) 를 풀고 조각을 만든다.
+
+    `bias` 는 목표 횡오프셋이다 (오른쪽이 +). 콘 회피 변형은 목표가 0 이라
+    이 값을 안 쓴다. 안 주면 `args.bias` 를 쓴다.
 
     바깥 고리가 두 가지를 실물 기준으로 확인한다.
 
@@ -728,7 +738,9 @@ def make_variant(name, base, args, rings, cones, klim, verbose=False):
     """
     ktgt = kappa_target(base, klim, args.kappa_safety)
     hi_cap, lo_cap = corridor_caps(base, rings, args)
-    target = np.zeros(base.n) if cones else np.full(base.n, args.bias)
+    if bias is None:
+        bias = args.bias
+    target = np.zeros(base.n) if cones else np.full(base.n, bias)
     kmax_ok = klim * args.kappa_final
 
     boost = np.zeros(len(cones)) if cones else None
@@ -825,8 +837,9 @@ def main(argv=None):
     ap.add_argument('--cones', type=Path, default=CONE_DIR)
     ap.add_argument('--out-dir', type=Path, default=PKG / 'config')
     ap.add_argument('--only', default=None,
-                    help='right_bias / last_obstacle / every_obstacle 중 하나만')
-    ap.add_argument('--all', action='store_true', help='(기본) 세 개 다 만든다')
+                    help='right_bias / left_bias / last_obstacle / every_obstacle '
+                         '중 하나만')
+    ap.add_argument('--all', action='store_true', help='(기본) 네 개 다 만든다')
     ap.add_argument('--dry-run', action='store_true', help='파일을 쓰지 않는다')
     ap.add_argument('--plot', type=Path, default=None,
                     help='이 디렉터리에 변형마다 PNG 를 그린다')
@@ -835,6 +848,11 @@ def main(argv=None):
     ap.add_argument('-v', '--verbose', action='store_true')
 
     ap.add_argument('--bias', type=float, default=0.10, help='m. 오른쪽 목표 offset')
+    # 반차로 = 17.68 cm. amet2026_track.json 의 lane_inner / lane_outer 가
+    # corridor_half_width_m 0.1765 / 0.1772 로 CAD 실측을 준다. 이만큼 왼쪽으로
+    # 밀면 주행면 중심선(= 노란 중앙 점선)이 아니라 안쪽 차로 한가운데를 탄다.
+    ap.add_argument('--left-bias', type=float, default=0.1768,
+                    help='m. 왼쪽 목표 offset (left_bias 변형에만 쓴다)')
     ap.add_argument('--max-offset', type=float, default=0.22, help='m. 횡오프셋 절대 상한')
     ap.add_argument('--cone-radius', type=float, default=0.09,
                     help='m. 콘 반경. 시뮬 콘은 0.18 m 각 박스라 반경 0.09 로 본다. '
@@ -913,17 +931,21 @@ def main(argv=None):
     last = [(order[-1][1], order[-1][2], order[-1][3])]
     print(f'  -> 마지막 장애물 = {last[0][0]}')
 
-    todo = [args.only] if args.only else ['right_bias', 'last_obstacle', 'every_obstacle']
+    todo = [args.only] if args.only else \
+        ['right_bias', 'left_bias', 'last_obstacle', 'every_obstacle']
 
     if args.selftest:
         return selftest(base, args, rings, klim)
 
     for name in todo:
-        if name == 'right_bias':
+        if name in ('right_bias', 'left_bias'):
+            # d 는 오른쪽이 + 다. 왼쪽 변형은 부호만 뒤집는다.
+            want = args.bias if name == 'right_bias' else -args.left_bias
             used = []
             d, out, _ = make_variant(name, base, args, rings, used, klim,
-                                     args.verbose)
-            meta = [f'variant: right_bias  ·  목표 오른쪽 offset {args.bias * 100:.0f} cm',
+                                     args.verbose, bias=want)
+            side = '오른쪽' if want >= 0 else '왼쪽'
+            meta = [f'variant: {name}  ·  목표 {side} offset {abs(want) * 100:.1f} cm',
                     '곡률/코리도 한계에 걸리는 자리에서는 자동으로 줄어든다']
         else:
             used = last if name == 'last_obstacle' else \

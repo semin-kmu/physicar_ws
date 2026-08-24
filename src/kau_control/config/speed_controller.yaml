@@ -21,8 +21,8 @@ speed_controller:
     map_frame: "map"
     base_frame: "base_footprint"
     pose_source: "tf"                   # 1·2 순위용
-    lane_pose_source: "identity"        # 3 순위용. lane 경로는 차량 프레임
-    lane_frame: "base_link"             # lane_detection 의 path_frame_id 와 일치
+    lane_pose_source: "tf"              # 3 순위도 map 프레임 (lane_detection 설정에 맞춤)
+    lane_frame: "base_link"             # lane_pose_source=identity 일 때만 쓰임
     path_latched: false
     fallback_path_latched: true
     lane_path_latched: false
@@ -30,7 +30,7 @@ speed_controller:
     control_hz: 50.0
     tf_timeout: 0.2
     path_timeout: 1.0
-    fallback_path_timeout: 0.0          # 0 = 만료 없음 (latched 1 회 발행 대비)
+    fallback_path_timeout: 3.0          # s, global 발행자 사망 판정. rate>0 필수
     lane_path_timeout: 0.5
     cte_abort_cm: 200.0
     goal_tol_cm: 10.0
@@ -64,13 +64,15 @@ speed_controller:
       #   false : 피드백이 없거나 stale 이면 PID 보정 없이 v_ref 만 발행.
       #           지금은 이 상태여야 주행 시험을 할 수 있다.
       #   true  : 피드백이 없으면 즉시 정지. 오도메트리가 붙은 뒤의 운용값.
-      feedback_topic: "/odometry/filtered"
+      feedback_topic: "/odometry/filtered"   # /odom 으로 바꿔야됨 저런 토픽 존재안함. 
       feedback_timeout: 0.2             # s, 이보다 오래되면 stale
-      require_feedback: false
+      require_feedback: false           # 실차에선 True 로 바꿔야됨. 
 
     # --- PID ---
     # v_ref 를 피드포워드로 깔고 오차분만 보정하므로 게인은 작게 시작한다.
     # 피드백이 붙기 전까지는 이 값들이 쓰이지 않는다.
+    # 시뮬에선 꺼져있는거임.
+    # physicar_driver_node 가 있어서 ki 만 조절하면 된다.. 
     pid:
       kp: 0.5
       ki: 0.5

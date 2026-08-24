@@ -2,7 +2,8 @@
 // local_planner_node.cpp
 //
 // ROS2 wiring: 구독(/path/global, /lane/center, /perception/obstacles,
-// /steering, TF map->base_footprint), local_planner 호출, 발행(/path/local).
+// /steering, TF map->base_footprint), local_planner 호출,
+// 발행(/path/local = kau_msgs/KauPath, /viz/path/local = nav_msgs/Path).
 //
 // 알려진 단순화 (KAU_AMET_ROS 세션에서 시간 제약으로 결정, 후속 확인 필요):
 //   - /path/global, /lane/center 가 항상 map frame 으로 온다고 가정한다.
@@ -12,12 +13,16 @@
 //     그대로 사용한다.
 // ====================================================================
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <memory>
 #include <optional>
 #include <string>
 #include <vector>
 
+#include <geometry_msgs/msg/pose_stamped.hpp>
+#include <nav_msgs/msg/path.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/float64.hpp>
 #include <tf2/utils.h>
@@ -83,6 +88,51 @@ kau_msgs::msg::KauPath curveToKauPath(
     return msg;
 }
 
+// RViz 시각화용 nav_msgs/Path. KauPath 는 Bezier 제어점이라 RViz 가
+// 그리지 못하므로, 곡선을 호길이 step 간격으로 샘플링해 폴리라인으로
+// 편다. 단위 주의: 내부 계산과 KauPath 는 전부 cm 이지만 ROS 표준
+// 메시지(RViz 포함)는 m 이므로 여기서 /100 한다.
+nav_msgs::msg::Path curveToNavPath(
+    const kau::control::Curve & cv, const std::string & frame_id,
+    const rclcpp::Time & stamp, double step_cm)
+{
+    nav_msgs::msg::Path msg;
+    msg.header.frame_id = frame_id;
+    msg.header.stamp = stamp;
+
+    const double total = cv.length();
+    if (total <= 0.0 || step_cm <= 0.0)
+    {
+        return msg;
+    }
+
+    // 끝점을 반드시 포함하도록 개수를 올림해 균등 분할한다.
+    const int nsample =
+        std::max(2, static_cast<int>(std::ceil(total / step_cm)) + 1);
+    msg.poses.reserve(static_cast<std::size_t>(nsample));
+
+    for (int i = 0; i < nsample; ++i)
+    {
+        const double s =
+            total * static_cast<double>(i) / static_cast<double>(nsample - 1);
+        const Point2 pt = cv.point(s);
+
+        tf2::Quaternion q;
+        q.setRPY(0.0, 0.0, cv.heading(s));
+
+        geometry_msgs::msg::PoseStamped pose;
+        pose.header = msg.header;
+        pose.pose.position.x = pt.x / 100.0;
+        pose.pose.position.y = pt.y / 100.0;
+        pose.pose.position.z = 0.0;
+        pose.pose.orientation = tf2::toMsg(q);
+
+        msg.poses.push_back(std::move(pose));
+    }
+
+    return msg;
+}
+
 }  // namespace
 
 class LocalPlannerNode : public rclcpp::Node
@@ -128,6 +178,24 @@ public:
         local_path_pub_ = create_publisher<kau_msgs::msg::KauPath>(
             "/path/local", local_qos);
 
+        viz_spacing_cm_ = get_parameter("viz_spacing_cm").as_double();
+        if (get_parameter("publish_viz_path").as_bool())
+        {
+            const std::string viz_topic = get_parameter("viz_topic").as_string();
+
+            // RViz Path 디스플레이 기본 QoS(reliable/volatile) 및 기존
+            // /viz/path/global, /viz/path/global_avoidance 발행측과 맞춘다.
+            // transient_local 로 두면 RViz 기본 설정에서 매칭되지 않는다.
+            rclcpp::QoS viz_qos(rclcpp::KeepLast(1));
+            viz_qos.reliable().durability_volatile();
+            viz_path_pub_ = create_publisher<nav_msgs::msg::Path>(
+                viz_topic, viz_qos);
+
+            RCLCPP_INFO(get_logger(),
+                "RViz 시각화 경로 발행: %s (nav_msgs/Path, spacing=%.1fcm)",
+                viz_topic.c_str(), viz_spacing_cm_);
+        }
+
         const double plan_hz = get_parameter("plan_hz").as_double();
         timer_ = create_wall_timer(
             std::chrono::duration<double>(1.0 / plan_hz),
@@ -144,6 +212,14 @@ private:
         declare_parameter<double>("plan_hz", 5.0);
         declare_parameter<std::string>("map_frame", "map");
         declare_parameter<std::string>("base_frame", "base_footprint");
+
+        // RViz 시각화용 nav_msgs/Path 발행 (내용은 /path/local 과 동일,
+        // 표현만 폴리라인 + m 단위). 제어단은 /path/local 을 쓴다.
+        // 토픽/파라미터 이름은 kau_global_path, kau_lane_detection 의
+        // /viz/path/* + viz_topic/viz_spacing_cm 규약을 그대로 따른다.
+        declare_parameter<bool>("publish_viz_path", true);
+        declare_parameter<std::string>("viz_topic", "/viz/path/local");
+        declare_parameter<double>("viz_spacing_cm", 5.0);
 
         // amet_2026_track.yaml 절대 경로 (launch 가 kau_object_detection 의
         // share 경로로 채워준다) + sim->map 변환 (kau_global_path 확인값).
@@ -348,6 +424,12 @@ private:
             /*valid_length=*/0.0);
         local_path_pub_->publish(msg);
 
+        if (viz_path_pub_)
+        {
+            viz_path_pub_->publish(curveToNavPath(
+                *result.path, map_frame_, msg.header.stamp, viz_spacing_cm_));
+        }
+
         if (result.status != PlanStatus::kOk)
         {
             RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
@@ -370,12 +452,14 @@ private:
     float lane_confidence_ = 0.0f;
     std::vector<Obstacle> latest_obstacles_;
     double current_steer_rad_ = 0.0;
+    double viz_spacing_cm_ = 5.0;
 
     rclcpp::Subscription<kau_msgs::msg::KauPath>::SharedPtr global_path_sub_;
     rclcpp::Subscription<kau_msgs::msg::KauPath>::SharedPtr lane_sub_;
     rclcpp::Subscription<kau_msgs::msg::ObstacleCircleArray>::SharedPtr obstacle_sub_;
     rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr steering_sub_;
     rclcpp::Publisher<kau_msgs::msg::KauPath>::SharedPtr local_path_pub_;
+    rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr viz_path_pub_;
     rclcpp::TimerBase::SharedPtr timer_;
 };
 

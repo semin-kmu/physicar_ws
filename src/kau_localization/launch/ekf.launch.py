@@ -51,6 +51,19 @@ amcl.launch.py 든 cartographer_localization.launch.py 든 올리면 된다.
     순간 죽기도 하는데, 그때는 플랫폼 launch 의 respawn 이 2 초 뒤 새로 띄운다.
     어느 쪽이든 /odom 은 돌아온다 (실측 확인).
 
+맵 리로드 직후에 띄우면 (clock_gate)
+    physicar 의 sim_api.py 는 맵을 갈 때 gz 를 **정지 상태로** 띄우고
+    (`gz sim -s`, -r 없음) 뒤늦게 unpause 한다. 그 사이 /clock 은 나오는데
+    sim time 이 0 에 멈춰 있고, 마지막에 ros_gz_bridge 까지 한 번 죽였다
+    살린다. 그 창이 열려 있는 동안 ekf_node 를 띄우면
+    "Waiting for clock to start..." 만 찍고 **영원히** 멈춘다 -- 그 대기는
+    rclcpp::spin() 앞에서 돌고 타임아웃이 없다.
+
+    그래서 use_sim_time 일 때는 clock_gate.py 가 먼저 sim 시계가 실제로
+    흐르는지 확인하고, 확인된 뒤에야 나머지를 올린다. 기다리는 동안 2 초마다
+    무엇을 기다리는지 찍으므로 멈춘 것처럼 보이지 않는다. 자세한 사정과 실측은
+    그 파일 참고. 끄려면 wait_for_clock:=false.
+
 맵 리로드 / sim 재시작을 하면
     아무것도 안 해도 된다. 감시자가 알아서 처리한다.
 
@@ -68,6 +81,9 @@ amcl.launch.py 든 cartographer_localization.launch.py 든 올리면 된다.
     odom_topic:=/odom                 융합 결과를 낼 토픽 (플랫폼과 같아야 한다)
     freeze_platform_ekf:=false        플랫폼 EKF 를 안 재울 때. **tf 가 깨진다.**
                                       이미 손으로 재웠거나 죽였을 때만 쓸 것.
+    wait_for_clock:=false             sim 시계를 안 기다리고 바로 띄운다.
+                                      맵 리로드 직후면 무한 대기에 걸린다.
+    clock_timeout:=180.0              시계를 기다리는 최대 초. 넘기면 전체를 내린다.
 
 손으로 할 때 (launch 없이)
     재우기:  pkill -STOP -f physicar_bringup/config/ekf_params.yaml
@@ -85,10 +101,12 @@ from launch.actions import (
     DeclareLaunchArgument,
     ExecuteProcess,
     OpaqueFunction,
+    RegisterEventHandler,
     Shutdown,
     TimerAction,
 )
 from launch.conditions import IfCondition
+from launch.event_handlers import OnProcessExit
 from launch.substitutions import LaunchConfiguration
 
 from launch_ros.actions import Node
@@ -109,6 +127,9 @@ def launch_setup(context, *_args, **_kwargs):
     params_file = LaunchConfiguration('params_file').perform(context)
     use_sim_time = LaunchConfiguration('use_sim_time').perform(context).lower() == 'true'
     odom_topic = LaunchConfiguration('odom_topic').perform(context)
+    wait_for_clock = \
+        LaunchConfiguration('wait_for_clock').perform(context).lower() == 'true'
+    clock_timeout = LaunchConfiguration('clock_timeout').perform(context)
 
     # 이 프로세스가 살아 있는 동안만 플랫폼 EKF 가 멈춰 있다. 죽으면 -- 정상
     # 종료든 사고든 -- 반드시 깨운다. 그 외에 새로 뜬 플랫폼 EKF 를 다시 재우고,
@@ -149,7 +170,34 @@ def launch_setup(context, *_args, **_kwargs):
 
     # SIGSTOP 이 실제로 걸린 뒤에 우리 노드를 띄운다. 겹치는 순간에 두
     # 발행자가 같이 쏘는 것을 피하려는 것이다.
-    return [pause, TimerAction(period=1.0, actions=[ekf])]
+    start = [pause, TimerAction(period=1.0, actions=[ekf])]
+
+    if not (use_sim_time and wait_for_clock):
+        return start
+
+    # sim 시계가 흐르기 전에는 아무것도 시작하지 않는다. 자세한 사정은
+    # clock_gate.py 참고. 플랫폼 EKF 를 재우는 것도 문지기 뒤로 미룬다 --
+    # 시계가 멈춰 있는 동안 재워 봐야 우리 것도 못 뜨고, 그 사이 odom 을
+    # 낼 노드가 하나도 없어지기 때문이다.
+    gate = ExecuteProcess(
+        cmd=[sys.executable, str(share / 'launch' / 'clock_gate.py'), clock_timeout],
+        name='clock_gate',
+        output='screen',
+        shell=False,
+    )
+
+    def after_gate(event, _context):
+        """Start the EKF only if the gate saw simulation time advance."""
+        if event.returncode == 0:
+            return start
+        return [Shutdown(reason='sim 시계가 안 흘러서 EKF 를 못 띄웠다 '
+                                '(clock_gate 참고). 맵 로딩이 끝났는지, '
+                                'sim 이 일시정지 상태가 아닌지 확인할 것.')]
+
+    return [
+        gate,
+        RegisterEventHandler(OnProcessExit(target_action=gate, on_exit=after_gate)),
+    ]
 
 
 def generate_launch_description():
@@ -167,6 +215,15 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'odom_topic', default_value='/odom',
             description='융합 결과를 낼 토픽. 플랫폼과 같아야 제어 쪽이 받는다.'),
+        DeclareLaunchArgument(
+            'wait_for_clock', default_value='true',
+            description='use_sim_time 일 때 sim 시계가 흐를 때까지 기다렸다가 '
+                        'EKF 를 띄울지. 끄면 맵 리로드 직후에 ekf_node 가 '
+                        '"Waiting for clock to start..." 에서 무한 대기한다.'),
+        DeclareLaunchArgument(
+            'clock_timeout', default_value='180.0',
+            description='sim 시계를 기다리는 최대 초. 넘기면 왜 못 떴는지 '
+                        '적고 전체를 내린다.'),
         DeclareLaunchArgument(
             'freeze_platform_ekf', default_value='true',
             description='플랫폼 EKF 를 SIGSTOP 으로 재울지. 끄면 odom -> '

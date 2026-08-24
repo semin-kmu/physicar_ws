@@ -13,6 +13,13 @@ local_planner_node:
     map_frame: "map"
     base_frame: "base_footprint"
 
+    # RViz 시각화용 nav_msgs/Path 발행 (/path/local 과 내용 동일, Bezier 를
+    # 폴리라인으로 샘플링 + cm -> m 변환). 제어단은 /path/local 을 쓴다.
+    # viz_spacing_cm 5.0 = /viz/path/global, /viz/path/global_avoidance 와 같은 밀도.
+    publish_viz_path: true
+    viz_topic: /viz/path/local
+    viz_spacing_cm: 5.0
+
     # 차량 제원 (docs/경로_형식.md 부록 B 확정값)
     kappa_max_vehicle: 0.020221      # 1/cm, R_min=49.455cm, delta_max=20deg
     body_radius_cm: 11.0353          # 3분할 원 근사 반경 (body 28x20cm, rear_overhang 5cm)

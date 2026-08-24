@@ -753,14 +753,16 @@ bnd_inner = 안쪽 차로 중심선을 안쪽으로  width/2
 (`center`)과 route 이름(`center_loop`)이 원본과 같아서 `route` 는 안 건드린다.
 
 ```bash
-python3 src/kau_global_path/scripts/gen_lane_variants.py            # 세 개 다
+python3 src/kau_global_path/scripts/gen_lane_variants.py            # 네 개 다
 python3 src/kau_global_path/scripts/gen_lane_variants.py --only right_bias -v
+python3 src/kau_global_path/scripts/gen_lane_variants.py --only left_bias -v
 python3 src/kau_global_path/scripts/gen_lane_variants.py --selftest  # 재구성만 확인
 python3 src/kau_global_path/scripts/gen_lane_variants.py --plot data/variants
 
 # 발행 — lane 이름으로 고른다. 인자를 안 주면 원본이다
 ros2 launch kau_global_path global_path.launch.py                    # lane_graph.yaml
 ros2 launch kau_global_path global_path.launch.py lane:=right_bias
+ros2 launch kau_global_path global_path.launch.py lane:=left_bias
 ros2 launch kau_global_path global_path.launch.py lane:=last_obstacle
 ros2 launch kau_global_path global_path.launch.py lane:=every_obstacle
 
@@ -778,6 +780,7 @@ ros2 launch kau_global_path global_path.launch.py \
 |---|---|---|---|---|
 | `lane_graph.yaml` (원본) | 주행면 중심선 | 28.872 m | 1.8104 | — |
 | `right_bias_lane.yaml` | 진행 방향 오른쪽으로 10 cm | 29.487 m | 1.8094 | 평균 우 8.3 cm |
+| `left_bias_lane.yaml` | 왼쪽으로 반차로 17.68 cm | 29.016 m | 1.8113 | 평균 좌 7.5 cm |
 | `last_obstacle_lane.yaml` | 마지막 콘 하나만 회피 | 28.866 m | 1.8098 | 우 6.6 / 좌 5.4 cm |
 | `every_obstacle_lane.yaml` | 콘 6 개 전부 회피 | 28.883 m | 1.8102 | 우 6.6 / 좌 6.2 cm |
 
@@ -785,6 +788,38 @@ ros2 launch kau_global_path global_path.launch.py \
 검사를 그대로 통과한다. 한계 κ 1.8199 는 **기하학적 한계 2.0221 (δ 20°) 에
 마진 10 % 를 뺀 설계값**이다 (6.4) — 위 값들은 설계 한계의 99 % 이고, 실제
 차량 한계로는 89.5 % (필요 조향각 18.05°, 한계 20°) 다.
+
+#### `left_bias` — 왼쪽 반차로. 직선에서만 온전히 들어간다
+
+주행면 중심선은 **노란 중앙 점선 위**다 (4.1.3). 실주행에서 차가 바깥 차로 쪽으로
+붙어 보이면 안쪽 차로 한가운데로 옮기고 싶어지는데, 그 거리가 반차로 =
+**17.68 cm** 다. CAD 가 값을 준다 — `amet2026_track.json` 의
+`lane_inner.corridor_half_width_m` 0.1765 · `lane_outer` 0.1772.
+
+방향은 `lane_graph.yaml` 노드 순서가 map 프레임에서 **반시계**라(부호면적 +35.3)
+진행 방향 왼쪽 = 트랙 **안쪽**이다.
+
+**왼쪽이 오른쪽보다 훨씬 어렵다.** 반시계라 급코너가 대부분 좌회전이고, 좌회전에서
+왼쪽으로 밀면 반경이 줄어든다. 가장 급한 좌회전(κ 1.8088)에서 물리적으로 가능한
+왼쪽 이동은 `1/κ - 1/κ_한계` = **3.4 mm** 뿐이다. 곡률만 따져도 17.68 cm 를 받아
+주는 구간은 고리의 76.7 % (22.13 m) 고, 나머지는 0 으로 떨어뜨려야 한다.
+
+그래서 **평균(좌 7.5 cm)을 목표치로 착각하면 안 된다.** station 별로는 이렇게 된다.
+
+| station | 오프셋 | |
+|---|---|---|
+| 2.0 ~ 6.0 m | **-17.68 cm** | 출발 직후 긴 직선. 목표치 그대로 |
+| 0.3 ~ 7.7 m (직선 전체) | 평균 -15.55 cm | |
+| 10 ~ 12 m | -12 ~ -14 cm | |
+| 13~14 m · 22~24 m | **+2 ~ +3 cm** | 급좌회전. 진입/탈출을 맞추느라 오히려 오른쪽 |
+
+즉 이 파일은 "전 구간을 반차로 왼쪽으로" 가 아니라 **"직선에서 반차로 왼쪽으로,
+급좌회전에서는 원본"** 이다. 직선 주행의 횡편향을 보정하려는 것이면 맞고, 코너까지
+안쪽으로 돌게 하려는 것이면 이 방법으로는 안 된다 — 트랙 자체의 한계다 (6.4).
+
+목표치는 `--left-bias` 로 바꾼다 (기본 0.1768). `--max-offset` 기본 0.22 가
+절대 상한이고, 코리도 상한은 테두리 35.37 cm - 차체 반경 11.04 cm - 여유 2 cm =
+22.3 cm 라 17.68 cm 는 4.6 cm 여유를 두고 들어간다 (실측 테두리 여유 16.2 cm).
 
 #### 어디가 어려운가 — 곡률 여유가 1 % 밖에 없다
 
