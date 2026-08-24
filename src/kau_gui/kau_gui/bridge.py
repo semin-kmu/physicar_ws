@@ -18,12 +18,14 @@ from __future__ import annotations
 import math
 import threading
 from collections import deque
+from pathlib import Path
 
 import numpy as np
 import rclpy
-from nav_msgs.msg import OccupancyGrid, Odometry, Path
+from ament_index_python.packages import (PackageNotFoundError,
+                                          get_package_share_directory)
+from nav_msgs.msg import Odometry, Path
 from rclpy.node import Node
-from rosidl_runtime_py.utilities import get_message
 from rclpy.qos import (DurabilityPolicy, HistoryPolicy, QoSProfile,
                        ReliabilityPolicy)
 from sensor_msgs.msg import LaserScan
@@ -85,33 +87,6 @@ class Series:
         return self.t[-1] if self.t else None
 
 
-class RateMeter:
-    """토픽 수신 주기 실측. 노드가 '제 주기로 도는가' 를 본다.
-
-    /diag/heartbeat 이 아직 없으므로 이것이 유일한 근거다.
-    """
-
-    N = 24
-
-    def __init__(self):
-        self._t = deque(maxlen=self.N)
-
-    def mark(self, t):
-        self._t.append(t)
-
-    @property
-    def last(self):
-        return self._t[-1] if self._t else None
-
-    @property
-    def hz(self):
-        # 표본 2 개 미만이면 '모름'. 0 Hz 와 구분해야 한다.
-        if len(self._t) < 2:
-            return None
-        span = self._t[-1] - self._t[0]
-        return (len(self._t) - 1) / span if span > 1e-6 else None
-
-
 class Latest:
     """최신 한 장만 유지하는 표시물."""
 
@@ -152,7 +127,6 @@ class Bridge(Node):
         self.path_local = Latest()
         self.path_lane = Latest()
         self.obstacles = Latest()
-        self.grid = Latest()
 
         self.tf_poses = [None, None, None]      # map / odom / base_link
         self.tf_ages = [None, None, None]
@@ -160,21 +134,16 @@ class Bridge(Node):
         self.tracking_ok = False
         self.steer_debug_alive = False
 
-        self.nodes = []
-        self._rates = {}
-
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
         self._make_display_subs()
-        self._make_watch_subs()
 
         self.create_timer(0.05, self._on_tf)          # 20 Hz
-        self.create_timer(1.0, self._on_graph)        # 1 Hz
 
         self.get_logger().info(
             f"[kau_gui] 관측 전용 기동. render={self.render_hz:g} Hz "
-            f"history={self.history_s:g} s 감시노드={len(self.watch_names)}")
+            f"history={self.history_s:g} s")
 
     # ------------------------------------------------------------------
     # 파라미터
@@ -191,10 +160,12 @@ class Bridge(Node):
         self.base_frame = d("frames.base", "base_link").value
         self.tf_timeout = d("frames.tf_timeout_s", 0.5).value
 
-        self.map_source = d("map.source", "auto").value
-        self.map_topic = d("map.topic", "/map").value
-        self.map_yaml = d("map.yaml_path", "").value
-        self.map_wait = d("map.wait_s", 5.0).value
+        # 맵 배경. 기본은 kau_localization 이 share 에 설치하는 maps/ 에서
+        # 이름으로 찾는다 (bringup.yaml 의 "@kau_localization:maps/..." 와
+        # 같은 지도를 본다). yaml_path 를 주면 그쪽이 우선이다.
+        self.map_pkg = d("map.package", "kau_localization").value
+        self.map_name = d("map.name", "kau_v3").value
+        self.map_yaml = self._resolve_map(d("map.yaml_path", "").value)
 
         self.topics = {
             k: d(f"topics.{k}", v).value for k, v in (
@@ -210,19 +181,24 @@ class Bridge(Node):
 
         self.tf_axis_cm = d("tf_axis_cm", 20.0).value
 
-        self.stale_ratio = d("watch.stale_ratio", 3.0).value
-        self.min_stale_s = d("watch.min_stale_s", 0.3).value
-        self.watch_names = list(d("watch.names", []).value or [])
-        self.watch_topics = list(d("watch.topics", []).value or [])
-        self.watch_types = list(d("watch.types", []).value or [])
-        self.watch_rates = list(d("watch.rates", []).value or [])
 
-        n = len(self.watch_names)
-        if not (len(self.watch_topics) == len(self.watch_types)
-                == len(self.watch_rates) == n):
-            # 길이가 어긋나면 엉뚱한 토픽으로 등급을 매긴다. 조용히 넘어가지 않는다.
-            raise RuntimeError(
-                "watch.names / topics / types / rates 의 길이가 서로 다르다")
+    def _resolve_map(self, override: str) -> str:
+        if override:
+            return override
+        if not self.map_pkg or not self.map_name:
+            return ""
+        try:
+            share = get_package_share_directory(self.map_pkg)
+        except PackageNotFoundError:
+            self.get_logger().warn(
+                f"[kau_gui] 패키지를 못 찾음: {self.map_pkg}. 맵 배경 없이 뜬다")
+            return ""
+        path = Path(share) / "maps" / f"{self.map_name}.yaml"
+        if not path.is_file():
+            self.get_logger().warn(
+                f"[kau_gui] 맵 yaml 없음: {path}. 맵 배경 없이 뜬다")
+            return ""
+        return str(path)
 
     def _now(self):
         return self.get_clock().now().nanoseconds * 1e-9
@@ -257,36 +233,6 @@ class Bridge(Node):
             Float64, t["steering"], self._on_steering, observe_qos())
         self.create_subscription(
             SteerDebug, t["steer_debug"], self._on_debug, observe_qos())
-
-        if self.map_source in ("topic", "auto"):
-            self.create_subscription(
-                OccupancyGrid, self.map_topic, self._on_grid, latched_qos())
-
-    def _make_watch_subs(self):
-        """감시 토픽마다 raw 구독 하나. 역직렬화하지 않고 수신 시각만 찍는다.
-
-        주기 판정을 하지 않는 노드(rate <= 0)는 구독을 만들지 않는다.
-        graph 존재 여부만으로 판정하기 때문이다.
-        """
-        for name, topic, typ, rate in zip(
-                self.watch_names, self.watch_topics,
-                self.watch_types, self.watch_rates):
-            if not topic or not typ or rate <= 0.0:
-                continue
-            if topic in self._rates:
-                continue
-            self._rates[topic] = RateMeter()
-            try:
-                # rclpy 는 타입 문자열을 못 받는다. 클래스로 풀어 준다.
-                self.create_subscription(
-                    get_message(typ), topic,
-                    (lambda _m, tp=topic: self._rates[tp].mark(self._now())),
-                    observe_qos(), raw=True)
-            except Exception as e:       # 타입 이름 오타 등
-                # 감시 하나가 실패했다고 GUI 전체를 죽이지 않는다.
-                # 해당 노드는 STALE 로 남아 눈에 띈다.
-                self.get_logger().error(
-                    f"[kau_gui] 감시 구독 실패 {topic} ({typ}): {e}")
 
     # ------------------------------------------------------------------
     # 표시용 콜백
@@ -336,17 +282,6 @@ class Bridge(Node):
         ys = np.fromiter((p.pose.position.y for p in m.poses), float)
         with self._lock:
             dst.set((xs * CM_PER_M, ys * CM_PER_M), self._now())
-
-    def _on_grid(self, m: OccupancyGrid):
-        w, h = m.info.width, m.info.height
-        if w <= 0 or h <= 0:
-            return
-        g = np.asarray(m.data, dtype=np.int16).reshape(h, w)
-        with self._lock:
-            self.grid.set(
-                (g, m.info.resolution,
-                 m.info.origin.position.x, m.info.origin.position.y),
-                self._now())
 
     def _on_odom(self, m: Odometry):
         with self._lock:
@@ -422,35 +357,6 @@ class Bridge(Node):
             self.tf_poses = poses
             self.tf_ages = ages
 
-    def _on_graph(self):
-        # 노드 이름공간은 쓰지 않는 것이 팀 규약이라(docs/07 section 2)
-        # 이름만 비교한다.
-        alive = {n for n, _ns in self.get_node_names_and_namespaces()}
-        t = self._now()
-
-        out = []
-        with self._lock:
-            for name, topic, rate in zip(
-                    self.watch_names, self.watch_topics, self.watch_rates):
-                if name not in alive:
-                    out.append((name, "absent", None))
-                    continue
-                if not topic or rate <= 0.0:
-                    # 대표 토픽이 없거나(진단 로그 전용) latched 라 주기 판정
-                    # 불가. 존재만으로 정상 처리하고 Hz 칸은 비운다.
-                    out.append((name, "ok", None))
-                    continue
-                rm = self._rates.get(topic)
-                if rm is None or rm.last is None:
-                    out.append((name, "stale", None))
-                    continue
-                # 50 Hz 토픽은 3 배가 60 ms 라 무선 지터만으로도 깜빡인다.
-                # 하한을 둔다.
-                limit = max(self.stale_ratio / rate, self.min_stale_s)
-                ok = (t - rm.last) <= limit
-                out.append((name, "ok" if ok else "stale", rm.hz))
-            self.nodes = out
-
     # ------------------------------------------------------------------
     # 스냅샷
     # ------------------------------------------------------------------
@@ -461,7 +367,6 @@ class Bridge(Node):
             return {
                 "now": self._now(),
                 "scan": (self.scan.value, self.scan.stamp),
-                "grid": (self.grid.value, self.grid.stamp),
                 "path_global": (self.path_global.value,
                                 self.path_global.stamp),
                 "path_local": (self.path_local.value, self.path_local.stamp),
@@ -489,5 +394,4 @@ class Bridge(Node):
                 },
                 "tracking_ok": self.tracking_ok,
                 "steer_debug_alive": self.steer_debug_alive,
-                "nodes": list(self.nodes),
             }

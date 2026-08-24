@@ -10,7 +10,7 @@
   <!-- pyqtgraph 는 시스템이 아니라 패키지 안 .venv 에 있다.
        scripts/setup_venv.sh 참고. rosdep 대상이 아니므로 적지 않는다. -->
   <exec_depend>rclpy</exec_depend>
-  <exec_depend>rosidl_runtime_py</exec_depend>
+  <exec_depend>ament_index_python</exec_depend>
   <exec_depend>python3-numpy</exec_depend>
   <exec_depend>python3-pyqt5</exec_depend>
   <exec_depend>tf2_ros_py</exec_depend>

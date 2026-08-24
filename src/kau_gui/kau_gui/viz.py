@@ -14,6 +14,7 @@ KAU_AMET_Test/src/sim_common/viz.py 의 화면 규약을 실차용으로 이식�
 from __future__ import annotations
 
 import math
+import pathlib
 
 import numpy as np
 import pyqtgraph as pg
@@ -208,30 +209,84 @@ class Obstacles:
 
 
 # --------------------------------------------------------------------------
-# 점유격자 맵 배경
+# 맵 배경 (.pgm + .yaml)
 # --------------------------------------------------------------------------
 
-def map_image_item(plot):
-    """맵을 깔 ImageItem. 표시물보다 뒤에 있어야 한다."""
-    img = pg.ImageItem()
-    img.setZValue(-100)
-    plot.addItem(img)
-    return img
+def load_map(yaml_path: str):
+    """map_server 형식의 yaml + pgm 을 읽는다. (img, res_m, ox_m, oy_m).
 
-
-def set_map_image(item, grid, resolution_m, origin_x_m, origin_y_m):
-    """OccupancyGrid 값 배열(-1/0..100) 을 회색조로 깔아 놓는다.
-
-    grid 는 (h, w) numpy. row 0 이 월드 y 최소 (ROS 규약) 라
-    pyqtgraph 의 축 방향과 그대로 맞는다.
+    P5 (binary graymap) 만 다룬다. map_server 가 내는 것이 그 형식이다.
+    yaml 의 image 경로는 지도를 만든 PC 기준 절대경로인 경우가 많아,
+    없으면 yaml 옆에서 같은 파일명을 찾는다.
     """
-    g = np.asarray(grid, dtype=np.int16)
-    shade = np.where(g < 0, 128, 255 - (g.astype(np.int32) * 255) // 100)
-    item.setImage(shade.astype(np.uint8).T, levels=(0, 255))
-    res_cm = resolution_m * CM_PER_M
-    item.setRect(QtCore.QRectF(
-        origin_x_m * CM_PER_M, origin_y_m * CM_PER_M,
-        g.shape[1] * res_cm, g.shape[0] * res_cm))
+    yp = pathlib.Path(yaml_path).expanduser()
+    image, res, ox, oy = "", 0.05, 0.0, 0.0
+    for line in yp.read_text().splitlines():
+        k, _, v = line.partition(":")
+        k, v = k.strip(), v.strip().strip("\"'")
+        if k == "image":
+            image = v
+        elif k == "resolution":
+            res = float(v)
+        elif k == "origin":
+            nums = v.strip("[]").split(",")
+            ox, oy = float(nums[0]), float(nums[1])
+
+    ip = pathlib.Path(image).expanduser()
+    if not ip.is_file():
+        ip = yp.parent / ip.name
+
+    return _read_pgm(ip), res, ox, oy
+
+
+def _read_pgm(path):
+    """P5 PGM -> (h, w) uint8. row 0 이 이미지 위쪽 = 월드 y 최대."""
+    data = pathlib.Path(path).read_bytes()
+
+    fields, pos = [], 0
+    while len(fields) < 4:
+        while pos < len(data) and data[pos:pos + 1].isspace():
+            pos += 1
+        if data[pos:pos + 1] == b"#":                  # 주석 줄 통째로 건너뜀
+            while pos < len(data) and data[pos:pos + 1] not in b"\r\n":
+                pos += 1
+            continue
+        start = pos
+        while pos < len(data) and not data[pos:pos + 1].isspace():
+            pos += 1
+        fields.append(data[start:pos])
+    pos += 1                                            # 헤더 뒤 공백 1 개
+
+    if fields[0] != b"P5":
+        raise ValueError(f"P5 가 아니다: {fields[0]!r}")
+    w, h = int(fields[1]), int(fields[2])
+
+    return np.frombuffer(data, dtype=np.uint8, count=w * h,
+                         offset=pos).reshape(h, w)
+
+
+def draw_map_image(plot, img, res_m: float, ox_m: float, oy_m: float):
+    """맵을 표시물 뒤에 깔고, 뷰 범위를 맵 전체에 맞춘다."""
+    h, w = img.shape
+    res = res_m * CM_PER_M
+    x0, y0 = ox_m * CM_PER_M, oy_m * CM_PER_M
+
+    it = pg.ImageItem()
+    it.setZValue(-100)
+    # pgm row 0 은 월드 y 최대다. ImageItem 은 y 가 위로 증가하므로 뒤집는다.
+    it.setImage(np.flipud(img).T, levels=(0, 255))
+    it.setRect(QtCore.QRectF(x0, y0, w * res, h * res))
+    plot.addItem(it)
+
+    # 맵 경계 (viz.draw_map_border 와 같은 규약)
+    plot.plot([x0, x0 + w * res, x0 + w * res, x0, x0],
+              [y0, y0, y0 + h * res, y0 + h * res, y0],
+              pen=pg.mkPen("#000000", width=1))
+
+    m = 20.0
+    plot.setXRange(x0 - m, x0 + w * res + m, padding=0.0)
+    plot.setYRange(y0 - m, y0 + h * res + m, padding=0.0)
+    return it
 
 
 def run(widget, title: str, size=(1600, 950)) -> None:

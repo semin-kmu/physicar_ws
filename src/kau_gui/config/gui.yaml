@@ -10,27 +10,28 @@
     # ROS 수신 주기와 무관하다. 화면만 이 주기로 다시 그린다.
     # 플롯 데이터는 콜백에서 전량 링버퍼에 쌓으므로 50 Hz 신호도 누락되지 않는다.
     render_hz: 10.0
-    history_s: 30.0                 # 플롯 롤링 버퍼 길이
+    history_s: 30.0                 # 플롯 x 축 길이 = 롤링 버퍼 길이
 
     # --- 프레임 ---
+    # map -> odom -> base_link 를 map 패널에 ROS 표준 축 마커로 그린다.
     frames:
       map: "map"
-      # map->odom 은 AMCL, odom->base 는 EKF 소관이라 HUD 에서 나눠 본다.
-      # 어느 링크가 끊겼는지가 곧 어느 노드 문제인지다.
       odom: "odom"
       base: "base_link"
-      # TF 가 이보다 오래되면 차량 자세를 STALE 로 본다
+      # TF 가 이보다 오래되면 HUD 에 STALE 로 표시한다
       tf_timeout_s: 0.5
 
-    # --- 맵 ---
-    # topic : /map 구독 (map_server 가 bringup 단계 3 에 있다)
-    # file  : yaml_path 의 map yaml + pgm 을 직접 읽는다 (ROS 없이도 배경이 나옴)
-    # auto  : topic 을 기다리다 map_wait_s 안에 안 오면 file 로 넘어간다
+    # 맵의 TF 축 마커 길이 [cm]
+    tf_axis_cm: 20.0
+
+    # --- 맵 배경 ---
+    # kau_localization 이 share 에 설치하는 maps/<name>.yaml + pgm 을 읽는다.
+    # bringup.yaml 의 "@kau_localization:maps/kau_v3.yaml" 과 같은 지도다.
+    # yaml_path 를 주면 그쪽이 우선한다 (설치 안 된 지도를 볼 때).
     map:
-      source: "auto"
-      topic: "/map"
-      yaml_path: ""                 # 비우면 auto/file 에서 맵 배경 없이 동작
-      wait_s: 5.0
+      package: "kau_localization"
+      name: "kau_v3"
+      yaml_path: ""
 
     # --- 구독 토픽 ---
     topics:
@@ -40,95 +41,6 @@
       path_local: "/viz/path/local"
       path_lane: "/viz/path/lane"
       speed_cmd: "/speed"           # target speed
-      odom: "/odom"                 # real speed. /odometry/filtered 아님
-      steering: "/steering"         # cmd steer [rad]
+      odom: "/odom"                 # measured speed. /odometry/filtered 아님
+      steering: "/steering"         # commanded steer [rad]
       steer_debug: "/debug/steer"   # raw steer · Ld · heading err · cte
-
-    # 맵의 TF 축 마커 길이 [cm]. ROS 표준 모양(x 빨강 / y 초록)으로 그린다.
-    tf_axis_cm: 20.0
-
-    # --- 노드 감시 ---
-    # bringup.yaml 이 기동하는 노드 그대로. 순서도 맞춰 둔다.
-    #
-    # ROS 2 파라미터는 dict 배열을 못 받으므로 4 개 배열의 같은 index 가
-    # 한 노드를 이룬다. 길이가 다르면 노드가 기동을 거부한다.
-    #
-    # 감시 토픽은 표시용이 아니라 **제어단이 실제로 쓰는 토픽**이다.
-    # /viz/* 대리 관측이 아니라 원본을 봐야 "이 노드가 제 일을 하고 있는가"
-    # 를 판정할 수 있다. 내용은 역직렬화하지 않고 수신 시각만 찍는다.
-    #
-    # rate 0 = 대표 발행 토픽이 없거나(진단 로그 전용) latched 라 주기 판정
-    #          불가. 구독을 만들지 않고 graph 존재만으로 정상 처리하며
-    #          Hz 칸은 '-' 로 둔다.
-    #
-    # ★ 아직 구현되지 않은 노드가 섞여 있다 (state_machine 은 현재 스텁이라
-    #   발행 토픽이 없다). /diag/heartbeat 이 생기면 rate 0 항목들을
-    #   그쪽으로 옮기는 것이 맞다.
-    watch:
-      stale_ratio: 3.0              # 마지막 수신 > 기대주기 x 이 값 -> 빨강
-      # stale 판정 하한. 50 Hz 토픽은 3 배가 60 ms 라 무선 지터만으로도
-      # 빨간불이 깜빡여 정작 진짜 고장이 묻힌다.
-      min_stale_s: 0.3
-      names:
-        - "kau_ekf"
-        - "map_server"
-        - "amcl"
-        - "map_amcl_lifecycle_manager"
-        - "laser_scan_validator"
-        - "laser_scan_clusterer"
-        - "start_signal_detector"
-        - "kau_lane_detection_node"
-        - "global_path_publisher"
-        - "global_avoidance_publisher"
-        - "local_planner_node"
-        - "state_machine"
-        - "steer_controller"
-        - "speed_controller"
-      topics:
-        - "/odom"
-        - ""
-        - "/amcl_pose"
-        - ""
-        - ""
-        - "/perception/obstacles"
-        - "/perception/start_permission"
-        - "/lane/center"
-        - "/path/global"
-        - "/path/global_avoidance"
-        - "/path/local"
-        - ""
-        - "/steering"
-        - "/speed"
-      types:
-        - "nav_msgs/msg/Odometry"
-        - ""
-        - "geometry_msgs/msg/PoseWithCovarianceStamped"
-        - ""
-        - ""
-        - "kau_msgs/msg/ObstacleCircleArray"
-        - "std_msgs/msg/Bool"
-        - "kau_msgs/msg/KauPath"
-        - "kau_msgs/msg/KauPath"
-        - "kau_msgs/msg/KauPath"
-        - "kau_msgs/msg/KauPath"
-        - ""
-        - "std_msgs/msg/Float64"
-        - "std_msgs/msg/Float64"
-      rates:
-        # amcl 은 /scan 이 올 때만 낸다. 실측 후 조정할 것
-        - 30.0
-        - 0.0                       # map_server: /map 은 latched
-        - 5.0
-        - 0.0                       # lifecycle_manager: 발행 토픽 없음
-        - 0.0                       # laser_scan_validator: 진단 로그 전용
-        - 10.0
-        - 10.0
-        - 10.0
-        # ★ global_path.launch.py 를 rate>0 (기본 1 Hz) 로 띄울 것.
-        #   rate:=0 (1 회 발행) 이면 정상인데도 STALE 로 뜬다
-        - 1.0
-        - 1.0
-        - 5.0
-        - 0.0                       # state_machine: 현재 스텁, 발행 없음
-        - 50.0
-        - 50.0
