@@ -4269,56 +4269,159 @@ double KauLaneDetectionNode::curvatureAheadKappa(
     };
 
 
-    // 전 구간에서 최근접점을 찾는다. nseg 가 수십 개 수준이라
-    // 선형 탐색으로 충분하다 (매 프레임 14Hz 실시간 예산 안).
-    std::size_t best_seg = 0;
+    // 조각 s 의 제어점을 꺼낸다.
+    const auto seg_ctrl =
+        [&](std::size_t s)
+        {
+            kau::bezier::Ctrl ctrl(nctrl);
 
-    double best_d2 = std::numeric_limits<double>::max();
+            for (
+                std::size_t j = 0;
+                j < nctrl;
+                ++j
+            )
+            {
+                const std::size_t idx = s * nctrl + j;
+
+                ctrl[j].x = global_path_->ctrl_x[idx];
+                ctrl[j].y = global_path_->ctrl_y[idx];
+            }
+
+            return ctrl;
+        };
+
+
+    // 주어진 조각 목록에서 최근접점. 조각 하나는 8.1 해석적 해법.
+    const auto scan =
+        [&](const std::vector<std::size_t> & segs,
+            std::size_t & best_seg, double & best_u, double & best_dist)
+        {
+            best_dist = std::numeric_limits<double>::max();
+
+            for (const std::size_t s : segs)
+            {
+                const kau::bezier::Nearest near =
+                    kau::bezier::nearestOnSeg(seg_ctrl(s), ego);
+
+                if (near.dist < best_dist)
+                {
+                    best_dist = near.dist;
+
+                    best_seg  = s;
+
+                    best_u    = near.u;
+                }
+            }
+        };
+
+
+    // 8.4 window: 직전 해의 조각을 중심으로 호길이 [-BACK, +FWD] 에
+    // 걸치는 조각만 모은다. 폐곡선은 양쪽으로 순환한다.
+    const auto window_segs =
+        [&](std::size_t center)
+        {
+            std::vector<std::size_t> out{center};
+
+            double back = 0.0;
+
+            for (std::size_t k = 1; k < nseg && back < kTrackBackCm; ++k)
+            {
+                const std::size_t i =
+                    (center >= k) ? (center - k)
+                                  : (global_path_->is_closed
+                                         ? (nseg + center - k) : nseg);
+
+                if (i >= nseg)
+                {
+                    break;
+                }
+
+                out.push_back(i);
+
+                back += global_path_->seg_length[i];
+            }
+
+            double fwd = 0.0;
+
+            for (std::size_t k = 1; k < nseg && fwd < kTrackFwdCm; ++k)
+            {
+                std::size_t i = center + k;
+
+                if (i >= nseg)
+                {
+                    if (!global_path_->is_closed)
+                    {
+                        break;
+                    }
+
+                    i -= nseg;
+                }
+
+                out.push_back(i);
+
+                fwd += global_path_->seg_length[i];
+            }
+
+            return out;
+        };
+
+
+    std::size_t best_seg = 0;
 
     double best_u = 0.0;
 
+    double best_dist = std::numeric_limits<double>::max();
 
-    for (
-        std::size_t s = 0;
-        s < nseg;
-        ++s
-    )
+
+    // 경로가 바뀌면 조각 인덱스의 뜻이 달라진다. 상태를 버린다.
+    if (kappa_track_.valid && kappa_track_.seg >= nseg)
     {
-        kau::bezier::Ctrl ctrl(nctrl);
+        kappa_track_.valid = false;
+    }
 
-        for (
-            std::size_t j = 0;
-            j < nctrl;
-            ++j
-        )
+    bool used_window = false;
+
+    if (kappa_track_.valid)
+    {
+        scan(window_segs(kappa_track_.seg), best_seg, best_u, best_dist);
+
+        used_window = true;
+
+        if (best_dist > kTrackGateCm)
         {
-            const std::size_t idx = s * nctrl + j;
+            // GATE 이탈. 연속 FAIL_LIMIT 회면 전역으로 되돌린다
+            // (측위 점프 · 경로 교체 · 물리적 이탈).
+            if (++kappa_track_.fails >= kTrackFailMax)
+            {
+                kappa_track_.valid = false;
 
-            ctrl[j].x = global_path_->ctrl_x[idx];
-            ctrl[j].y = global_path_->ctrl_y[idx];
+                used_window = false;
+            }
         }
-
-        const kau::bezier::Nearest near =
-            kau::bezier::nearestOnSeg(ctrl, ego);
-
-        const kau::bezier::Point2 foot =
-            kau::bezier::evalSeg(ctrl, near.u);
-
-        const double dx = foot.x - ego.x;
-
-        const double dy = foot.y - ego.y;
-
-        const double d2 = dx * dx + dy * dy;
-
-        if (d2 < best_d2)
+        else
         {
-            best_d2 = d2;
-
-            best_seg = s;
-
-            best_u = near.u;
+            kappa_track_.fails = 0;
         }
     }
+
+    if (!used_window)
+    {
+        // 8.3 전역 탐색. 첫 프레임과 GATE 연속 이탈 뒤에만 온다.
+        std::vector<std::size_t> all(nseg);
+
+        for (std::size_t s = 0; s < nseg; ++s)
+        {
+            all[s] = s;
+        }
+
+        scan(all, best_seg, best_u, best_dist);
+
+        kappa_track_.fails = 0;
+    }
+
+    kappa_track_.seg   = best_seg;
+    kappa_track_.u     = best_u;
+    kappa_track_.valid = true;
 
 
     // best_seg, best_u 에서 시작해 lookahead 만큼 호길이로 걸으며

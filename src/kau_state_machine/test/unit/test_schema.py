@@ -124,3 +124,27 @@ def test_reject_gate_with_critical():
 def test_reject_negative_respawn_delay():
     with pytest.raises(ValueError, match='respawn_delay'):
         _spec(respawn=True, respawn_delay=-1.0)
+
+
+def test_option_field():
+    """option 은 켜고 끌 수 있는 노드의 스위치 이름이다."""
+    spec = _spec(option='lane_viewer')
+    assert spec.option == 'lane_viewer'
+    assert parse_manifest(MINIMAL).stages[0].nodes[0].option == ''
+
+
+def test_manifest_collects_options():
+    """supervisor 가 이 목록만큼 option.<이름> 파라미터를 연다."""
+    data = {'run': {'log_dir': '/tmp'}, 'stages': [{'id': 1, 'nodes': [
+        {'name': 'a', 'package': 'p', 'executable': 'e', 'option': 'viewer'},
+        {'name': 'b', 'package': 'p', 'executable': 'e'},
+        {'name': 'c', 'package': 'p', 'executable': 'e', 'option': 'viewer'},
+        {'name': 'd', 'package': 'p', 'executable': 'e', 'option': 'rviz'}]}]}
+    assert parse_manifest(data).options == ('rviz', 'viewer')
+    assert parse_manifest(MINIMAL).options == ()
+
+
+def test_reject_bad_option_name():
+    """파라미터 이름이 되어야 하므로 점·공백은 거부한다."""
+    with pytest.raises(ValueError, match='option'):
+        _spec(option='lane.viewer')

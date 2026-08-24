@@ -21,6 +21,9 @@ def generate_launch_description() -> LaunchDescription:
                               description='로그 디렉터리 이름. 비우면 기동 시각'),
         DeclareLaunchArgument('use_sim_time', default_value='true',
                               description='전 노드 공통. /clock 을 쓰면 true, 실기는 false'),
+        # bringup.yaml 의 option 스위치. 노드의 `option: lane_viewer` 와 짝이다.
+        DeclareLaunchArgument('lane_viewer', default_value='true',
+                              description='차선 인지 BEV 웹 뷰어(포트 5000) 실행 여부'),
     ]
 
     supervisor = Node(
@@ -34,6 +37,8 @@ def generate_launch_description() -> LaunchDescription:
             'run_id': LaunchConfiguration('run_id'),
             'use_sim_time': ParameterValue(
                 LaunchConfiguration('use_sim_time'), value_type=bool),
+            'option.lane_viewer': ParameterValue(
+                LaunchConfiguration('lane_viewer'), value_type=bool),
         }],
     )
 

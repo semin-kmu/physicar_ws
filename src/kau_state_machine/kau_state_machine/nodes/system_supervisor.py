@@ -62,6 +62,12 @@ class SystemSupervisor(Node):
         # use_sim_time 은 rclpy 가 자동 선언한다. 기본값은 launch 가 준다.
         self._use_sim_time = bool(self.get_parameter('use_sim_time').value)
 
+        # manifest 가 쓰는 스위치마다 `option.<이름>` 을 연다. 기본은 켬이라
+        # 아무것도 안 주면 지금까지와 똑같이 전부 뜬다.
+        self._options = {
+            name: bool(self.declare_parameter(f'option.{name}', True).value)
+            for name in self._manifest.options}
+
         run_id = self.get_parameter('run_id').value or make_run_id()
         self._log_dir = resolve_log_dir(self._manifest.log_dir, run_id)
 
@@ -108,7 +114,8 @@ class SystemSupervisor(Node):
                     return
                 if not self._wanted(spec):
                     skipped += 1
-                    log('skip', f'when={spec.when} · 이 기동에는 없다', node=spec.name)
+                    log('skip', f'{self._skip_reason(spec)} · 이 기동에는 없다',
+                        node=spec.name)
                     continue
                 try:
                     child = spawn(spec, self._log_dir, self._use_sim_time)
@@ -149,12 +156,19 @@ class SystemSupervisor(Node):
         log('watch', f'상시 감시 시작 · {WATCH_PERIOD_SEC:.0f} 초 주기')
 
     def _wanted(self, spec) -> bool:
-        """when 이 이번 기동의 시계 소스와 맞는가. 맞지 않으면 띄우지 않는다."""
+        """이번 기동에 띄울 노드인가. when(시계 소스) · option(스위치) 둘 다 본다."""
+        if spec.option and not self._options.get(spec.option, True):
+            return False
         if spec.when == 'sim':
             return self._use_sim_time
         if spec.when == 'real':
             return not self._use_sim_time
         return True
+
+    def _skip_reason(self, spec) -> str:
+        if spec.option and not self._options.get(spec.option, True):
+            return f'option.{spec.option}=false'
+        return f'when={spec.when}'
 
     def _gate(self, spec, child) -> bool:
         """관문 1 개를 통과했는가. 실패하면 기동을 중단한다 (docs/01 section 3)."""

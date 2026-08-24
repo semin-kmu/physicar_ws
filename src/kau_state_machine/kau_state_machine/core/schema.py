@@ -8,7 +8,7 @@ _ROOT_KEYS = {'run', 'stages'}
 _RUN_KEYS = {'log_dir'}
 _STAGE_KEYS = {'id', 'delay_sec', 'nodes'}
 _NODE_KEYS = {'name', 'package', 'executable', 'ros', 'wait', 'when',
-              'respawn', 'respawn_delay', 'critical',
+              'respawn', 'respawn_delay', 'critical', 'option',
               'param_files', 'params', 'remap', 'args'}
 
 # respawn 기본 대기. ekf.launch.py 의 Node(respawn_delay=2.0) 과 같은 값이다.
@@ -30,6 +30,11 @@ class NodeSpec:
     # 0 이 아니면 기동을 중단한다 (clock_gate.py 처럼 조건을 재는 프로세스용).
     wait: bool = False
     when: str = 'always'
+    # 켜고 끌 수 있는 노드의 스위치 이름. 비어 있으면 항상 띄운다.
+    # supervisor 가 `option.<이름>` 이라는 bool 파라미터를 선언하고(기본 true)
+    # 그 값이 false 면 이 노드를 건너뛴다. 관측용 도구처럼 있어도 없어도
+    # 주행이 되는 노드에만 쓴다 -- 주행에 필요한 노드는 끌 수 있으면 안 된다.
+    option: str = ''
     # 죽으면 respawn_delay 초 뒤 다시 띄운다. launch 의 Node(respawn=True) 와
     # 같은 뜻이다. platform_ekf_pause 가 우리 EKF 를 죽여 되살리는 복구
     # 경로가 이것에 의존한다 (ekf.launch.py 주석 참고).
@@ -61,6 +66,13 @@ class Manifest:
     @property
     def node_count(self) -> int:
         return sum(len(stage.nodes) for stage in self.stages)
+
+    @property
+    def options(self) -> tuple:
+        """manifest 에 쓰인 스위치 이름들. supervisor 가 이만큼 파라미터를 연다."""
+        names = {spec.option
+                 for stage in self.stages for spec in stage.nodes if spec.option}
+        return tuple(sorted(names))
 
 
 def _mapping(value, where):
@@ -97,6 +109,11 @@ def _node(data, where):
         raise ValueError(f'{where}: respawn_delay 는 0 이상 '
                          f'(받은 값: {respawn_delay})')
 
+    option = str(data.get('option', '') or '')
+    if option and not option.replace('_', '').isalnum():
+        raise ValueError(f'{where}: option 은 파라미터 이름이라 영숫자와 _ 만 '
+                         f'(받은 값: {option!r})')
+
     return NodeSpec(
         name=str(data['name']),
         package=str(data['package']),
@@ -107,6 +124,7 @@ def _node(data, where):
         respawn=respawn,
         respawn_delay=respawn_delay,
         critical=critical,
+        option=option,
         param_files=tuple(str(ref) for ref in data.get('param_files') or ()),
         params=dict(_mapping(data.get('params') or {}, f'{where}.params')),
         remap=dict(_mapping(data.get('remap') or {}, f'{where}.remap')),

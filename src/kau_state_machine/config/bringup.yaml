@@ -19,6 +19,9 @@
 #   respawn      죽으면 respawn_delay(기본 2.0) 초 뒤 다시 띄운다.
 #                launch 의 Node(respawn=True) 와 같은 뜻
 #   critical     죽으면 기동 전체를 내린다. launch 의 on_exit=Shutdown 과 같은 뜻
+#   option       켜고 끌 수 있는 노드의 스위치 이름. supervisor 가
+#                `option.<이름>` bool 파라미터를 열고(기본 true) false 면 건너뛴다.
+#                있어도 없어도 주행이 되는 관측 도구에만 쓴다
 #
 # respawn·critical 은 노드 파라미터가 아니라 **프로세스 감독 정책**이다.
 # 담당자 launch 파일이 갖고 있던 것을 여기로 옮겨 적은 것이라 여기 있는 게 맞다.
@@ -170,11 +173,17 @@ stages:
 
       # BEV 화면과 차선 검출 현황을 보는 웹 뷰어 (http://localhost:5000).
       # lane_detection.launch.py 가 viewer 기본 true 로 같이 띄운다. 관측
-      # 전용이라 없어도 주행은 되지만, 차선 인지를 눈으로 확인할 수단이
-      # 이것뿐이라 담당자 스택과 맞춰 둔다. 끄려면 이 블록을 지운다.
+      # 전용이라 없어도 주행은 된다.
+      #
+      #   ./run.sh --no-viewer          (또는 lane_viewer:=false)
+      #
+      # 대회장처럼 화면을 안 볼 때 끄면 flask 서버와 영상 인코딩이 통째로
+      # 빠진다. 끈다고 /lane/center 가 달라지지는 않는다 -- 뷰어는
+      # debug_image 만 구독하는 관측 전용 노드다.
       - name: kau_lane_detection_viewer
         package: kau_lane_detection
         executable: lane_viewer.py
+        option: lane_viewer
 
   # 단계 5 · 전역 경로
   - id: 5

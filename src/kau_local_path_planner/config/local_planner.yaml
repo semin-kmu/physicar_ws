@@ -9,7 +9,7 @@
 
 local_planner_node:
   ros__parameters:
-    plan_hz: 5.0
+    plan_hz: 10.0
     map_frame: "map"
     base_frame: "base_footprint"
 

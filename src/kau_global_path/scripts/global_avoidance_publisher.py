@@ -10,10 +10,13 @@ RViz has no display for KauPath, so the same curve also goes out as
 /viz/path/global_avoidance (nav_msgs/Path, metres) for visualisation only.
 """
 
+import bisect
 import copy
 import math
 import signal
 import sys
+
+import numpy
 
 from geometry_msgs.msg import PoseStamped
 
@@ -53,6 +56,155 @@ def segment_frame(ctrl, u):
     kappa = 0.0 if speed2 < 1e-12 else (
         d1[0] * d2[1] - d1[1] * d2[0]) / (speed2 ** 1.5)
     return p, theta, kappa
+
+
+# ====================================================================
+# 경로_형식.md section 8 — 최근접점 / 호길이
+#
+# 이 절은 `경로_형식.md` 의 "연산별 알고리즘 지정" 을 그대로 구현한다.
+# kau_control/bezier.hpp 와 **같은 알고리즘·같은 상수**이며, 그 패키지를
+# import 하지 않고 여기에 둔다 (kau_lane_detection 이 bezier.hpp 사본을
+# 갖는 것과 같은 이유 -- 패키지 간 의존을 늘리지 않는다).
+#
+# 2026-08-25 이전에는 5 cm 간격 표본 중 최근접 **표본**을 골랐다. 곡선 위로
+# 투영하지 않으므로 규격 8.1 이 아니고, 표본 간격의 절반(2.5 cm)이 계통
+# 오차로 남았다. 회피 판정이 lateral 을 cm 단위로 쓰므로 무시할 수 없다.
+# ====================================================================
+
+# 8.5 Gauss-Legendre 10점. [-1,1] 구간. 100 cm 당 절대오차 27 um.
+_GL_X = (
+    -0.9739065285171717, -0.8650633666889845,
+    -0.6794095682990244, -0.4333953941292472,
+    -0.1488743389816312, 0.1488743389816312,
+    0.4333953941292472, 0.6794095682990244,
+    0.8650633666889845, 0.9739065285171717,
+)
+_GL_W = (
+    0.0666713443086881, 0.1494513491505806,
+    0.2190863625159820, 0.2692667193099963,
+    0.2955242247147529, 0.2955242247147529,
+    0.2692667193099963, 0.2190863625159820,
+    0.1494513491505806, 0.0666713443086881,
+)
+
+
+def _binom(n, k):
+    return math.comb(n, k)
+
+
+def to_power(ctrl):
+    """Bezier 제어점 -> 거듭제곱 기저 계수 [(x, y)]. 낮은 차수부터."""
+    n = len(ctrl) - 1
+    coef = []
+    for j in range(n + 1):
+        cx = cy = 0.0
+        for i in range(j + 1):
+            m = _binom(n, j) * _binom(j, i) * (1.0 if (j - i) % 2 == 0 else -1.0)
+            cx += m * ctrl[i][0]
+            cy += m * ctrl[i][1]
+        coef.append((cx, cy))
+    return coef
+
+
+def _poly_der(c):
+    return [i * c[i] for i in range(1, len(c))] or [0.0]
+
+
+def _poly_mul(a, b):
+    out = [0.0] * (len(a) + len(b) - 1)
+    for i, ai in enumerate(a):
+        if ai == 0.0:
+            continue
+        for j, bj in enumerate(b):
+            out[i + j] += ai * bj
+    return out
+
+
+def _poly_add(a, b):
+    n = max(len(a), len(b))
+    return [(a[i] if i < len(a) else 0.0) + (b[i] if i < len(b) else 0.0)
+            for i in range(n)]
+
+
+def real_roots_in_unit(coef, tol=1e-9):
+    """8.2 동반행렬 고유값. (0,1) 안의 실근만. coef 는 낮은 차수부터.
+
+    규격이 지정한 Python 구현 수단이 numpy.roots 이고, 그것이 곧 동반행렬
+    고유값이다. numpy 는 계수를 높은 차수부터 받으므로 뒤집어 넘긴다.
+    """
+    c = list(coef)
+    while len(c) > 1 and c[-1] == 0.0:
+        c.pop()
+    if len(c) <= 1:
+        return []
+    ev = numpy.roots(list(reversed(c)))
+    scale = max([1.0] + [abs(v.real) for v in ev])
+    return [v.real for v in ev
+            if abs(v.imag) < tol * scale and 0.0 < v.real < 1.0]
+
+
+def nearest_on_seg(ctrl, p):
+    """8.1 최근접점. (u, dist). 반복법을 쓰지 않아 전역 최소가 보장된다.
+
+    g(t) = (r(t) - p) . r'(t) 는 quintic 에서 정확히 9차.
+    후보 = { g=0 의 (0,1) 실근 } U {0, 1}.
+    """
+    c = to_power(ctrl)
+    cx = [q[0] for q in c]
+    cy = [q[1] for q in c]
+    gx = list(cx)
+    gy = list(cy)
+    gx[0] -= p[0]
+    gy[0] -= p[1]
+    g = _poly_add(_poly_mul(gx, _poly_der(cx)), _poly_mul(gy, _poly_der(cy)))
+
+    best_u, best_d = 0.0, float('inf')
+    for u in real_roots_in_unit(g) + [0.0, 1.0]:
+        q = eval_bezier(ctrl, u)
+        d = math.hypot(q[0] - p[0], q[1] - p[1])
+        if d < best_d:
+            best_u, best_d = u, d
+    return best_u, best_d
+
+
+def seg_length(ctrl, u0=0.0, u1=1.0):
+    """8.5 호길이. Gauss-Legendre 10점."""
+    half = 0.5 * (u1 - u0)
+    mid = 0.5 * (u1 + u0)
+    d1 = derivative_ctrl(ctrl)
+    total = 0.0
+    for x, w in zip(_GL_X, _GL_W):
+        v = eval_bezier(d1, mid + half * x)
+        total += w * math.hypot(v[0], v[1])
+    return total * half
+
+
+def invert_arclen(ctrl, s_local, length):
+    """8.5 역산. safeguarded Newton (bracket 유지 + bisection fallback).
+
+    u 를 s/length 로 두는 선형 근사는 quintic 이 호길이 매개변수가 아니라서
+    곡률이 큰 구간에서 어긋난다. 2026-08-25 이전에는 그 근사를 썼다.
+    """
+    if length < 1e-12:
+        return 0.0
+    s_local = min(max(s_local, 0.0), length)
+    lo, hi = 0.0, 1.0
+    u = s_local / length
+    d1 = derivative_ctrl(ctrl)
+    for _ in range(5):
+        h = seg_length(ctrl, 0.0, u) - s_local
+        if abs(h) < 1e-9:
+            break
+        if h > 0.0:
+            hi = u
+        else:
+            lo = u
+        v = eval_bezier(d1, u)
+        sp = math.hypot(v[0], v[1])
+        u = (u - h / sp) if sp > 1e-12 else 0.5 * (lo + hi)
+        if not (lo < u < hi):
+            u = 0.5 * (lo + hi)
+    return min(max(u, 0.0), 1.0)
 
 
 def _hermite_to_bezier(a, b, sigma_ratio):
@@ -140,7 +292,14 @@ def to_navpath(msg, spacing_cm):
 
 
 class ReferencePath:
-    def __init__(self, msg, sample_step_cm=5.0):
+    """KauPath 를 호길이로 다루는 뷰. 연산은 전부 `경로_형식.md` section 8.
+
+    호길이는 msg.seg_length 가 아니라 제어점에서 다시 잰다 (8.5 GL10).
+    kau_control 의 Curve 도 같게 하며, 그래야 station() 이 돌려준 s 를
+    frame(s) 에 다시 넣었을 때 같은 점으로 돌아온다.
+    """
+
+    def __init__(self, msg):
         self.closed = msg.is_closed
         self.ctrl = []
         nctrl = msg.degree + 1
@@ -148,35 +307,66 @@ class ReferencePath:
             start = i * nctrl
             self.ctrl.append(list(zip(msg.ctrl_x[start:start + nctrl],
                                       msg.ctrl_y[start:start + nctrl])))
-        self.lengths = list(msg.seg_length)
+
+        self.lengths = [seg_length(c) for c in self.ctrl]
         self.total = sum(self.lengths)
-        self.samples = []
-        s0 = 0.0
-        for ctrl, length in zip(self.ctrl, self.lengths):
-            count = max(2, int(math.ceil(length / sample_step_cm)))
-            for j in range(count):
-                u = j / count
-                p, theta, kappa = segment_frame(ctrl, u)
-                self.samples.append((s0 + length * u, p, theta, kappa))
-            s0 += length
+
+        self.cum = [0.0]
+        for length in self.lengths:
+            self.cum.append(self.cum[-1] + length)
+
+        # 8.3 전역 탐색용 AABB. 제어점 볼록포가 곡선을 감싸므로
+        # 제어점의 AABB 까지의 거리는 곡선까지 거리의 진하한이다.
+        self.aabb = []
+        for c in self.ctrl:
+            xs = [q[0] for q in c]
+            ys = [q[1] for q in c]
+            self.aabb.append((min(xs), min(ys), max(xs), max(ys)))
+
+    def _wrap_s(self, s):
+        if self.total <= 0.0:
+            return 0.0
+        if self.closed:
+            return s % self.total
+        return min(max(s, 0.0), self.total)
 
     def frame(self, s):
-        if self.closed:
-            s %= self.total
-        else:
-            s = min(max(s, 0.0), self.total)
-        acc = 0.0
-        for ctrl, length in zip(self.ctrl, self.lengths):
-            if s <= acc + length or ctrl is self.ctrl[-1]:
-                return segment_frame(ctrl, min(1.0, max(0.0, (s - acc) / length)))
-            acc += length
-        return segment_frame(self.ctrl[-1], 1.0)
+        """호길이 -> (점, 접선각, 곡률). 역산은 8.5 safeguarded Newton."""
+        s = self._wrap_s(s)
+        i = bisect.bisect_right(self.cum, s) - 1
+        i = min(max(i, 0), len(self.ctrl) - 1)
+        u = invert_arclen(self.ctrl[i], s - self.cum[i], self.lengths[i])
+        return segment_frame(self.ctrl[i], u)
+
+    def _aabb_lower_bound(self, i, point):
+        lo_x, lo_y, hi_x, hi_y = self.aabb[i]
+        dx = max(lo_x - point[0], point[0] - hi_x, 0.0)
+        dy = max(lo_y - point[1], point[1] - hi_y, 0.0)
+        return math.hypot(dx, dy)
 
     def station(self, point):
-        s, p, theta, _ = min(
-            self.samples,
-            key=lambda q: (q[1][0] - point[0]) ** 2 + (q[1][1] - point[1]) ** 2)
-        lateral = -math.sin(theta) * (point[0] - p[0]) + math.cos(theta) * (point[1] - p[1])
+        """8.3 전역 최근접점 -> (호길이 s, 횡거리). 좌측 +.
+
+        AABB 하한 오름차순으로 훑고 하한이 현재 최소를 넘으면 중단한다.
+        하한이 진하한이라 배제한 segment 가 최적일 가능성은 없다.
+        """
+        order = sorted(
+            range(len(self.ctrl)),
+            key=lambda i: self._aabb_lower_bound(i, point))
+
+        best = (float('inf'), 0, 0.0)      # (dist, seg, u)
+        for i in order:
+            if self._aabb_lower_bound(i, point) >= best[0]:
+                break
+            u, dist = nearest_on_seg(self.ctrl[i], point)
+            if dist < best[0]:
+                best = (dist, i, u)
+
+        _, i, u = best
+        p, theta, _ = segment_frame(self.ctrl[i], u)
+        s = self.cum[i] + seg_length(self.ctrl[i], 0.0, u)
+        lateral = (-math.sin(theta) * (point[0] - p[0]) +
+                   math.cos(theta) * (point[1] - p[1]))
         return s, lateral
 
     def delta(self, a, b):
@@ -195,7 +385,7 @@ def smooth_bump(distance, half_length):
 
 
 def plan_avoidance(msg, obstacles, params, invert=False):
-    ref = ReferencePath(msg, params['projection_step_cm'])
+    ref = ReferencePath(msg)
     active = []
     clearance_extra = params['body_radius_cm'] + params['safety_margin_cm']
     for x, y, radius in obstacles:
@@ -296,7 +486,7 @@ class GlobalAvoidancePublisher(Node):
             'body_radius_cm': 11.0353, 'safety_margin_cm': 2.0,
             'activation_margin_cm': 3.0, 'max_offset_cm': 35.0,
             'avoidance_half_length_cm': 120.0, 'fit_spacing_cm': 35.0,
-            'projection_step_cm': 5.0, 'derivative_step_cm': 1.0,
+            'derivative_step_cm': 1.0,
             'kappa_max_vehicle': 0.020221, 'kappa_margin': 0.95,
             'collision_tolerance_cm': 0.5,
             'global_topic': '/path/global',

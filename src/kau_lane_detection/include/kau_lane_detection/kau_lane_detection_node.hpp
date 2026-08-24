@@ -550,12 +550,47 @@
         //
         // /path/global 은 손으로 그려 한 번 latched 발행되는 정적 경로라
         // (kau_global_path README 1장), 자차가 지금 그 위 어디에 있는지를
-        // 매 프레임 다시 찾아야 한다 — 전 구간에 대해 최근접점을 구하고
-        // (kau::bezier::nearestOnSeg 재사용), 거기서부터 호길이로
-        // lookahead_m 만큼 전진하며 지나는 구간들의 seg_kappa_max 중
-        // 최댓값을 취한다. seg_kappa_max 는 강체변환 불변이므로(KauPath.msg)
-        // map 프레임 그대로 써도 된다.
+        // 매 프레임 다시 찾아야 한다 — 최근접점을 구하고 거기서부터
+        // 호길이로 lookahead_m 만큼 전진하며 지나는 구간들의
+        // seg_kappa_max 중 최댓값을 취한다. seg_kappa_max 는 강체변환
+        // 불변이므로(KauPath.msg) map 프레임 그대로 써도 된다.
+        //
+        // 최근접점 탐색은 `경로_형식.md` section 8.4 국소 window 추적이다.
+        // 조각 하나의 최근접점은 8.1 (kau::bezier::nearestOnSeg 재사용).
         double curvatureAheadKappa(const VehiclePose & pose) const;
+
+
+        // ------------------------------------------------------------
+        // 최근접점 추적 상태 (경로_형식.md section 8.4)
+        //
+        // 매 프레임 전 구간을 훑으면(8.3 전역 탐색) 자차가 경로의 다른
+        // 구간과 가까워지는 자리에서 반대편에 붙는다. 실측 lane_graph 의
+        // 최소 자기근접 거리는 131.3 cm 이고, 규격은 그 상황에서 "횡오차
+        // 155 cm 에서 반대편 구간 선택, s 971 cm 도약" 을 보고한다.
+        //
+        // 그래서 직전 해 주변 호길이 window 만 본다. 전역 탐색은 첫 프레임과
+        // GATE 이탈이 연속 FAIL_LIMIT 회일 때만 쓴다.
+        //
+        // 상수는 규격 8.4 표의 값을 그대로 쓴다. kau_control 이 같은 값을
+        // 갖지만 그 패키지를 의존으로 끌지 않는다 (bezier.hpp 사본을 두는
+        // 것과 같은 이유).
+        // ------------------------------------------------------------
+
+        struct KappaTrack
+        {
+            std::size_t seg   = 0;      // 직전 해가 있던 조각
+            double      u     = 0.0;    // 그 조각 안의 매개변수
+            bool        valid = false;  // false 면 전역 탐색
+            int         fails = 0;      // GATE 연속 이탈 횟수
+        };
+
+        static constexpr double kTrackFwdCm   = 100.0;  // 전방 window
+        static constexpr double kTrackBackCm  = 50.0;   // 후방 window
+        static constexpr double kTrackGateCm  = 250.0;  // 경로 이탈 판정
+        static constexpr int    kTrackFailMax = 3;      // 연속 실패 -> 전역
+
+        // const 메서드 안에서 갱신한다. 관측 결과 캐시라 논리적 상태가 아니다.
+        mutable KappaTrack kappa_track_;
 
 
         // ================================================================

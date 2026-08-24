@@ -17,7 +17,9 @@ global_avoidance_publisher:
     max_offset_cm: 35.0
     avoidance_half_length_cm: 120.0
     fit_spacing_cm: 35.0
-    projection_step_cm: 5.0
+    # projection_step_cm 은 2026-08-25 에 없앴다. 기준 경로 투영이 표본
+    # 최근접에서 해석적 최근접점(경로_형식.md 8.1)으로 바뀌어 표본 간격이
+    # 필요 없어졌다. 계통 오차 2.5 cm 도 같이 사라졌다.
     derivative_step_cm: 1.0
 
     global_topic: /path/global
