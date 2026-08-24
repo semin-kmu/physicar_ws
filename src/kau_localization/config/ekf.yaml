@@ -1,0 +1,147 @@
+# 우리 쪽 EKF 설정. robot_localization/ekf_node 를 그대로 쓰되 설정만 갈아끼운다.
+# ekf.launch.py 가 플랫폼 EKF 를 재우고 이 설정으로 하나 띄운다.
+#
+# ── 무엇이 문제였나 ──────────────────────────────────────────────────
+# 플랫폼 기본 설정(/opt/physicar/.../physicar_bringup/config/ekf_params.yaml)
+# 은 **절대 방위를 두 개 다 버린다.**
+#
+#   odom0_config 의 yaw = false      -> 스캔 매칭 yaw 를 버림
+#   imu0_differential: true          -> IMU 절대 yaw 를 각속도로 바꿔서 버림
+#
+# differential 은 절대 자세 측정을 미분해서 속도로 바꾼 뒤 융합한다
+# (robot_localization 공식 예제 yaml 의 설명). 그러면 yaw 상태를 직접 겨누는
+# 측정이 하나도 없고, yaw 는 각속도를 적분해서만 얻는다. 적분 상수가 없으니
+# 되돌리는 힘이 없고 분산이 시간에 비례해 커지는 랜덤워크가 된다.
+#
+# 2026-08-24 실측 (sim):
+#   정지 3 분    raw IMU gyro-z   +0.01 deg/min
+#                raw IMU orient   +0.00 deg/min
+#                /odom/laser      -0.10 deg/min
+#                /odom (EKF)      +7.90 deg/min   <- 혼자 틀림
+#
+#   주행 240 초  |EKF - /odom/laser|  최대 19.24도  평균 6.09도
+#                |EKF - /imu|         최대 12.04도  평균 5.75도
+#                |/odom/laser - /imu| 평균  0.99도  <- 두 소스는 서로 맞는다
+#
+# 19 도는 AMCL 모션 모델이 흡수할 수 있는 범위 밖이다. 측위 정확도 문제의
+# 상류 원인이 여기라서 AMCL / Cartographer 어느 쪽을 쓰든 먼저 고쳐야 한다.
+#
+# ── 왜 IMU 가 아니라 스캔 yaw 인가 ───────────────────────────────────
+# **실기 IMU 에는 orientation 이 아예 없다.**
+# physicar_bringup/src/physicar_driver_node.cpp 가 가속도와 각속도만 채우고
+# orientation 은 기본값(단위 쿼터니언 = yaw 0)으로 두면서
+# orientation_covariance[0] = -1.0 ("이 값 없음" 이라는 ROS 규약)만 찍는다.
+# 자력계는 /imu/mag 로 따로 나가지만 융합 필터를 아무도 안 돌린다.
+#
+# sim 은 반대로 orientation 이 사실상 정답이다. Gazebo imu 센서
+# (physicar-sim/share/models/physicar/model.sdf) 는 각속도와 가속도에만
+# 노이즈를 넣고 orientation 에는 노이즈 항목 자체가 없다 -- 물리엔진의 실제
+# 링크 자세를 그대로 낸다. 그래서 위 실측에서 드리프트가 0.00 deg/min 이었다.
+#
+# 그리고 robot_localization 은 **-1 규약을 지키지 않는다.** 격리 실험으로
+# 확인했다 (2026-08-24):
+#   orientation yaw=1.0 rad, cov[0]=0.01,  자이로 0  ->  EKF yaw = 1.0
+#   orientation yaw=1.0 rad, cov[0]=-1.0,  자이로 0  ->  EKF yaw = 1.0  (사용!)
+#
+#   실기 재현 (단위 쿼터니언 + cov -1, 자이로 0.5 rad/s 로 6 초, 참값 3.00):
+#     sim  조건  EKF yaw = 2.975   오차  0.8 %
+#     real 조건  EKF yaw = 2.580   오차 14 %   <- yaw 0 쪽으로 계속 끌린다
+#
+# 즉 실기에서 IMU yaw 를 절대 관측으로 켜면 "항상 yaw=0" 이라는 가짜 측정을
+# 먹게 되고 추정 방위가 0 으로 끌려간다. 지금의 랜덤워크보다 나쁘다.
+#
+# 그래서 **절대 방위는 스캔 yaw 하나로 통일한다.** 스캔 yaw 는 sim 과 실기가
+# 똑같이 동작하고 (둘 다 physicar_laser_odom 의 Point-to-Line ICP 결과),
+# 실측 드리프트 -0.10 deg/min 로 IMU 만큼 좋다. 대회 전에 두 환경 설정이
+# 갈라지지 않는 것이 무엇보다 중요하다.
+#
+# ── 플랫폼 설정과 다른 점 ────────────────────────────────────────────
+#   odom0_config 의 yaw    false -> true    (스캔 yaw 를 절대 관측으로)
+#   imu0_config  의 yaw    true  -> false   (실기에 없는 값이라 안 쓴다)
+#   imu0_differential      true  -> false   (yaw 를 안 쓰므로 무의미해짐)
+#   print_diagnostics      (기본 false) -> true   (관측용, 필터 동작엔 무관)
+# 나머지는 플랫폼 값 또는 robot_localization 기본값 그대로다.
+#
+# 노드 이름에 상관없이 로드되도록 최상위 키는 /** 를 쓴다. 플랫폼 쪽은
+# ekf_filter_node: 로 고정돼 있어서 이름을 바꾸면 파라미터가 안 붙는다.
+/**:
+  ros__parameters:
+    frequency: 30.0
+    two_d_mode: true
+
+    publish_tf: true
+    map_frame: map
+    odom_frame: odom
+    base_link_frame: base_footprint
+    world_frame: odom
+
+    # 센서별 갱신 상태를 /diagnostics 에 낸다. 어느 소스가 실제로 반영되고
+    # 있는지 확인할 때 쓴다. 비용은 무시할 수준이다.
+    print_diagnostics: true
+
+    # ── Sensor 0: 스캔 매칭 오도메트리 (/odom/laser) ──
+    # physicar_laser_odom 의 Point-to-Line ICP 결과다 (/scan_filtered 를 구독).
+    # config 순서: x, y, z, roll, pitch, yaw,
+    #              vx, vy, vz, vroll, vpitch, vyaw,
+    #              ax, ay, az
+    #
+    # yaw(6 번째)를 켠 것이 이 파일의 핵심이다. 위치와 방위가 같은 소스에서
+    # 오므로 둘 사이에 프레임 오프셋이 생기지 않는다는 부수 효과도 있다.
+    odom0: /odom/laser
+    odom0_config: [true,  true,  false,
+                   false, false, true,
+                   true,  false, false,
+                   false, false, false,
+                   false, false, false]
+    odom0_differential: false
+    odom0_relative: false
+    odom0_queue_size: 10
+
+    # odom0_pose_rejection_threshold 를 걸고 싶어지는데 **지금은 걸면 안 된다.**
+    # laser_odom_node.cpp 는 covariance 를 아예 안 채워서 전부 0 으로 나간다.
+    # 그 상태로 마할라노비스 문턱을 걸면 거리가 발산해서 거의 모든 측정이
+    # 기각된다. ICP 가 튀는 것을 막으려면 공분산부터 채워야 한다.
+
+    # ── Sensor 1: IMU (/imu) ──
+    # **vyaw(12 번째)만 쓴다.** yaw 는 실기에 존재하지 않는 값이라 끈다
+    # (위 "왜 IMU 가 아니라 스캔 yaw 인가" 참고). 가속도도 안 쓴다 -- 두 번
+    # 적분하면 위치 노이즈만 늘어난다.
+    #
+    # 자이로 각속도는 sim/실기 모두 진짜 측정값이고 실측 바이어스가
+    # +0.01 deg/min 로 깨끗하다. 스캔 매칭이 순간적으로 흔들릴 때 회전을
+    # 매끄럽게 이어 주는 역할을 한다.
+    imu0: /imu
+    imu0_config: [false, false, false,
+                  false, false, false,
+                  false, false, false,
+                  false, false, true,
+                  false, false, false]
+
+    # yaw 를 안 쓰므로 아래 둘은 사실상 무의미하지만, 나중에 imu0_config 의
+    # yaw 를 다시 켜는 사람이 함정에 빠지지 않도록 명시해 둔다. differential
+    # 은 절대 방위를 각속도로 바꿔 버려서 켜는 순간 절대 기준이 사라진다.
+    imu0_differential: false
+    imu0_relative: false
+
+    imu0_remove_gravitational_acceleration: true
+    imu0_queue_size: 10
+
+    # 아래는 플랫폼 설정 그대로다. 일부러 안 건드렸다 -- 센서 설정만 바꾼
+    # 효과를 봐야 하기 때문이다.
+    process_noise_covariance: [
+      0.05,  0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,
+      0.0,   0.05,  0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,
+      0.0,   0.0,   0.06,  0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,
+      0.0,   0.0,   0.0,   0.03,  0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,
+      0.0,   0.0,   0.0,   0.0,   0.03,  0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,
+      0.0,   0.0,   0.0,   0.0,   0.0,   0.04,  0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,
+      0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.025, 0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,
+      0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.025, 0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,
+      0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.04,  0.0,   0.0,   0.0,   0.0,   0.0,   0.0,
+      0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.01,  0.0,   0.0,   0.0,   0.0,   0.0,
+      0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.01,  0.0,   0.0,   0.0,   0.0,
+      0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.02,  0.0,   0.0,   0.0,
+      0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.01,  0.0,   0.0,
+      0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.01,  0.0,
+      0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.0,   0.015,
+    ]

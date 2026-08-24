@@ -13,7 +13,6 @@
 #include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/msg/camera_info.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
-#include <sensor_msgs/msg/laser_scan.hpp>
 #include <std_msgs/msg/string.hpp>
 
 // Pan 명령 (/camera/pan, 절대각 rad)
@@ -22,8 +21,21 @@
 // 팀 공용 함수형 경로 (docs/경로_형식.md 9장)
 #include <kau_msgs/msg/kau_path.hpp>
 
+// kau_global_path 가 latched 로 내는 전역 경로. 곡률 룩어헤드에 쓴다.
+// KauPath 그대로이므로 별도 타입은 없다.
+
+// kau_object_detection 이 map 프레임으로 내는 장애물 원(circle) 목록.
+// pan 트리거의 "몇 m 앞에 장애물" 판정에 쓴다.
+#include <kau_msgs/msg/obstacle_circle_array.hpp>
+
 // RViz 는 custom message 를 못 그린다. 시각화 전용 이산화 발행 (9.9)
 #include <nav_msgs/msg/path.hpp>
+
+// map <- base_link. 경로를 map 프레임으로 내보내고, /path/global 및
+// /perception/obstacles(둘 다 map 프레임)와 비교하려면 자차의 map 위치가
+// 필요하다 (측위 의존 — CLAUDE.md §1 개정 근거 참고).
+#include <tf2_ros/buffer.hpp>
+#include <tf2_ros/transform_listener.hpp>
 
 #include <opencv2/opencv.hpp>
 
@@ -402,16 +414,26 @@ private:
     // 한쪽 흰선이 연속으로 안 잡히면 그 방향으로 카메라를 돌려
     // 찾고, 찾으면(또는 상한까지 못 찾으면) 0 으로 복귀한다.
     //
-    // ★ pan != 0 인 프레임의 BEV 좌표는 신뢰하지 않는다.
+    // ★ pan != 0 인 프레임도 이제 경로를 짓는다 (회전 보정).
     //
     //   updateBevGeometry() 의 src 사다리꼴은 "카메라가 정면을
-    //   본다" 를 가정한 고정값이다. 카메라가 돌아가면 그 가정이
-    //   깨져 BEV 좌표와 base_link 의 대응이 어긋난다. tf2 로
-    //   base_link <-> camera_optical_frame 을 매 프레임 조회해
-    //   행렬을 다시 세우는 동적 BEV 는 아직 없다.
+    //   본다" 를 가정한 고정값이라 픽셀 <-> BEV 대응 자체(호모
+    //   그래피)는 카메라가 돌아가도 안 바뀐다. bevScale() 의
+    //   row->전방거리 / column->횡거리 유도도 intrinsic 과 소실점
+    //   행(vanishing_y)만 쓰므로 순수 요(yaw) 회전에는 불변이다
+    //   (yaw 는 지평선 행을 옮기지 않는다).
     //
-    //   그래서 Idle 이 아닌 동안에는 imageCallback 이 경로를
-    //   새로 짓지 않는다 (/lane/center 가 그동안 끊긴다).
+    //   즉 buildCenterlinePath() 가 내는 좌표는 처음부터 "지금
+    //   카메라가 보는 방향" 기준의 X전방/Y좌 였을 뿐이다. 거기에
+    //   실측 pan 각(actual_pan_deg_)만큼 카메라 피벗을 중심으로
+    //   회전만 더하면 base_link 기준이 된다 (8-b 절). 매 프레임
+    //   경로가 pan 각을 따라 이렇게 계속 갱신되므로 tf2 로 행렬을
+    //   다시 세우는 "진짜" 동적 BEV(픽셀 재추출)는 필요 없었다.
+    //
+    //   전에는 이 사실을 놓쳐 Idle 이 아닌 동안 통째로 건너뛰었고,
+    //   그 결과 탐색+Holding+복귀 한 사이클(짧으면 수 초, 길면
+    //   pan_hold_timeout_s 상한 없이 무한) 동안 /lane/center 가
+    //   끊겨 하류에서 "경로가 생겼다 말았다" 로 보였다.
     // ================================================================
 
     enum class PanSearchState
@@ -484,44 +506,74 @@ private:
         const sensor_msgs::msg::JointState::SharedPtr msg);
 
 
-    // 최신 LaserScan 보관 (장애물 가림 판정용).
-    void scanCallback(
-        const sensor_msgs::msg::LaserScan::SharedPtr msg);
+    // ================================================================
+    // 측위 (map 프레임)
+    //
+    // CLAUDE.md §1 "측위 비의존" 원칙은 폐기했다. 경로를 map 프레임으로
+    // 내보내고, /path/global 의 곡률 룩어헤드와 /perception/obstacles
+    // (둘 다 map 프레임)로 pan 트리거를 판정하려면 자차의 map 위치가
+    // 있어야 한다. 하나의 TF 조회로 세 용도를 전부 충당한다.
+    // ================================================================
+
+    struct VehiclePose
+    {
+        bool valid = false;
+
+        double x_m = 0.0;
+
+        double y_m = 0.0;
+
+        double yaw_rad = 0.0;
+    };
 
 
-    // 소실된 쪽에 차선을 가릴 만한 장애물이 있는가.
+    // map <- base_link 를 frame_stamp(지금 처리 중인 영상의 시각)에서
+    // 조회한다. 실패(TF 트리 미구성, 그 시각이 버퍼 밖 등)하면
+    // valid=false — 호출측은 판단 근거가 없을 때 탐색을 막지 않는다
+    // (fail-open, 이전 obstacleOnSide 와 같은 방침).
+    VehiclePose lookupVehiclePose(const rclcpp::Time & frame_stamp) const;
+
+
+    // /path/global 수신. latched 라 노드가 늦게 떠도 마지막 값을 받는다.
+    void globalPathCallback(
+        const kau_msgs::msg::KauPath::SharedPtr msg);
+
+
+    // /perception/obstacles 수신. 판정에만 쓰므로 최신 한 장만 든다.
+    void obstaclesCallback(
+        const kau_msgs::msg::ObstacleCircleArray::SharedPtr msg);
+
+
+    // 자차 위치에서 curvature_lookahead_m_ 이내 /path/global 최대
+    // 곡률 [1/cm]. 판정 불가(측위/전역경로 없음)면 -1.
     //
-    // dir 은 pan_search_dir_ 와 같은 규약 (+1 왼쪽 / -1 오른쪽).
+    // /path/global 은 손으로 그려 한 번 latched 발행되는 정적 경로라
+    // (kau_global_path README 1장), 자차가 지금 그 위 어디에 있는지를
+    // 매 프레임 다시 찾아야 한다 — 전 구간에 대해 최근접점을 구하고
+    // (kau::bezier::nearestOnSeg 재사용), 거기서부터 호길이로
+    // lookahead_m 만큼 전진하며 지나는 구간들의 seg_kappa_max 중
+    // 최댓값을 취한다. seg_kappa_max 는 강체변환 불변이므로(KauPath.msg)
+    // map 프레임 그대로 써도 된다.
+    double curvatureAheadKappa(const VehiclePose & pose) const;
+
+
+    // 소실된 쪽 dir 방향, 전방 obstacle_ahead_max_m_ 이내에 장애물이
+    // 있는가. dir 은 pan_search_dir_ 와 같은 규약 (+1 왼쪽 / -1 오른쪽).
     //
-    // 차선이 화면에서 사라지는 이유는 두 가지다. 코너를 돌면서
-    // 시야 밖으로 나갔거나, 앞의 장애물에 가렸거나. 앞의 경우는
-    // 고개를 돌리면 다시 보이지만, 뒤의 경우는 아무리 돌려도
-    // 안 보인다 — 가린 물체가 같이 따라오기 때문이다. 그래도
-    // 탐색을 걸면 상한까지 헛돌고 그동안 경로만 끊긴다.
+    // 차선이 화면에서 사라지는 이유는 두 가지다. 코너를 돌면서 시야
+    // 밖으로 나갔거나, 앞의 장애물에 가렸거나. 앞의 경우는 고개를
+    // 돌리면 다시 보이지만, 뒤의 경우는 아무리 돌려도 안 보인다 —
+    // 가린 물체가 같이 따라오기 때문이다. 그래도 탐색을 걸면 상한까지
+    // 헛돌고 그동안 경로만 끊긴다.
     //
-    // 라이다는 그 둘을 구분할 수 있다. 소실된 쪽 전방 부채꼴에
-    // 가까운 반사가 있으면 가림으로 보고 탐색을 걸지 않는다.
-    //
-    // /scan_filtered 를 직접 본다. kau_object_detection 의
-    // /perception/obstacles 는 map 프레임이라 map->base_link TF
-    // 가 필요한데, 이 노드는 측위 비의존이 대전제라 쓸 수 없다.
-    // (게다가 그 노드는 Gazebo 참값 pose 에 의존해 실기에서는
-    //  빈 배열을 낸다.) LaserScan 은 lidar_link 프레임이고
-    // lidar_link -> base_link 는 URDF 고정 변환(rpy 0 0 0)이라
-    // 방위각이 그대로 통한다. 종방향 2.7 cm 차이는 부채꼴
-    // 판정에서 무시한다.
-    //
-    // 나이는 node clock 이 아니라 frame_stamp (지금 처리 중인
-    // 영상의 시각) 기준으로 잰다. 영상과 scan 은 같은 출처에서
-    // 스탬프를 받으므로(시뮬은 Gazebo, 실기는 시스템 클록) 이
-    // 비교는 use_sim_time 설정과 무관하게 성립한다. node clock
-    // 으로 재면 use_sim_time=false 인데 센서가 sim time 을 달고
-    // 오는 순간 나이가 1e9 초로 나와 판정이 영영 죽는다.
-    //
-    // scan 이 없거나 오래됐으면 false 를 돌려준다 — 판단 근거가
-    // 없을 때 탐색을 막지는 않는다 (fail-open).
-    bool obstacleOnSide(
+    // /perception/obstacles(map 프레임, kau_object_detection)의 원을
+    // 자차 기준(전방 +x, 좌측 +y)으로 옮겨 판정한다. 그 노드는 이제
+    // Gazebo 참값이 아니라 tf2(map<-lidar_link)로 원을 앉히므로 실기
+    // 에서도 쓸 수 있다 (laser_scan_clusterer_node.cpp 참고). STATUS_OK
+    // 가 아니거나 오래됐으면 false — fail-open.
+    bool obstacleAheadOnSide(
         int dir,
+        const VehiclePose & pose,
         const rclcpp::Time & frame_stamp) const;
 
 
@@ -597,7 +649,10 @@ private:
 
     // 발행 게이트 (docs/경로_형식.md 와 무관한 안전장치).
     // 통과면 0, 아니면 기각 코드.
-    int pathGate(const LanePath & path, double sx) const;
+    int pathGate(
+        const LanePath & path,
+        double sx,
+        double camera_yaw_deg) const;
 
     static const char * gateName(int code);
 
@@ -625,18 +680,30 @@ private:
 
 
     // 차선 중심선 -> quintic Bezier 제어점 (공통 경로 형식).
+    //
+    // camera_yaw_deg 는 지금 카메라가 차체 정면에서 얼마나 돌아가
+    // 있는가 (+deg 왼쪽, pan_search_dir_/actual_pan_deg_ 와 같은
+    // 규약). 0 이 아니면 8-b 절에서 그만큼 회전 보정한 뒤 낸다 —
+    // pan 중에도 경로를 계속 짓기 위함 (§8 절 헤더 주석 참고).
     LanePath buildCenterlinePath(
         const LaneDetectionResult & left,
         const LaneDetectionResult & yellow,
         const LaneDetectionResult & right,
         int bev_width,
         int bev_height,
+        double camera_yaw_deg,
         std::vector<cv::Point2d> & center_pts_px);
 
 
     // 발행한 Bezier 를 BEV 위에 되돌려 그린다 (시각화 전용).
+    //
+    // path.ctrl 은 base_link 기준(buildCenterlinePath 의 camera_yaw_deg
+    // 회전 보정 후)이지만 이 BEV 이미지는 "지금 카메라가 보는 방향"
+    // 기준이므로, camera_yaw_deg 로 역회전해 그린다 — 안 그러면 pan
+    // 중에 곡선이 실제 차선과 어긋나 보인다.
     void drawPathOverlay(
         const LanePath & path,
+        double camera_yaw_deg,
         cv::Mat & image);
 
 
@@ -660,9 +727,13 @@ private:
     rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr
         joint_state_subscriber_;
 
-    // 장애물 가림 판정용. lidar_link 프레임, 실기/시뮬 공통.
-    rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr
-        scan_subscriber_;
+    // 전역 경로. latched, map 프레임. 곡률 룩어헤드에 쓴다.
+    rclcpp::Subscription<kau_msgs::msg::KauPath>::SharedPtr
+        global_path_subscriber_;
+
+    // 장애물 가림 판정용. map 프레임, 실기/시뮬 공통.
+    rclcpp::Subscription<kau_msgs::msg::ObstacleCircleArray>::SharedPtr
+        obstacles_subscriber_;
 
 
     // ================================================================
@@ -865,41 +936,70 @@ private:
 
 
     // ================================================================
-    // 장애물 가림 판정 (LaserScan)
+    // Pan 트리거 판정 — 곡률(경로+시야) + 장애물 (map 프레임)
+    //
+    // 예전에는 /scan_filtered 를 직접 스캔해 "그 방향 부채꼴 안에
+    // 반사가 있는가" 로 가림을 판정했다. 이제는 자차의 map 위치를
+    // 알므로 더 직접적인 두 근거로 바꾼다.
+    //
+    //   곡률   둘 중 하나라도 급커브를 가리키면 참 (OR).
+    //            경로 기반 /path/global 위 전방 curvature_lookahead_m_
+    //                      안의 최대 곡률. 측위 + 전역경로 수신 필요.
+    //            시야 기반 가려지지 않은 쪽(노란 중앙선 — 이 Idle
+    //                      분기는 yellow 가 보인다는 걸 이미 전제
+    //                      한다)의 꺾임(trackBendDeg). 측위 없이도
+    //                      항상 계산된다.
+    //          가려진 쪽(놓친 흰선)으로는 절대 판정하지 않는다 —
+    //          안 보이는 선의 곡률은 잴 수 없다.
+    //   장애물 /perception/obstacles(map 프레임) 중 소실된 쪽
+    //          전방 obstacle_ahead_max_m_ 안에 원이 있는가.
+    //
+    // 두 판정이 엇갈리면(급커브 구간인데 그 안에 장애물 원도 있음)
+    // 곡률을 우선한다 — 트랙 경계벽이 장애물로 오검출됐을 여지가
+    // 더 크기 때문이다 (updatePanSearch 구현부 참고).
     // ================================================================
 
     bool obstacle_pan_block_enable_;
 
-    // 소실된 쪽 부채꼴 [deg]. 차량 정면이 0, 왼쪽이 +.
-    //
-    // 흰선은 중앙선에서 31.25 cm 옆이고 카메라는 1 m 안팎을
-    // 본다. 그 선을 가리는 물체의 방위각이 대략 이 범위에 든다.
-    double obstacle_sector_min_deg_;
+    // 자차 위치에서 /path/global 위 전방으로 이만큼 [m] 살펴
+    // 최대 곡률을 잰다.
+    double curvature_lookahead_m_;
 
-    double obstacle_sector_max_deg_;
+    // 위에서 잰 최대 곡률 [1/cm] 이 이 이상이면 "그 방향은 원래
+    // 급커브" 로 보고 장애물 판정 없이 pan 탐색을 진행한다.
+    // 근거: 실측 전 초안값. 튜닝 필요.
+    double curve_ahead_kappa_thresh_;
 
-    // 이 거리 안의 반사만 가림으로 본다 [m]. 각도 무관 상한.
-    double obstacle_max_range_m_;
+    // 가려지지 않은 쪽(노란 중앙선)의 꺾임 [deg] 이 이 이상이면
+    // 역시 "그 방향은 원래 급커브" 로 본다. 측위/전역경로가 아직
+    // 없을 때(기동 초반 등)도 동작하는 근거다. 근거: 실측 전
+    // 초안값. 튜닝 필요.
+    double curve_ahead_bend_deg_thresh_;
 
-    // 놓친 흰선의 횡방향 거리 [m]. 각도 의존 상한의 분자다.
-    //
-    // 가림이 성립하려면 반사가 카메라와 그 선 "사이" 에 있어야
-    // 한다. 방위각 theta 에서 선까지의 거리가
-    // lane_lateral / sin(theta) 이므로 그보다 먼 반사는 선을
-    // 가릴 수 없다. 트랙 경계벽은 항상 선 바깥이라 이 조건을
-    // 구조적으로 통과하지 못한다 (근거: CLAUDE.md).
-    //
-    // 0 이하면 각도 의존 상한을 끄고 obstacle_max_range_m 만 쓴다.
+    // 소실된 쪽 전방 이 거리 [m] 안에 장애물 원이 있으면 가림으로
+    // 본다 (곡률이 급커브를 가리키지 않을 때만 적용).
+    double obstacle_ahead_max_m_;
+
+    // 장애물 원이 차량 종축에서 이 횡거리 [m] 이내여야 우리 차로
+    // 안으로 본다. 이보다 멀면 트랙 경계벽 등으로 보고 무시한다.
     double obstacle_lane_lateral_m_;
 
-    // 단일 빔 노이즈를 배제하기 위한 최소 점 수.
-    int obstacle_min_points_;
-
-    // scan 이 이보다 오래되면 판단하지 않는다 [s].
+    // /perception/obstacles 가 이보다 오래되면 판단하지 않는다 [s].
     double obstacle_scan_timeout_s_;
 
 
-    sensor_msgs::msg::LaserScan::SharedPtr last_scan_;
+    kau_msgs::msg::KauPath::SharedPtr global_path_;
+
+    kau_msgs::msg::ObstacleCircleArray::SharedPtr latest_obstacles_;
+
+
+    // ================================================================
+    // 측위 (map 프레임)
+    // ================================================================
+
+    std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
+
+    std::unique_ptr<tf2_ros::TransformListener> tf_listener_;
 
 
     // ================================================================
@@ -960,10 +1060,24 @@ private:
     // 직선이 끝내 안 나올 때의 탈출구 [s].
     //
     // 0 이하면 무한 대기 — 직선을 만날 때까지 복귀하지 않는다
-    // (기본값). Holding 동안에는 경로를 짓지 않으므로 그동안
-    // /lane/center 가 계속 끊겨 있다는 뜻이다. 그게 곤란해지면
-    // 양수로 바꿔 상한을 준다.
+    // (기본값). pan 중에도 경로는 계속 짓지만(§8, buildCenterlinePath
+    // camera_yaw_deg 보정), Holding 이 오래갈수록 카메라가 정면이
+    // 아닌 채로 보는 시야만 근거로 삼는 시간이 길어진다. 그게
+    // 곤란해지면 양수로 바꿔 상한을 준다.
     double pan_hold_timeout_s_;
+
+    // pan 회전축(camera_pan_joint)이 base_link 원점에서 떨어진
+    // 거리 [cm]. X 전방 / Y 좌.
+    //
+    // buildCenterlinePath 가 camera_yaw_deg 로 회전 보정할 때 이
+    // 피벗을 원점으로 쓴다. 0,0 이면 회전축이 base_link 원점과
+    // 같다고 가정하는 것과 같다 — URDF/SDF 실측으로는 약 (5, 0)
+    // cm 이지만, pan=0 에서는 이 값이 얼마든 결과에 영향이 없으므로
+    // (회전량 0) 정확한 값을 몰라도 기존 동작은 그대로다. 카메라
+    // 마운트 재실측(camera_height_cm 갱신) 시 같이 넣을 것.
+    double pan_pivot_offset_x_cm_;
+
+    double pan_pivot_offset_y_cm_;
 
     // 재검출 인정에 필요한 최소 창 수 (Searching -> Holding).
     //

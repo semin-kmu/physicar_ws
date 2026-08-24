@@ -11,6 +11,9 @@
 
 #include <cv_bridge/cv_bridge.hpp>
 
+#include <geometry_msgs/msg/transform_stamped.hpp>
+#include <tf2/exceptions.hpp>
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -53,14 +56,27 @@ KauLaneDetectionNode::KauLaneDetectionNode()
             )
         );
 
-    // 장애물 가림 판정용 LaserScan. lidar_link 프레임.
-    // SensorDataQoS 로 받아야 발행측(BEST_EFFORT)과 맞는다.
-    scan_subscriber_ =
-        this->create_subscription<sensor_msgs::msg::LaserScan>(
-            "/scan_filtered",
-            rclcpp::SensorDataQoS(),
+    // 전역 경로. kau_global_path 가 latched(RELIABLE + TRANSIENT_LOCAL)
+    // 로 한 번 낸다. 이 노드가 늦게 떠도 같은 QoS 라야 마지막 값을 받는다.
+    global_path_subscriber_ =
+        this->create_subscription<kau_msgs::msg::KauPath>(
+            "/path/global",
+            rclcpp::QoS(1).reliable().transient_local(),
             std::bind(
-                &KauLaneDetectionNode::scanCallback,
+                &KauLaneDetectionNode::globalPathCallback,
+                this,
+                std::placeholders::_1
+            )
+        );
+
+    // 장애물 가림 판정용. kau_object_detection 발행측과 QoS 를 맞춘다
+    // (BEST_EFFORT, depth 1, volatile).
+    obstacles_subscriber_ =
+        this->create_subscription<kau_msgs::msg::ObstacleCircleArray>(
+            "/perception/obstacles",
+            rclcpp::QoS(1).best_effort(),
+            std::bind(
+                &KauLaneDetectionNode::obstaclesCallback,
                 this,
                 std::placeholders::_1
             )
@@ -77,6 +93,14 @@ KauLaneDetectionNode::KauLaneDetectionNode()
                 std::placeholders::_1
             )
         );
+
+
+    // map <- base_link. 경로를 map 프레임으로 내보내고 pan 트리거의
+    // 곡률/장애물 판정에 쓴다 (측위 의존, CLAUDE.md §1 개정 근거 참고).
+    tf_buffer_ = std::make_unique<tf2_ros::Buffer>(this->get_clock());
+
+    tf_listener_ =
+        std::make_unique<tf2_ros::TransformListener>(*tf_buffer_);
 
 
     // ============================================================
@@ -569,12 +593,20 @@ KauLaneDetectionNode::KauLaneDetectionNode()
     // 발행 frame
     //
     // X 전방 / Y 좌 / 단위 cm.
-    // ------------------------------------------------------------
-
+    //
+    // "map" 이면 publishLanePath() 가 발행 직전에 map <- base_link
+    // TF 로 제어점을 map 프레임으로 옮겨 싣는다 (측위 의존, CLAUDE.md
+    // §1 개정 근거). 내부 계산(EMA/게이트/디버그 오버레이)은 전부
+    // 그대로 base_link 기준이다 — cte/게이트의 횡한계가 "자차가
+    // 원점" 을 전제하기 때문이다. TF 조회가 실패하면 그 프레임은
+    // 발행을 건너뛴다 (하류가 직전 값을 들고 감).
+    //
+    // "base_link" 를 주면 예전처럼 변환 없이 그대로 나간다 — 측위
+    // 없이 검증할 때 쓴다.
     path_frame_id_ =
         this->declare_parameter<std::string>(
             "path_frame_id",
-            "base_link"
+            "map"
         );
 
 
@@ -813,7 +845,7 @@ KauLaneDetectionNode::KauLaneDetectionNode()
 
 
     // ============================================================
-    // 장애물 가림 판정 (obstacleOnSide 주석 참고)
+    // Pan 트리거 판정 — 곡률 룩어헤드 + 장애물 (선언부 헤더 주석 참고)
     // ============================================================
 
     obstacle_pan_block_enable_ =
@@ -822,38 +854,52 @@ KauLaneDetectionNode::KauLaneDetectionNode()
             true
         );
 
-    obstacle_sector_min_deg_ =
+    // 자차 위치에서 /path/global 전방 이만큼 [m] 을 살펴 최대 곡률을
+    // 잰다. 최소회전반경(~50cm)과 예전 pan 트리거가 반응하던 거리
+    // (BEV 룩어헤드 ~85cm) 사이 여유값. 실측 후 조정.
+    curvature_lookahead_m_ =
         this->declare_parameter<double>(
-            "obstacle_sector_min_deg",
-            5.0
-        );
-
-    obstacle_sector_max_deg_ =
-        this->declare_parameter<double>(
-            "obstacle_sector_max_deg",
-            60.0
-        );
-
-    obstacle_max_range_m_ =
-        this->declare_parameter<double>(
-            "obstacle_max_range_m",
+            "curvature_lookahead_m",
             1.5
         );
 
+    // 위 구간의 최대 곡률 [1/cm] 이 이 이상이면 "원래 급커브" 로 보고
+    // 장애물 판정 없이 pan 탐색을 진행한다 (곡률 우선). 근거: 실측
+    // 전 초안값 (R ~ 100cm). 튜닝 필요.
+    curve_ahead_kappa_thresh_ =
+        this->declare_parameter<double>(
+            "curve_ahead_kappa_thresh",
+            0.01
+        );
+
+    // 가려지지 않은 쪽(노란 중앙선)의 꺾임 [deg] 이 이 이상이면
+    // 역시 급커브로 본다. 측위/전역경로 없이도 동작하는 근거다
+    // (선언부 헤더 주석 참고). 근거: 실측 전 초안값. 튜닝 필요.
+    curve_ahead_bend_deg_thresh_ =
+        this->declare_parameter<double>(
+            "curve_ahead_bend_deg_thresh",
+            15.0
+        );
+
+    // 소실된 쪽 전방 이 거리 [m] 안에 장애물 원이 있으면 가림으로
+    // 본다 (곡률이 급커브를 가리키지 않을 때만). 근거: 실측 전
+    // 초안값. 튜닝 필요.
+    obstacle_ahead_max_m_ =
+        this->declare_parameter<double>(
+            "obstacle_ahead_max_m",
+            1.0
+        );
+
+    // 장애물 원이 차량 종축에서 이 횡거리 [m] 이내여야 우리 차로
+    // 안으로 본다. 트랙 경계벽은 차로 폭 밖이라 이 조건을 구조적
+    // 으로 통과하지 못한다 (근거: CLAUDE.md).
     obstacle_lane_lateral_m_ =
         this->declare_parameter<double>(
             "obstacle_lane_lateral_m",
             0.5
         );
 
-    obstacle_min_points_ =
-        static_cast<int>(
-            this->declare_parameter<int>(
-                "obstacle_min_points",
-                2
-            )
-        );
-
+    // /perception/obstacles 가 이보다 오래되면 판단하지 않는다 [s].
     obstacle_scan_timeout_s_ =
         this->declare_parameter<double>(
             "obstacle_scan_timeout_s",
@@ -1032,6 +1078,21 @@ KauLaneDetectionNode::KauLaneDetectionNode()
     pan_hold_timeout_s_ =
         this->declare_parameter<double>(
             "pan_hold_timeout_s",
+            0.0
+        );
+
+    // pan 회전축이 base_link 원점에서 떨어진 거리 [cm] (선언부
+    // 헤더 주석 참고). pan=0 에서는 값이 얼마든 결과에 영향이
+    // 없으므로 실측 전까지 0,0 으로 둔다.
+    pan_pivot_offset_x_cm_ =
+        this->declare_parameter<double>(
+            "pan_pivot_offset_x_cm",
+            0.0
+        );
+
+    pan_pivot_offset_y_cm_ =
+        this->declare_parameter<double>(
+            "pan_pivot_offset_y_cm",
             0.0
         );
 
@@ -3099,6 +3160,45 @@ void KauLaneDetectionNode::publishLanePath(
     }
 
 
+    // ------------------------------------------------------------
+    // map 프레임 변환
+    //
+    // path.ctrl 은 내부적으로 항상 base_link 기준이다 (EMA/게이트/
+    // debug 오버레이가 "자차가 원점" 을 전제하므로 여기서는 절대
+    // 바꾸지 않는다 — 선언부 헤더 주석 참고). map 으로 낼 때는
+    // 발행 직전에 사본만 옮긴다.
+    //
+    // TF 조회가 실패하면 이번 프레임은 건너뛴다. 낡은 map 위치로
+    // 잘못된 절대좌표를 내느니, 하류가 직전 값을 들고 가는 쪽이
+    // 안전하다 (다른 게이트 기각과 같은 방침).
+    // ------------------------------------------------------------
+
+    const bool to_map = (path_frame_id_ == "map");
+
+    VehiclePose vehicle_pose;
+
+    if (to_map)
+    {
+        vehicle_pose = lookupVehiclePose(stamp);
+
+        if (!vehicle_pose.valid)
+        {
+            RCLCPP_WARN_THROTTLE(
+                this->get_logger(),
+                *this->get_clock(),
+                2000,
+                "map 변환 실패로 이번 프레임은 발행하지 않습니다."
+            );
+
+            return;
+        }
+    }
+
+    const double cos_yaw = std::cos(vehicle_pose.yaw_rad);
+
+    const double sin_yaw = std::sin(vehicle_pose.yaw_rad);
+
+
     kau_msgs::msg::KauPath msg;
 
     msg.header.stamp = stamp;
@@ -3112,7 +3212,8 @@ void KauLaneDetectionNode::publishLanePath(
 
     msg.is_closed = false;
 
-    // 전역 호길이 기준점 없음 (localization 비의존)
+    // 전역 호길이 기준점 없음 (map 으로 내도 이 경로 자체의 s 는
+    // 0 부터다 — /path/global 의 전역 s 와는 별개)
     msg.s_offset = 0.0;
 
 
@@ -3127,9 +3228,33 @@ void KauLaneDetectionNode::publishLanePath(
 
     for (const kau::bezier::Point2 & cp : path.ctrl)
     {
-        msg.ctrl_x.push_back(cp.x);
+        if (to_map)
+        {
+            // base_link [cm, X 전방 / Y 좌] -> map [m] 회전+평행이동
+            // -> [cm]. 강체변환이므로 seg_length/kappa_max 는
+            // (KauPath.msg 주석대로) 다시 잴 필요가 없다.
+            const double x_m = cp.x * 0.01;
 
-        msg.ctrl_y.push_back(cp.y);
+            const double y_m = cp.y * 0.01;
+
+            const double map_x_m =
+                vehicle_pose.x_m +
+                x_m * cos_yaw - y_m * sin_yaw;
+
+            const double map_y_m =
+                vehicle_pose.y_m +
+                x_m * sin_yaw + y_m * cos_yaw;
+
+            msg.ctrl_x.push_back(map_x_m * 100.0);
+
+            msg.ctrl_y.push_back(map_y_m * 100.0);
+        }
+        else
+        {
+            msg.ctrl_x.push_back(cp.x);
+
+            msg.ctrl_y.push_back(cp.y);
+        }
     }
 
 
@@ -3187,6 +3312,8 @@ void KauLaneDetectionNode::publishLanePath(
         const kau::bezier::Point2 p =
             kau::bezier::evalSeg(path.ctrl, u);
 
+        // path.ctrl(base_link) 기준 헤딩. map 표시용 헤딩은 아래에서
+        // 차체 yaw 를 더해 만든다.
         const double th =
             kau::bezier::heading(path.ctrl, u);
 
@@ -3195,15 +3322,37 @@ void KauLaneDetectionNode::publishLanePath(
 
         ps.header = msg.header;
 
-        ps.pose.position.x = 0.01 * p.x;
+        double px_m = 0.01 * p.x;
 
-        ps.pose.position.y = 0.01 * p.y;
+        double py_m = 0.01 * p.y;
+
+        double th_map = th;
+
+        if (to_map)
+        {
+            // ctrl_x/ctrl_y 를 채울 때와 같은 변환. msg.header.frame_id
+            // 가 "map" 인데 base_link 좌표를 그대로 실으면 RViz 에서
+            // 위치가 어긋난다.
+            const double x_m = px_m;
+
+            const double y_m = py_m;
+
+            px_m = vehicle_pose.x_m + x_m * cos_yaw - y_m * sin_yaw;
+
+            py_m = vehicle_pose.y_m + x_m * sin_yaw + y_m * cos_yaw;
+
+            th_map = th + vehicle_pose.yaw_rad;
+        }
+
+        ps.pose.position.x = px_m;
+
+        ps.pose.position.y = py_m;
 
         ps.pose.position.z = 0.0;
 
-        ps.pose.orientation.z = std::sin(0.5 * th);
+        ps.pose.orientation.z = std::sin(0.5 * th_map);
 
-        ps.pose.orientation.w = std::cos(0.5 * th);
+        ps.pose.orientation.w = std::cos(0.5 * th_map);
 
 
         viz.poses.push_back(ps);
@@ -3852,49 +4001,285 @@ int KauLaneDetectionNode::countVisibleAtZeroPan(
 
 
 // ================================================================
-// LaserScan 수신
+// /path/global, /perception/obstacles 수신
 //
-// 판정에만 쓰므로 최신 한 장만 들고 있으면 된다. 단일 스레드
-// executor 라 콜백이 직렬화되므로 잠금은 없다.
+// 둘 다 판정에만 쓰므로 최신(또는 latched) 한 장만 들고 있으면
+// 된다. 단일 스레드 executor 라 콜백이 직렬화되므로 잠금은 없다.
 // ================================================================
 
-void KauLaneDetectionNode::scanCallback(
-    const sensor_msgs::msg::LaserScan::SharedPtr msg)
+void KauLaneDetectionNode::globalPathCallback(
+    const kau_msgs::msg::KauPath::SharedPtr msg)
 {
-    last_scan_ = msg;
+    global_path_ = msg;
+}
+
+
+void KauLaneDetectionNode::obstaclesCallback(
+    const kau_msgs::msg::ObstacleCircleArray::SharedPtr msg)
+{
+    latest_obstacles_ = msg;
 }
 
 
 
 
 // ================================================================
-// 소실된 쪽에 차선을 가릴 만한 장애물이 있는가
+// map <- base_link 조회
+//
+// 설계 근거는 선언부(헤더) 주석 참고. 실패는 흔한 일이다 —
+// 측위가 아직 안 떴거나, pure localization 초기화 전이거나,
+// TF 버퍼가 그 시각을 못 채운 순간일 수 있다. 그때마다 로그를
+// 쏟으면 소음이 되므로 THROTTLE 한다.
+// ================================================================
+
+KauLaneDetectionNode::VehiclePose KauLaneDetectionNode::lookupVehiclePose(
+    const rclcpp::Time & frame_stamp) const
+{
+    VehiclePose pose;
+
+    if (!tf_buffer_)
+    {
+        return pose;
+    }
+
+    geometry_msgs::msg::TransformStamped transform;
+
+    try
+    {
+        transform =
+            tf_buffer_->lookupTransform(
+                "map",
+                "base_link",
+                frame_stamp
+            );
+    }
+    catch (const tf2::TransformException & e)
+    {
+        RCLCPP_WARN_THROTTLE(
+            this->get_logger(),
+            *this->get_clock(),
+            5000,
+            "map <- base_link TF 조회 실패: %s. "
+            "경로 map 변환 / pan 트리거의 곡률·장애물 판정을 "
+            "건너뛴다.",
+            e.what()
+        );
+
+        return pose;
+    }
+
+    pose.x_m = transform.transform.translation.x;
+    pose.y_m = transform.transform.translation.y;
+
+    // yaw 만 필요하다 (평면 주행이므로 roll/pitch 는 버린다).
+    const auto & q = transform.transform.rotation;
+
+    const double siny_cosp = 2.0 * (q.w * q.z + q.x * q.y);
+    const double cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z);
+
+    pose.yaw_rad = std::atan2(siny_cosp, cosy_cosp);
+    pose.valid = true;
+
+    return pose;
+}
+
+
+
+
+// ================================================================
+// 자차 위치에서 /path/global 위 전방 곡률 룩어헤드
 //
 // 설계 근거는 선언부(헤더) 주석 참고.
 // ================================================================
 
-bool KauLaneDetectionNode::obstacleOnSide(
+double KauLaneDetectionNode::curvatureAheadKappa(
+    const VehiclePose & pose) const
+{
+    if (!pose.valid || !global_path_)
+    {
+        return -1.0;
+    }
+
+    const std::size_t nctrl =
+        static_cast<std::size_t>(global_path_->degree) + 1;
+
+    if (
+        nctrl < 2 ||
+        global_path_->ctrl_x.size() != global_path_->ctrl_y.size() ||
+        global_path_->ctrl_x.empty() ||
+        global_path_->ctrl_x.size() % nctrl != 0
+    )
+    {
+        return -1.0;
+    }
+
+    const std::size_t nseg = global_path_->ctrl_x.size() / nctrl;
+
+    if (
+        nseg == 0 ||
+        global_path_->seg_length.size() != nseg ||
+        global_path_->seg_kappa_max.size() != nseg
+    )
+    {
+        return -1.0;
+    }
+
+
+    // 자차 위치 [cm] (map 프레임, KauPath 단위와 맞춘다)
+    const kau::bezier::Point2 ego{
+        pose.x_m * 100.0,
+        pose.y_m * 100.0
+    };
+
+
+    // 전 구간에서 최근접점을 찾는다. nseg 가 수십 개 수준이라
+    // 선형 탐색으로 충분하다 (매 프레임 14Hz 실시간 예산 안).
+    std::size_t best_seg = 0;
+
+    double best_d2 = std::numeric_limits<double>::max();
+
+    double best_u = 0.0;
+
+
+    for (
+        std::size_t s = 0;
+        s < nseg;
+        ++s
+    )
+    {
+        kau::bezier::Ctrl ctrl(nctrl);
+
+        for (
+            std::size_t j = 0;
+            j < nctrl;
+            ++j
+        )
+        {
+            const std::size_t idx = s * nctrl + j;
+
+            ctrl[j].x = global_path_->ctrl_x[idx];
+            ctrl[j].y = global_path_->ctrl_y[idx];
+        }
+
+        const kau::bezier::Nearest near =
+            kau::bezier::nearestOnSeg(ctrl, ego);
+
+        const kau::bezier::Point2 foot =
+            kau::bezier::evalSeg(ctrl, near.u);
+
+        const double dx = foot.x - ego.x;
+
+        const double dy = foot.y - ego.y;
+
+        const double d2 = dx * dx + dy * dy;
+
+        if (d2 < best_d2)
+        {
+            best_d2 = d2;
+
+            best_seg = s;
+
+            best_u = near.u;
+        }
+    }
+
+
+    // best_seg, best_u 에서 시작해 lookahead 만큼 호길이로 걸으며
+    // 지나는 구간들의 seg_kappa_max 중 최댓값을 취한다.
+    //
+    // u 는 균일 매개변수라 호길이 비례를 정확히 보장하지 않지만,
+    // "구간이 얼마나 남았나" 근사로는 충분하다 — 트리거 판정용이지
+    // 제어에 쓰지 않는다.
+    double remaining =
+        curvature_lookahead_m_ * 100.0 -
+        global_path_->seg_length[best_seg] * (1.0 - best_u);
+
+    double kappa_max =
+        static_cast<double>(global_path_->seg_kappa_max[best_seg]);
+
+    std::size_t s = best_seg;
+
+
+    for (
+        std::size_t step = 0;
+        step < nseg && remaining > 0.0;
+        ++step
+    )
+    {
+        std::size_t next = s + 1;
+
+        if (next >= nseg)
+        {
+            if (!global_path_->is_closed)
+            {
+                break;
+            }
+
+            next = 0;
+        }
+
+        if (next == best_seg)
+        {
+            // 폐곡선을 한 바퀴 다 돌았다 (lookahead 가 전체 길이보다 김)
+            break;
+        }
+
+        s = next;
+
+        kappa_max =
+            std::max(
+                kappa_max,
+                static_cast<double>(global_path_->seg_kappa_max[s])
+            );
+
+        remaining -= global_path_->seg_length[s];
+    }
+
+
+    return kappa_max;
+}
+
+
+
+
+// ================================================================
+// 소실된 쪽 전방에 장애물이 있는가 (map 프레임)
+//
+// 설계 근거는 선언부(헤더) 주석 참고.
+// ================================================================
+
+bool KauLaneDetectionNode::obstacleAheadOnSide(
     int dir,
+    const VehiclePose & pose,
     const rclcpp::Time & frame_stamp) const
 {
     if (
         !obstacle_pan_block_enable_ ||
-        !last_scan_ ||
-        dir == 0
+        dir == 0 ||
+        !pose.valid ||
+        !latest_obstacles_
     )
     {
         return false;
     }
 
 
-    // 오래된 scan 으로는 판단하지 않는다 (fail-open).
-    //
+    if (
+        latest_obstacles_->status !=
+        kau_msgs::msg::ObstacleCircleArray::STATUS_OK
+    )
+    {
+        // non-OK 프레임은 obstacles 가 항상 비어 있다 (msg 규약).
+        // "장애물 없음" 이 아니라 "판단 불가" 이므로 막지 않는다.
+        return false;
+    }
+
+
     // 기준은 node clock 이 아니라 지금 처리 중인 영상의 시각이다
-    // (선언부 주석 참고). 영상과 scan 은 스탬프 출처가 같으므로
-    // use_sim_time 설정과 무관하게 성립한다.
+    // (선언부 주석 참고).
     const double age =
         (frame_stamp -
-         rclcpp::Time(last_scan_->header.stamp)).seconds();
+         rclcpp::Time(latest_obstacles_->header.stamp)).seconds();
 
     if (
         age < 0.0 ||
@@ -3905,7 +4290,7 @@ bool KauLaneDetectionNode::obstacleOnSide(
             this->get_logger(),
             *this->get_clock(),
             5000,
-            "LaserScan 이 %.2fs 됐다 (상한 %.2f). "
+            "/perception/obstacles 가 %.2fs 됐다 (상한 %.2f). "
             "장애물 가림 판정을 건너뛴다.",
             age,
             obstacle_scan_timeout_s_
@@ -3915,93 +4300,59 @@ bool KauLaneDetectionNode::obstacleOnSide(
     }
 
 
-    // 부채꼴 [rad]. 차량 정면 0, 왼쪽(+Z 회전) 이 +.
-    // lidar_link -> base_link 는 rpy 0 0 0 이라 그대로 쓴다.
-    const double lo =
-        std::min(obstacle_sector_min_deg_, obstacle_sector_max_deg_) *
-        M_PI / 180.0;
+    const double cos_yaw = std::cos(pose.yaw_rad);
 
-    const double hi =
-        std::max(obstacle_sector_min_deg_, obstacle_sector_max_deg_) *
-        M_PI / 180.0;
+    const double sin_yaw = std::sin(pose.yaw_rad);
 
 
-    const double range_hi =
-        std::min(
-            static_cast<double>(last_scan_->range_max),
-            obstacle_max_range_m_
-        );
-
-
-    int hits = 0;
-
-    for (
-        std::size_t i = 0;
-        i < last_scan_->ranges.size();
-        ++i
-    )
+    for (const auto & c : latest_obstacles_->obstacles)
     {
-        const double ang =
-            last_scan_->angle_min +
-            static_cast<double>(i) * last_scan_->angle_increment;
+        const double dx = static_cast<double>(c.center_x) - pose.x_m;
 
-        // dir = +1 이면 [lo, hi], -1 이면 [-hi, -lo]
-        const double side_ang = ang * static_cast<double>(dir);
+        const double dy = static_cast<double>(c.center_y) - pose.y_m;
+
+        // map -> 차량 기준 (전방 +x, 좌측 +y).
+        const double fwd = dx * cos_yaw + dy * sin_yaw;
+
+        const double left = -dx * sin_yaw + dy * cos_yaw;
+
+
+        // 반지름만큼 안쪽으로 당겨 "가장자리까지" 로 판정한다.
+        const double edge_fwd =
+            fwd - std::copysign(
+                static_cast<double>(c.radius),
+                fwd
+            );
 
         if (
-            side_ang < lo ||
-            side_ang > hi
+            edge_fwd < 0.0 ||
+            edge_fwd > obstacle_ahead_max_m_
         )
         {
             continue;
         }
 
 
-        const double r = last_scan_->ranges[i];
+        // 반대쪽은 무시. dir > 0 (왼쪽) 이면 left > 0 이어야 한다.
+        const double side = (dir > 0) ? left : -left;
 
+        if (side < 0.0)
+        {
+            continue;
+        }
+
+
+        // 차로 폭 밖(트랙 경계벽 등)은 무시.
         if (
-            !std::isfinite(r) ||
-            r < last_scan_->range_min ||
-            r > range_hi
+            std::abs(left) >
+            obstacle_lane_lateral_m_ + static_cast<double>(c.radius)
         )
         {
             continue;
         }
 
 
-        // 각도 의존 상한. 가림이 성립하려면 반사가 카메라와
-        // 놓친 흰선 "사이" 에 있어야 한다 (근거: CLAUDE.md).
-        //
-        //   r_max(theta) = obstacle_lane_lateral_m / sin(theta)
-        //
-        // 트랙 경계벽은 선 바깥이므로 이 조건을 구조적으로
-        // 통과하지 못한다. 급커브에서 벽이 부채꼴에 들어와도
-        // 가림으로 오인해 pan 을 막는 일이 없다.
-        //
-        // side_ang 은 [lo, hi] 로 걸러진 뒤라 항상 양수다.
-        if (obstacle_lane_lateral_m_ > 0.0)
-        {
-            const double sin_ang = std::sin(side_ang);
-
-            // theta 가 0 에 가까우면 상한이 발산한다. 그 구간은
-            // range_hi 가 이미 잡고 있으므로 넘긴다.
-            if (
-                sin_ang > 1e-3 &&
-                r > obstacle_lane_lateral_m_ / sin_ang
-            )
-            {
-                continue;
-            }
-        }
-
-
-        ++hits;
-
-        // 단일 빔 노이즈가 아니라고 판정되는 순간 끝낸다.
-        if (hits >= obstacle_min_points_)
-        {
-            return true;
-        }
+        return true;
     }
 
 
@@ -4184,6 +4535,37 @@ void KauLaneDetectionNode::updatePanSearch(
             pan_search_dir_ = left_missing ? +1 : -1;
 
 
+            // 곡률 룩어헤드 + 장애물 (선언부 헤더 주석, 클래스
+            // 상단 "Pan 트리거 판정" 주석 참고). 자차 map 위치를
+            // 한 번만 조회해 둘 다에 쓴다.
+            //
+            // 곡률은 두 근거를 OR 로 합친다.
+            //
+            //   경로 기반   /path/global 위 자차 전방 룩어헤드
+            //               최대곡률. 측위(map<-base_link TF)와
+            //               /path/global 수신이 둘 다 있어야 한다.
+            //   시야 기반   가려지지 않은 쪽 — 즉 이 트리거를 아직
+            //               통과 못 시킨 노란 중앙선(yellow, 이
+            //               Idle 분기는 yellow.found_count>0 을
+            //               이미 전제한다)의 꺾임(trackBendDeg).
+            //               측위/전역경로 없이도 항상 계산된다.
+            //
+            // 가려진 쪽(놓친 흰선)의 곡률을 쓰면 안 된다 — 애초에
+            // 안 보이는 선이라 잴 수 없고, 억지로 재도 장애물
+            // 자체의 윤곽을 곡률로 오인하게 된다. 반드시 가려지지
+            // 않은 쪽으로 판정한다.
+            //
+            // 경로 기반이 아직 무근거(-1, 측위 기동 전 등)일 때
+            // 시야 기반 없이 OR 를 빼면, 장애물 판정마저 근거가
+            // 없는 프레임(측위/객체인식 미기동)에서 직선 구간의
+            // 가려진 흰선에도 그냥 탐색이 걸린다 — 시야 기반이
+            // 그 공백을 메운다.
+            //
+            // 곡률 우선: 둘 중 하나라도 급커브로 판정되면 그 방향에
+            // 장애물 원이 걸려도(트랙 경계벽 오검출 가능성) 무시
+            // 하고 탐색을 진행한다. 급커브가 아닐 때만 장애물
+            // 판정으로 넘어간다.
+            //
             // 가려서 안 보이는 것이면 고개를 돌려도 소용없다.
             // 가린 물체가 같이 따라오기 때문이다. 상한까지
             // 헛돌면서 경로만 끊길 뿐이므로 탐색을 걸지 않는다.
@@ -4191,22 +4573,55 @@ void KauLaneDetectionNode::updatePanSearch(
             // 소실 연속 카운트는 리셋하지 않는다. 장애물이
             // 지나가고 나서도 여전히 안 보이면 그때 곧바로
             // 탐색이 걸려야 한다.
-            if (obstacleOnSide(pan_search_dir_, frame_stamp))
             {
-                RCLCPP_INFO_THROTTLE(
-                    this->get_logger(),
-                    *this->get_clock(),
-                    3000,
-                    "%s 흰선이 안 보이지만 그쪽 %.0f~%.0fdeg 안에 "
-                    "장애물이 있다. 가림으로 보고 pan 하지 않는다.",
-                    (pan_search_dir_ > 0) ? "왼쪽" : "오른쪽",
-                    obstacle_sector_min_deg_,
-                    obstacle_sector_max_deg_
-                );
+                const VehiclePose vehicle_pose =
+                    lookupVehiclePose(frame_stamp);
 
-                pan_search_dir_ = 0;
+                const double kappa_ahead =
+                    curvatureAheadKappa(vehicle_pose);
 
-                break;
+                const bool curve_ahead_path =
+                    kappa_ahead >= curve_ahead_kappa_thresh_;
+
+                // yellow 는 이 Idle 분기에 들어온 시점에 이미
+                // found_count > 0 이 보장돼 있다.
+                const double yellow_bend_deg =
+                    trackBendDeg(yellow.track_px);
+
+                const bool curve_ahead_bend =
+                    yellow_bend_deg >= curve_ahead_bend_deg_thresh_;
+
+                const bool curve_ahead =
+                    curve_ahead_path || curve_ahead_bend;
+
+                if (
+                    !curve_ahead &&
+                    obstacleAheadOnSide(
+                        pan_search_dir_,
+                        vehicle_pose,
+                        frame_stamp)
+                )
+                {
+                    RCLCPP_INFO_THROTTLE(
+                        this->get_logger(),
+                        *this->get_clock(),
+                        3000,
+                        "%s 흰선이 안 보이지만 그쪽 전방 %.1fm 안에 "
+                        "장애물이 있다 (경로곡률 %.4f 1/cm < %.4f, "
+                        "중앙선꺾임 %.1fdeg < %.1fdeg). 가림으로 보고 "
+                        "pan 하지 않는다.",
+                        (pan_search_dir_ > 0) ? "왼쪽" : "오른쪽",
+                        obstacle_ahead_max_m_,
+                        (kappa_ahead >= 0.0) ? kappa_ahead : 0.0,
+                        curve_ahead_kappa_thresh_,
+                        yellow_bend_deg,
+                        curve_ahead_bend_deg_thresh_
+                    );
+
+                    pan_search_dir_ = 0;
+
+                    break;
+                }
             }
 
 
@@ -4762,7 +5177,8 @@ void KauLaneDetectionNode::robustifyPath(LanePath & path)
 
 int KauLaneDetectionNode::pathGate(
     const LanePath & path,
-    double sx) const
+    double sx,
+    double camera_yaw_deg) const
 {
     if (!path.built)
     {
@@ -4809,7 +5225,12 @@ int KauLaneDetectionNode::pathGate(
     // ------------------------------------------------------------
     // 3. 시야 이탈
     //
-    // BEV 영상 밖으로 나가는 경로는 관측 근거가 없다.
+    // BEV 영상 밖으로 나가는 경로는 관측 근거가 없다. 이 한계는
+    // "카메라가 지금 보는 방향" 기준의 물리적 화각이므로, 검사
+    // 전에 buildCenterlinePath 6-b 절의 회전 보정을 역으로 되돌려
+    // 카메라 기준 좌표로 판정한다. base_link(회전 후) 좌표를
+    // 그대로 쓰면, pan 으로 실제로는 화각 안인 점이 회전 때문에
+    // 횡거리만 커 보여 오탈락할 수 있다.
     // ------------------------------------------------------------
 
     double limit = max_lateral_cm_;
@@ -4820,9 +5241,24 @@ int KauLaneDetectionNode::pathGate(
     }
 
 
+    const double yaw_rad = -camera_yaw_deg * M_PI / 180.0;
+
+    const double cos_yaw = std::cos(yaw_rad);
+
+    const double sin_yaw = std::sin(yaw_rad);
+
+
     for (const kau::bezier::Point2 & c : path.ctrl)
     {
-        if (std::abs(c.y - path_y_offset_cm_) > limit)
+        const double x_rel = c.x - pan_pivot_offset_x_cm_;
+
+        const double y_rel = c.y - pan_pivot_offset_y_cm_;
+
+        const double y_cam =
+            pan_pivot_offset_y_cm_ +
+            x_rel * sin_yaw + y_rel * cos_yaw;
+
+        if (std::abs(y_cam - path_y_offset_cm_) > limit)
         {
             return 3;
         }
@@ -4875,6 +5311,7 @@ KauLaneDetectionNode::LanePath KauLaneDetectionNode::buildCenterlinePath(
     const LaneDetectionResult & right,
     int bev_width,
     int bev_height,
+    double camera_yaw_deg,
     std::vector<cv::Point2d> & center_pts_px)
 {
     LanePath path;
@@ -5299,6 +5736,48 @@ KauLaneDetectionNode::LanePath KauLaneDetectionNode::buildCenterlinePath(
 
 
     // ------------------------------------------------------------
+    // 6-b. 카메라 요(yaw) 회전 보정 (pan 중에도 경로를 짓는 이유)
+    //
+    // 여기까지의 좌표는 "지금 카메라가 보는 방향" 기준이다
+    // (선언부 헤더 §8 도입부 주석 참고 — bevScale() 의 row->전방
+    // 거리 / column->횡거리 유도가 intrinsic 과 소실점 행만 쓰므로
+    // 순수 요 회전에 불변이다. pan != 0 이어도 이 자체는 그대로
+    // 유효한 카메라 기준 좌표다). camera_yaw_deg 만큼 pan 피벗을
+    // 중심으로 회전하면 base_link 기준이 된다.
+    //
+    // Bezier 는 아핀변환(회전+평행이동)에 닫혀 있으므로 제어점만
+    // 이렇게 옮기면 곡선 전체가 옮겨진다 — 다시 적합할 필요가 없다.
+    //
+    // camera_yaw_deg == 0(Idle) 이면 cos=1, sin=0 이라 항등변환다 —
+    // 예전 동작과 완전히 같다.
+    // ------------------------------------------------------------
+
+    if (std::abs(camera_yaw_deg) > 1e-9)
+    {
+        const double yaw_rad = camera_yaw_deg * M_PI / 180.0;
+
+        const double cos_yaw = std::cos(yaw_rad);
+
+        const double sin_yaw = std::sin(yaw_rad);
+
+        for (kau::bezier::Point2 & cp : path.ctrl)
+        {
+            const double x_rel = cp.x - pan_pivot_offset_x_cm_;
+
+            const double y_rel = cp.y - pan_pivot_offset_y_cm_;
+
+            cp.x =
+                pan_pivot_offset_x_cm_ +
+                x_rel * cos_yaw - y_rel * sin_yaw;
+
+            cp.y =
+                pan_pivot_offset_y_cm_ +
+                x_rel * sin_yaw + y_rel * cos_yaw;
+        }
+    }
+
+
+    // ------------------------------------------------------------
     // 7. 퇴화 검사 (문서 8.7) — 발행 직전 필수
     // ------------------------------------------------------------
 
@@ -5383,7 +5862,7 @@ KauLaneDetectionNode::LanePath KauLaneDetectionNode::buildCenterlinePath(
     // "무엇이 막혔는지" 가 보여야 원인을 좁힐 수 있다.
     // ------------------------------------------------------------
 
-    path.reject = pathGate(path, sx);
+    path.reject = pathGate(path, sx, camera_yaw_deg);
 
     if (path_gate_enable_ && path.reject != 0)
     {
@@ -5418,6 +5897,7 @@ KauLaneDetectionNode::LanePath KauLaneDetectionNode::buildCenterlinePath(
 
 void KauLaneDetectionNode::drawPathOverlay(
     const LanePath & path,
+    double camera_yaw_deg,
     cv::Mat & image)
 {
     double sx = 0.0;
@@ -5446,15 +5926,37 @@ void KauLaneDetectionNode::drawPathOverlay(
     const double cx_bev = 0.5 * image.cols;
 
 
+    // path.ctrl 은 base_link 기준이다 (buildCenterlinePath 6-b 절
+    // 회전 보정 후). 이 BEV 이미지는 "지금 카메라가 보는 방향"
+    // 기준이므로, 그리기 전에 6-b 의 역회전으로 되돌린다.
+    const double yaw_rad = -camera_yaw_deg * M_PI / 180.0;
+
+    const double cos_yaw = std::cos(yaw_rad);
+
+    const double sin_yaw = std::sin(yaw_rad);
+
+
     const auto to_px =
         [&](const kau::bezier::Point2 & p)
         {
+            const double x_rel = p.x - pan_pivot_offset_x_cm_;
+
+            const double y_rel = p.y - pan_pivot_offset_y_cm_;
+
+            const double x_cam =
+                pan_pivot_offset_x_cm_ +
+                x_rel * cos_yaw - y_rel * sin_yaw;
+
+            const double y_cam =
+                pan_pivot_offset_y_cm_ +
+                x_rel * sin_yaw + y_rel * cos_yaw;
+
             return cv::Point(
                 static_cast<int>(std::lround(
-                    cx_bev - (p.y - path_y_offset_cm_) / sx)),
+                    cx_bev - (y_cam - path_y_offset_cm_) / sx)),
                 static_cast<int>(std::lround(
                     h_px -
-                    (p.x - x_base - path_x_offset_cm_) / sy))
+                    (x_cam - x_base - path_x_offset_cm_) / sy))
             );
         };
 
@@ -6581,29 +7083,29 @@ void KauLaneDetectionNode::imageCallback(
         // 이 노드의 최종 산출물. 이산 좌표가 아니라 제어점 6개다.
         // 차로를 묻지 않고 중앙선(황색 점선)만 추종한다.
         //
-        // pan_state_ 가 Idle 이 아니면 카메라 자세가 bevScale() 의
-        // 가정(pan=0)과 어긋나 있으므로 이번 프레임은 새로 짓지
-        // 않는다. lane_path 는 기본값(built=false)으로 남고,
-        // publishLanePath() 가 그 상태에서는 발행을 건너뛰므로
-        // 하류는 직전 /lane/center 값을 그대로 들고 간다.
+        // pan != 0 이어도 짓는다. buildCenterlinePath 가 실측
+        // pan 각만큼 회전 보정한다 (6-b 절, 선언부 헤더 §8 도입부
+        // 주석 참고). /joint_states 를 아직 못 받았으면 실측각
+        // 대신 마지막 명령각을 쓴다 — updatePanSearch 의 settled
+        // 판정과 같은 가정이다 (실기 드라이버는 서보 인코더가
+        // 없어 명령을 그대로 되쏜다).
         // ========================================================
 
         std::vector<cv::Point2d> center_pts_px;
 
-        LanePath lane_path;
+        const double camera_yaw_deg =
+            joint_state_received_ ? actual_pan_deg_ : pan_cmd_deg_;
 
-        if (pan_state_ == PanSearchState::Idle)
-        {
-            lane_path =
-                buildCenterlinePath(
-                    left_lane,
-                    yellow_lane,
-                    right_lane,
-                    bev_frame.cols,
-                    bev_frame.rows,
-                    center_pts_px
-                );
-        }
+        LanePath lane_path =
+            buildCenterlinePath(
+                left_lane,
+                yellow_lane,
+                right_lane,
+                bev_frame.cols,
+                bev_frame.rows,
+                camera_yaw_deg,
+                center_pts_px
+            );
 
 
         // ========================================================
@@ -6638,6 +7140,7 @@ void KauLaneDetectionNode::imageCallback(
         {
             drawPathOverlay(
                 lane_path,
+                camera_yaw_deg,
                 debug_image
             );
         }

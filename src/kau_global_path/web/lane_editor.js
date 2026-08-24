@@ -17,7 +17,7 @@ const NCTRL = DEGREE + 1;
 
 // 사이드바 제목 옆에 찍는다. 브라우저가 옛 js 를 캐시하고 있는지
 // 한눈에 구분하려는 것이다. lane_editor.html 의 ?v= 와 같이 올린다.
-const BUILD = '20260821n';
+const BUILD = '20260824b';
 
 // 차량 제원. 곡률 한계는 여기서 유도한다 — 숫자를 손으로 박아 두면 차가 바뀌었을 때
 // 아무도 못 찾는다.
@@ -82,7 +82,9 @@ const S = {
   layers: {},              // id -> {pts:[[x,y]], closed, visible}
   active: 'center',
   view: { scale: 1, tx: 0, ty: 0 },
-  show: { map: true, grid: true, traj: true, curve: false, ctrl: false },
+  // traj 는 기본 꺼짐이다. 경로를 CAD 에서 뽑게 된 뒤로 (4.1.3) 기록 궤적은
+  // 씨앗으로 쓰지 않는데, 켜져 있으면 화면만 어지럽힌다. 켜면 그때 읽는다.
+  show: { map: true, grid: true, traj: false, curve: false, ctrl: false },
   undo: [], redo: [],
   hover: null,             // {layer, index}
   drag: null,
@@ -1675,6 +1677,9 @@ function draw() {
     drawTrajLayer('outer', '255,178,78');
   }
 
+  drawCompare();
+  drawCones();
+
   for (const d of LAYER_DEFS) if (d.id !== S.active) drawLayer(d);
   for (const d of LAYER_DEFS) if (d.id === S.active) drawLayer(d);
 
@@ -2038,11 +2043,18 @@ window.addEventListener('keydown', (e) => {
 
   if ((e.ctrlKey || e.metaKey) && k === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
   if ((e.ctrlKey || e.metaKey) && k === 'y') { e.preventDefault(); redo(); return; }
+  // Shift+숫자는 비교 오버레이, 그냥 숫자는 편집 레이어 선택이다.
+  if (e.shiftKey && e.code && /^Digit[1-9]$/.test(e.code)) {
+    const i = parseInt(e.code.slice(5), 10) - 1;
+    if (i < CMP_DEFS.length) { e.preventDefault(); toggleCompare(CMP_DEFS[i].id); }
+    return;
+  }
   if (k >= '1' && k <= '5') {
     S.active = LAYER_DEFS[parseInt(k, 10) - 1].id; renderLayers(); draw(); return;
   }
+  if (k === 'x') { setCones(!CMP.conesOn); return; }
   if (k === 'g') { S.show.grid = !S.show.grid; draw(); }
-  if (k === 't') { S.show.traj = !S.show.traj; draw(); }
+  if (k === 't') { setTraj(!S.show.traj); }
   if (k === 'm') { S.show.map = !S.show.map; draw(); }
   if (k === 'b') { setCurvePreview(!S.show.curve); }
   if (k === 'p') {
@@ -2355,6 +2367,292 @@ function importLaneGraph(text) {
   draw();
   autosave();
   toast(`불러왔다: 노드 ${nodes.size} 개`);
+}
+
+// ---------------------------------------------------------------- 궤적 표시
+
+// 켜고 끄는 것만 저장한다. 궤적 자체는 파일에 있고, 여기서는 화면에 올릴지만
+// 정한다. 꺼져 있으면 data/*.csv 를 훑지도 않는다 (파일당 fetch 가 도니까).
+function trajSave() {
+  try { localStorage.setItem('kau_show_traj', S.show.traj ? '1' : '0'); }
+  catch (e) { /* 무시 */ }
+}
+
+function trajStored() {
+  const v = localStorage.getItem('kau_show_traj');
+  if (v !== null) S.show.traj = v === '1';
+  document.getElementById('chkTraj').checked = S.show.traj;
+  return S.show.traj;
+}
+
+function setTraj(on) {
+  S.show.traj = on;
+  document.getElementById('chkTraj').checked = on;
+  trajSave();
+
+  // 켰는데 아직 안 읽었으면 그때 읽는다.
+  if (on && !S.laps.inner.length && !S.laps.outer.length) {
+    loadTrajectories().then(() => { renderLapPicker(); draw(); });
+  }
+  draw();
+}
+
+document.getElementById('chkTraj').addEventListener('change',
+  (e) => setTraj(e.target.checked));
+
+// ---------------------------------------------------------------- 변형 경로 비교
+//
+// config/ 에 있는 **발행용 yaml 을 그대로** 읽어 겹쳐 그린다. 편집 레이어와
+// 완전히 분리된 보기 전용 오버레이다 — 여기서 켜 놓아도 S.layers 에는 닿지
+// 않으므로 내보내기나 자동저장에 섞이지 않는다.
+//
+// 읽는 것은 `bezier:` 블록의 제어점뿐이다. 노드를 다시 만들지 않는다 —
+// 발행되는 곡선이 곧 제어점이기 때문이다 (README 4.4).
+
+const CMP_DEFS = [
+  { id: 'lane_graph', label: '원본', file: '../config/lane_graph.yaml', color: '#e8c34a' },
+  { id: 'right_bias', label: 'right_bias', file: '../config/right_bias_lane.yaml', color: '#4ad0e8' },
+  { id: 'last_obstacle', label: 'last_obstacle', file: '../config/last_obstacle_lane.yaml', color: '#7ee87a' },
+  { id: 'every_obstacle', label: 'every_obstacle', file: '../config/every_obstacle_lane.yaml', color: '#e87ad0' },
+];
+
+const CONE_DIR = '../../kau_localization/scripts/cones/';
+
+const CMP = {
+  lanes: {},                 // id -> { segs, len, kmax, err }
+  on: {},                    // id -> bool
+  cones: [],                 // { name, sim: [x, y] }
+  conesOn: false,
+  coneR: 0.09,
+  coneClear: 0.24,
+};
+
+// yaml 에서 한 레이어의 제어점만 뽑는다. 파서를 새로 쓰지 않는 이유는
+// 이 블록의 모양이 편집기 내보내기와 gen_lane_variants.py 양쪽에서 고정이기
+// 때문이다 — 조각 한 줄에 ctrl 이 하나씩 나온다.
+function parseBezierLayer(text, layer) {
+  const out = [];
+  let inBezier = false;
+  let cur = null;
+
+  for (const line of text.split('\n')) {
+    if (/^\s{0,4}bezier:\s*$/.test(line)) { inBezier = true; continue; }
+    if (!inBezier) continue;
+    if (/^\s{0,3}\S/.test(line)) break;                 // bezier 블록이 끝났다
+
+    const lm = line.match(/^\s{4}([A-Za-z_]\w*):\s*$/);
+    if (lm) { cur = lm[1]; continue; }
+    if (cur !== layer) continue;
+
+    const cm = line.match(/ctrl:\s*\[(.+)\]/);
+    if (!cm) continue;
+    const nums = cm[1].match(/-?\d+(?:\.\d+)?(?:[eE][-+]?\d+)?/g) || [];
+    if (nums.length < NCTRL * 2) continue;
+
+    const ctrl = [];
+    for (let i = 0; i < NCTRL * 2; i += 2) {
+      ctrl.push([parseFloat(nums[i]), parseFloat(nums[i + 1])]);
+    }
+    out.push(ctrl);
+  }
+  return out;
+}
+
+function loadCompare(def) {
+  if (CMP.lanes[def.id]) return Promise.resolve(CMP.lanes[def.id]);
+
+  return fetch(def.file)
+    .then((r) => { if (!r.ok) throw new Error(`${r.status}`); return r.text(); })
+    .then((text) => {
+      const segs = parseBezierLayer(text, 'center');
+      if (!segs.length) throw new Error('bezier.center 가 없다');
+      const len = segs.reduce((s, c) => s + segLength(c), 0);
+      const kmax = Math.max(...segs.map((c) => segKappaMax(c, 60)));
+      CMP.lanes[def.id] = { segs, len, kmax, err: '' };
+      return CMP.lanes[def.id];
+    })
+    .catch((e) => {
+      CMP.lanes[def.id] = { segs: [], len: 0, kmax: 0, err: String(e.message || e) };
+      return CMP.lanes[def.id];
+    });
+}
+
+function toggleCompare(id) {
+  const def = CMP_DEFS.find((d) => d.id === id);
+  if (!def) return;
+
+  CMP.on[id] = !CMP.on[id];
+  compareSave();
+
+  if (CMP.on[id] && !CMP.lanes[id]) {
+    loadCompare(def).then((L) => {
+      if (L.err) toast(`${def.label}: 못 읽었다 (${L.err})`);
+      renderCompare();
+      draw();
+    });
+  }
+  renderCompare();
+  draw();
+}
+
+// 콘은 파일이 몇 개인지 모르니 번호로 훑는다. 궤적 파일과 같은 방식이다.
+function loadCones(max = 16) {
+  const probes = [];
+  for (let i = 1; i <= max; i++) {
+    probes.push(fetch(`${CONE_DIR}cone${i}.sdf`)
+      .then((r) => (r.ok ? r.text() : null))
+      .then((text) => {
+        if (!text) return null;
+        const m = text.match(/<pose>\s*([-\d.eE+\s]+?)\s*<\/pose>/);
+        if (!m) return null;
+        const v = m[1].trim().split(/\s+/).map(parseFloat);
+        return { name: `cone${i}`, sim: [v[0], v[1]] };
+      })
+      .catch(() => null));
+  }
+  return Promise.all(probes).then((list) => {
+    CMP.cones = list.filter(Boolean);
+    return CMP.cones;
+  });
+}
+
+function setCones(on) {
+  CMP.conesOn = on;
+  document.getElementById('chkCones').checked = on;
+  compareSave();
+  if (on && !CMP.cones.length) {
+    loadCones().then((c) => {
+      if (!c.length) toast('콘 sdf 를 못 읽었다 (serve_editor.py 로 띄웠는지 확인)');
+      renderCompare();
+      draw();
+    });
+  }
+  renderCompare();
+  draw();
+}
+
+function drawCompare() {
+  if (!S.map) return;
+
+  ctx.save();
+  ctx.lineCap = 'round';
+  for (const def of CMP_DEFS) {
+    const L = CMP.on[def.id] && CMP.lanes[def.id];
+    if (!L || !L.segs.length) continue;
+
+    ctx.strokeStyle = def.color;
+    ctx.globalAlpha = 0.9;
+    ctx.lineWidth = def.id === 'lane_graph' ? 1.5 : 2.5;
+    ctx.setLineDash(def.id === 'lane_graph' ? [6, 4] : []);
+    ctx.beginPath();
+    L.segs.forEach((c, si) => {
+      for (let i = 0; i <= 12; i++) {
+        const p = worldToScreen(deCasteljau(c, i / 12));
+        (si === 0 && i === 0) ? ctx.moveTo(p[0], p[1]) : ctx.lineTo(p[0], p[1]);
+      }
+    });
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function drawCones() {
+  if (!CMP.conesOn || !CMP.cones.length || !S.map) return;
+
+  ctx.save();
+  for (const c of CMP.cones) {
+    // 1 m = (1/res) 이미지 픽셀 = scale/res 화면 픽셀 (worldToImage 참고)
+    const q = worldToScreen(trackToMap(c.sim));
+    const rPix = CMP.coneR * S.view.scale / S.map.res;
+    const cPix = CMP.coneClear * S.view.scale / S.map.res;
+
+    ctx.setLineDash([4, 3]);
+    ctx.strokeStyle = 'rgba(255,95,86,0.75)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.arc(q[0], q[1], cPix, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.setLineDash([]);
+    ctx.fillStyle = 'rgba(255,95,86,0.9)';
+    ctx.beginPath();
+    ctx.arc(q[0], q[1], Math.max(2, rPix), 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = '#ffb0a8';
+    ctx.font = '11px monospace';
+    ctx.fillText(c.name, q[0] + 6, q[1] - 6);
+  }
+  ctx.restore();
+}
+
+function renderCompare() {
+  const box = document.getElementById('cmpBtns');
+  if (!box) return;
+  box.innerHTML = '';
+
+  CMP_DEFS.forEach((def, i) => {
+    const b = document.createElement('button');
+    b.textContent = `${i + 1} ${def.label}`;
+    b.title = `${def.file}  (Shift+${i + 1})`;
+    b.style.borderColor = def.color;
+    if (CMP.on[def.id]) {
+      b.style.background = def.color;
+      b.style.color = '#14171c';
+    }
+    b.addEventListener('click', () => toggleCompare(def.id));
+    box.appendChild(b);
+  });
+
+  const info = document.getElementById('cmpInfo');
+  const rows = [];
+  for (const def of CMP_DEFS) {
+    const L = CMP.lanes[def.id];
+    if (!CMP.on[def.id] || !L) continue;
+    rows.push(L.err
+      ? `${def.label}: ${L.err}`
+      : `${def.label}: 조각 ${L.segs.length} · ${L.len.toFixed(3)} m · ` +
+        `|κ|max ${L.kmax.toFixed(4)}` + (L.kmax > curvLimit() ? ' (한계 초과)' : ''));
+  }
+  if (CMP.conesOn) rows.push(`콘 ${CMP.cones.length} 개`);
+  info.textContent = rows.length ? rows.join('\n') : '—';
+  info.style.whiteSpace = 'pre-line';
+}
+
+function compareSave() {
+  try {
+    localStorage.setItem('kau_compare', JSON.stringify(
+      { on: CMP.on, cones: CMP.conesOn, coneR: CMP.coneR, coneClear: CMP.coneClear }));
+  } catch (e) { /* 무시 */ }
+}
+
+function compareLoadStored() {
+  let s = null;
+  try { s = JSON.parse(localStorage.getItem('kau_compare') || 'null'); } catch (e) { /* 무시 */ }
+  if (s) {
+    CMP.on = s.on || {};
+    CMP.conesOn = !!s.cones;
+    if (s.coneR) CMP.coneR = s.coneR;
+    if (s.coneClear) CMP.coneClear = s.coneClear;
+  }
+  document.getElementById('coneR').value = CMP.coneR.toFixed(2);
+  document.getElementById('coneClear').value = CMP.coneClear.toFixed(2);
+  document.getElementById('chkCones').checked = CMP.conesOn;
+
+  const jobs = CMP_DEFS.filter((d) => CMP.on[d.id]).map((d) => loadCompare(d));
+  if (CMP.conesOn) jobs.push(loadCones());
+  return Promise.all(jobs).then(renderCompare);
+}
+
+document.getElementById('chkCones').addEventListener('change', (e) => setCones(e.target.checked));
+for (const id of ['coneR', 'coneClear']) {
+  document.getElementById(id).addEventListener('change', () => {
+    CMP.coneR = parseFloat(document.getElementById('coneR').value) || 0.09;
+    CMP.coneClear = parseFloat(document.getElementById('coneClear').value) || 0.24;
+    compareSave();
+    renderCompare();
+    draw();
+  });
 }
 
 // ---------------------------------------------------------------- 참조 이미지
@@ -3022,6 +3320,8 @@ window.addEventListener('drop', async (e) => {
       }
 
       updateTrajInfo();
+      // 궤적을 일부러 끌어다 놓았으면 보이는 게 맞다 (표시는 기본 꺼짐이다).
+      if (!S.show.traj) setTraj(true);
       toast(`${lane}: ${S.laps[lane].length} 바퀴`);
     }
   }
@@ -3043,14 +3343,16 @@ window.addEventListener('resize', resize);
 
 applyVeh(true);
 renderLayers();
+renderCompare();
 loadAutosave();
 loadOverlayStored();
 resize();
 
 loadMapFromServer()
-  .then(() => loadTrajectories())
+  .then(() => (trajStored() ? loadTrajectories() : null))
   .then(() => loadTrackFromServer())
   .then(() => loadOverlayFromServer())
+  .then(() => compareLoadStored())
   .then(draw)
   .catch(() => {
     toast('지도 자동 로드 실패 — 파일을 끌어다 놓거나 http.server 로 열 것');

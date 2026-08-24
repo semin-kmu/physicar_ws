@@ -25,6 +25,10 @@ ros2 run kau_global_path record_trajectory.py --lane inner   # -> data/inner_2.c
 rm src/kau_global_path/data/inner_2.csv                      # 마음에 안 들면 지우고
 ros2 run kau_global_path record_trajectory.py --lane inner   # -> data/inner_2.csv 다시
 
+# 실험용 변형 경로 — 원본은 그대로 두고 오프셋만 얹은 파일을 뽑는다 (4.7)
+python3 src/kau_global_path/scripts/gen_lane_variants.py
+ros2 launch kau_global_path global_path.launch.py lane:=right_bias
+
 # 경로 검사 — 발행해도 되는 파일인지 ROS 없이 판정한다
 python3 src/kau_global_path/scripts/check_path.py
 python3 src/kau_global_path/scripts/check_path.py --plot /tmp/path.png -v
@@ -32,12 +36,14 @@ python3 src/kau_global_path/scripts/check_path.py --plot /tmp/path.png -v
 # 검증 (ROS · 브라우저 불필요)
 node   src/kau_global_path/test/test_geometry.js  # 곡선 기하 + 바퀴 겹치기
 node   src/kau_global_path/test/test_export.js    # 실제 지도 + 두 yaml 내보내기
+node   src/kau_global_path/test/test_compare.js   # 편집기 비교 오버레이 + 콘 좌표
 python3 src/kau_global_path/test/test_recorder.py # 바퀴 자르기 (ROS 불필요)
 ```
 
 | 만들어지는 것 | 받는 쪽 |
 |---|---|
 | `lane_graph.yaml` | 이 패키지의 발행 노드 (3단계) |
+| `right_bias_lane.yaml` · `last_obstacle_lane.yaml` · `every_obstacle_lane.yaml` | 같은 발행 노드. `path` 만 갈아끼운다 (4.7) |
 | `kau_v3_track.yaml` | `kau_object_detection/config/` — ROI (4.6) |
 
 ## 1. 지금 하려는 것
@@ -290,6 +296,8 @@ data/inner_1.csv  inner_2.csv  inner_3.csv   <- 편집기가 읽어서 평균낸
 ### 4.1 기능
 
 - **배경 레이어**: `kau_v3.pgm` -> PNG 변환본(벽) + `inner.csv` / `outer.csv` 궤적 오버레이
+  (**기본 꺼짐**. 경로를 CAD 에서 뽑게 된 뒤로 씨앗으로 안 쓴다 — `T` 나
+  `기록 궤적 표시` 로 켠다. 꺼 두면 `data/*.csv` 를 읽지도 않는다)
 - **CAD 트랙**: 시뮬레이터 world 의 AMET 2026 도형을 map 프레임에 깐다 (4.1.1)
 - **CAD 경로 생성**: 중심선 다각형의 꼭짓점을 둥글려 주행 가능한 경로를 만든다 (4.1.3)
 - **참조 이미지**: 사진·도면을 따로 깔고 벽에 맞춘다 (4.1.2)
@@ -297,7 +305,8 @@ data/inner_1.csv  inner_2.csv  inner_3.csv   <- 편집기가 읽어서 평균낸
 - **뷰**: 팬 / 줌 / 미터 그리드 / 커서 위치 실좌표 표시
 - **편집**: 노드 추가·드래그·삽입·삭제, 진행방향 뒤집기, Ctrl+Z / Ctrl+Y
 - **레이어 4개**: 안쪽 차로 · 바깥쪽 차로 · outer boundary · inner boundary
-- **궤적 씨앗**: `inner.csv` / `outer.csv` 를 호길이 등간격으로 줄여 노드로 깐다 (3.2)
+- **궤적 씨앗**: `inner.csv` / `outer.csv` 를 호길이 등간격으로 줄여 노드로 깐다 (3.2).
+  궤적 표시를 켜야 파일을 읽는다
 - **곡선 미리보기**: 화면에 그려지는 것이 **실제로 발행될 quintic Bezier** 다 (4.4)
 - **세그먼트 나누기**: 노드를 세그먼트 경계로 지정하면 경계~경계가 곡선 한
   조각(제어점 6 개)이 된다. 사이 노드 수로 직선/원호가 정해진다 (4.4.1)
@@ -714,6 +723,133 @@ bnd_inner = 안쪽 차로 중심선을 안쪽으로  width/2
 
 생성값은 초안이다. 실제 테이프 위치와 다르면 손으로 다듬는다.
 `boundary_tolerance_m` 기본값이 0.15 m 라 그 안쪽 오차는 수신측이 흡수한다.
+
+### 4.7 실험용 변형 경로 — `gen_lane_variants.py`
+
+`lane_graph.yaml` 은 그대로 두고, 거기서 **횡오프셋만 얹은 경로**를 별도 파일로
+뽑는다. 런치의 `lane` 인자만 갈아끼우면 바로 실험된다 — 레이어 이름
+(`center`)과 route 이름(`center_loop`)이 원본과 같아서 `route` 는 안 건드린다.
+
+```bash
+python3 src/kau_global_path/scripts/gen_lane_variants.py            # 세 개 다
+python3 src/kau_global_path/scripts/gen_lane_variants.py --only right_bias -v
+python3 src/kau_global_path/scripts/gen_lane_variants.py --selftest  # 재구성만 확인
+python3 src/kau_global_path/scripts/gen_lane_variants.py --plot data/variants
+
+# 발행 — lane 이름으로 고른다. 인자를 안 주면 원본이다
+ros2 launch kau_global_path global_path.launch.py                    # lane_graph.yaml
+ros2 launch kau_global_path global_path.launch.py lane:=right_bias
+ros2 launch kau_global_path global_path.launch.py lane:=last_obstacle
+ros2 launch kau_global_path global_path.launch.py lane:=every_obstacle
+
+# 방금 뽑은 파일을 rebuild 없이 시험할 때는 path 를 직접 준다 (lane 보다 우선)
+ros2 launch kau_global_path global_path.launch.py \
+    path:=$PWD/src/kau_global_path/config/right_bias_lane.yaml
+```
+
+`lane` 은 share 의 `config/` 에서 파일을 고르는 이름표다. 이름이 틀리면 조용히
+원본을 발행하지 않고 바로 멈춘다. **변형 파일을 새로 뽑으면 `colcon build` 를
+다시 해야 share 에 들어간다** (`path:=` 로 주면 rebuild 없이도 된다).
+`route` 는 건드리지 않는다 — 네 파일 다 레이어가 `center` 다.
+
+| 파일 | 무엇 | 길이 | \|κ\|max | 오프셋 |
+|---|---|---|---|---|
+| `lane_graph.yaml` (원본) | 주행면 중심선 | 28.872 m | 1.8104 | — |
+| `right_bias_lane.yaml` | 진행 방향 오른쪽으로 10 cm | 29.487 m | 1.8094 | 평균 우 8.3 cm |
+| `last_obstacle_lane.yaml` | 마지막 콘 하나만 회피 | 28.866 m | 1.8098 | 우 6.6 / 좌 5.4 cm |
+| `every_obstacle_lane.yaml` | 콘 6 개 전부 회피 | 28.883 m | 1.8102 | 우 6.6 / 좌 6.2 cm |
+
+\|κ\|max 는 `check_path.py` 가 제어점에서 다시 잰 값이다. 세 파일 모두 그
+검사를 그대로 통과한다. 한계 κ 1.8199 는 **기하학적 한계 2.0221 (δ 20°) 에
+마진 10 % 를 뺀 설계값**이다 (6.4) — 위 값들은 설계 한계의 99 % 이고, 실제
+차량 한계로는 89.5 % (필요 조향각 18.05°, 한계 20°) 다.
+
+#### 어디가 어려운가 — 곡률 여유가 1 % 밖에 없다
+
+원본이 이미 한계의 **99.4 %** 를 쓴다. 그래서 "오른쪽으로 10 cm" 를 균일하게
+밀 수가 없다 — 우회전 코너에서 반경이 줄어 한계를 넘는다. 우회전 최대
+\|κ\| 1.667 자리에서 물리적으로 가능한 오른쪽 오프셋은 **5.0 cm** 뿐이다
+(`1/|κ| - 1/κ_한계`). 그래서 오프셋 d(s) 를 상수로 두지 않고 **최적화로 푼다.**
+
+```text
+변수     주기 3차 B-spline 계수 (매듭 0.45 m). d 가 만들 수 있는 가장 급한
+         굴곡이 매듭 간격으로 제한되므로, d'' 가 통제된다
+목적     하고 싶은 값(bias 또는 0)에서 덜 벗어나기
+제약     |κQ| <= 상한 · 코리도(테두리 - 차체 반경 - 여유) · 콘까지 거리
+```
+
+오프셋 곡선의 곡률은 근사하지 않고 식으로 쓴다. **d'' 가 κ 에 그대로 들어간다** —
+이게 이 문제의 전부다.
+
+```text
+Q  = P - d N                       N 은 왼쪽 법선, d 는 오른쪽이 +
+Q' = (1+dκ) T - d' N
+κQ = [(1+dκ)(κ + dκ² - d'') + d'(2d'κ + dκ')] / |Q'|³
+```
+
+#### 만들어진 조각의 곡률로 판정한다
+
+노드에서 (θ,κ) 를 물려 quintic 을 만들면 조각 **안쪽**이 조금 부푼다 (원호
+실측: 조각당 8° 에서 +0.1 %, 13.5° 에서 +0.4 %, 45° 에서 +4.8 %). 그래서 해석
+곡률만 보고 끝내면 안 된다. 바깥 고리가 실제로 조각을 만들어 `kappa_max` 를
+재고, 넘친 조각의 구간만 상한을 깎아 다시 푼다.
+
+#### 원본에 있는 함정 — 2 cm 짜리 조각
+
+원본에는 길이 2 cm 짜리 link 조각이 있다. 제어점이 소수 7 자리라 제어점 간격이
+4 mm 인 이 조각에서는 반올림이 2차 미분에 증폭돼 **κ 가 ±0.9 1/m 씩 흔들리고,
+실제 도는 각도도 κ 가 말하는 값과 2° 어긋난다.** d=0 이면 안 보인다. 오프셋을
+얹는 순간 그 θ 오차가 d 배로 위치에 실려 곡률이 2.8 1/m 까지 튄다.
+
+그래서 Base 를 만들 때 **길이 6 cm 미만 조각의 주변 ±10 cm 를 quintic 하나로
+다시 그린다.** 원본과 달라지는 양은 결함 자체 크기(mm 단위)를 넘지 않는다.
+`--selftest` 가 이걸 확인한다 — d=0 으로 다시 뽑아 원본과 얼마나 다른지 본다.
+
+내보낼 때 제어점을 **소수 9 자리**로 적는다. 조각이 원본보다 짧아(0.1 m 대
+0.6 m) 7 자리로는 이음새 κ 가 0.006 1/m 흔들려 `check_path.py` 의 G2 허용오차
+0.005 를 넘긴다. 곡선 자체는 구성상 정확히 C² 다 (이음새에서 양쪽이 같은
+(θ,κ) 를 쓴다).
+
+#### 편집기에서 눈으로 비교한다
+
+`serve_editor.py` 로 띄운 편집기(0장)에 **변형 경로 비교** 패널이 있다.
+`config/` 의 발행용 yaml 을 그대로 읽어 겹쳐 그린다 — 노드를 다시 만들지 않고
+`bezier:` 블록의 제어점을 그대로 쓴다. **보기 전용이다**: 편집 레이어
+(`S.layers`)에 닿지 않으므로 켜 놓고 내보내도 섞이지 않는다.
+
+```text
+버튼 1~4        원본 / right_bias / last_obstacle / every_obstacle 를 각각 토글
+Shift+1 ~ 4     같은 것. 그냥 숫자키는 편집 레이어 전환이라 겹치지 않는다
+X               장애물(라바콘) 표시. 점선 원이 필요 여유(콘+차체+마진)다
+```
+
+여러 개를 동시에 켜서 겹쳐 볼 수 있고, 켠 것마다 조각 수 · 길이 · \|κ\|max 가
+패널에 뜬다 (`check_path.py` 가 재는 값과 같아야 한다 — `test_compare.js` 가
+이걸 검사한다). 콘은 `cones/*.sdf` 를 번호로 훑어 읽고, 트랙 CAD 와 **같은
+변환**(`trkOx`/`trkOy`)으로 map 에 올린다. 선택 상태는 브라우저에 저장된다.
+
+#### 콘 좌표 — 지도가 아니라 생성 입력으로만 쓴다
+
+`kau_localization/scripts/cones/cone*.sdf` 의 sim pose 를 map 으로 옮겨 쓴다
+(`map_x = ox - sim_y`, `map_y = sim_x - oy`). **지도에는 넣지 않는다** (6.2).
+출발선 기준 주행 순서와 중심선 기준 좌우가 이렇게 나온다.
+
+| 콘 | 출발선에서 | map | 중심선에서 |
+|---|---|---|---|
+| cone2 | 8.82 m | (+2.641, +6.935) | 우 18.3 cm |
+| cone4 | 10.22 m | (+2.288, +8.344) | 좌 17.6 cm |
+| cone1 | 13.81 m | (-0.161, +8.922) | 좌 18.0 cm |
+| cone3 | 18.35 m | (-0.755, +6.771) | 우 17.8 cm |
+| cone5 | 23.77 m | (-2.128, +2.786) | 우 18.5 cm |
+| **cone6** | **27.50 m** | (-1.091, -0.188) | 우 18.6 cm |
+
+`last_obstacle` 이 피하는 것은 **cone6** 이다 — 결승선 1.37 m 앞이라 회피를
+끝내고 복귀할 거리가 가장 짧다.
+
+필요 여유는 `콘 반경 + 차체 반경 + 여유 = 0.09 + 0.110 + 0.04 = 0.24 m` 다.
+**콘 반경 0.09 는 시뮬 콘(0.18 m 각 박스) 기준이고 실물은 아직 실측 전이다**
+(`kau_state_machine/docs/08` 의 `r_cone` 미확정과 같은 값). 실측하면
+`--cone-radius` 로 바꿔 다시 뽑는다.
 
 ## 5. 좌표계 / TF
 

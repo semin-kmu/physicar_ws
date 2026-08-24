@@ -17,6 +17,8 @@
   <depend>kau_msgs</depend>
   <depend>nav_msgs</depend>
   <depend>geometry_msgs</depend>
+  <depend>tf2</depend>
+  <depend>tf2_ros</depend>
 
   <exec_depend>ament_index_python</exec_depend>
   <exec_depend>launch</exec_depend>

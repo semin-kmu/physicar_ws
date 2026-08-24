@@ -13,6 +13,8 @@ find_package(cv_bridge REQUIRED)
 find_package(kau_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(tf2 REQUIRED)
+find_package(tf2_ros REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(Eigen3 REQUIRED)
 
@@ -29,6 +31,8 @@ ament_target_dependencies(kau_lane_detection_node
   kau_msgs
   nav_msgs
   geometry_msgs
+  tf2
+  tf2_ros
 )
 
 target_include_directories(kau_lane_detection_node PRIVATE
