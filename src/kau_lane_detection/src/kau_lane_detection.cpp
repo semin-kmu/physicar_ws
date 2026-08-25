@@ -163,6 +163,70 @@ KauLaneDetectionNode::KauLaneDetectionNode()
         );
 
 
+    // ------------------------------------------------------------
+    // 기동 tilt
+    //
+    // BEV 는 bev_vanishing_y 로 카메라 pitch 를 전제한다 (2 deg 하향
+    // 기준 169.57, 수평이면 178.70 — 9 px 차이). 그 각도를 실제로
+    // 세우는 주체가 없으면 지평선이 그만큼 어긋난 채 돌아가므로 이
+    // 노드가 기동 시 직접 세운다. 제어량이 아니라 고정 자세라
+    // 램프도 상태기계도 없다.
+    // ------------------------------------------------------------
+
+    camera_tilt_publisher_ =
+        this->create_publisher<std_msgs::msg::Float64>(
+            "/camera/tilt",
+            10
+        );
+
+    camera_tilt_enable_ =
+        this->declare_parameter<bool>(
+            "camera_tilt_enable",
+            true
+        );
+
+    camera_tilt_deg_ =
+        this->declare_parameter<double>(
+            "camera_tilt_deg",
+            2.0
+        );
+
+    camera_tilt_repeat_s_ =
+        this->declare_parameter<double>(
+            "camera_tilt_repeat_s",
+            5.0
+        );
+
+    if (camera_tilt_enable_)
+    {
+        // wall timer 를 쓰는 것은 의도적이다 — node clock 은
+        // use_sim_time 과 센서 스탬프가 어긋나는 이 스택에서
+        // 신뢰할 수 없다 (§12 마지막 항목).
+        camera_tilt_ticks_left_ =
+            std::max(
+                1,
+                static_cast<int>(std::lround(camera_tilt_repeat_s_))
+            );
+
+        camera_tilt_timer_ =
+            this->create_wall_timer(
+                std::chrono::seconds(1),
+                std::bind(
+                    &KauLaneDetectionNode::publishCameraTilt,
+                    this
+                )
+            );
+
+        RCLCPP_INFO(
+            this->get_logger(),
+            "기동 tilt: %+.2f deg (+ = 아래) 를 %d 회 발행한다. "
+            "bev_vanishing_y 가 이 각도를 전제한다.",
+            camera_tilt_deg_,
+            camera_tilt_ticks_left_
+        );
+    }
+
+
     // ============================================================
     // BEV Parameters
     //
@@ -1148,6 +1212,39 @@ KauLaneDetectionNode::KauLaneDetectionNode()
             1.0
         );
 
+    // 조준 근거. "lane" (기본) / "global" (예전 동작).
+    pan_aim_source_ =
+        this->declare_parameter<std::string>(
+            "pan_aim_source",
+            "lane"
+        );
+
+    pan_aim_min_evidence_cm_ =
+        this->declare_parameter<double>(
+            "pan_aim_min_evidence_cm",
+            25.0
+        );
+
+    pan_aim_deadband_deg_ =
+        this->declare_parameter<double>(
+            "pan_aim_deadband_deg",
+            2.0
+        );
+
+    pan_aim_hold_frames_ =
+        static_cast<int>(
+            this->declare_parameter<int>(
+                "pan_aim_hold_frames",
+                14
+            )
+        );
+
+    pan_aim_fov_margin_deg_ =
+        this->declare_parameter<double>(
+            "pan_aim_fov_margin_deg",
+            5.0
+        );
+
     // pan 회전축이 base_link 원점에서 떨어진 거리 [cm] (선언부
     // 헤더 주석 참고). pan=0 에서는 값이 얼마든 결과에 영향이
     // 없으므로 실측 전까지 0,0 으로 둔다.
@@ -1207,6 +1304,21 @@ KauLaneDetectionNode::KauLaneDetectionNode()
         lane_path_publisher_ =
             this->create_publisher<kau_msgs::msg::KauPath>(
                 "/lane/center",
+                rclcpp::QoS(1).reliable()
+            );
+
+        // 좌/우 흰선 경로. 하류가 corridor 물리 경계로 쓴다.
+        // /lane/center 와 같은 QoS — 측위를 안 쓰는 구성에서는
+        // 이 둘이 도로 경계의 유일한 근거다.
+        lane_left_publisher_ =
+            this->create_publisher<kau_msgs::msg::KauPath>(
+                "/lane/left",
+                rclcpp::QoS(1).reliable()
+            );
+
+        lane_right_publisher_ =
+            this->create_publisher<kau_msgs::msg::KauPath>(
+                "/lane/right",
                 rclcpp::QoS(1).reliable()
             );
 
@@ -3286,10 +3398,14 @@ void KauLaneDetectionNode::refreshDerivedScale()
 
 void KauLaneDetectionNode::publishLanePath(
     const LanePath & path,
-    const rclcpp::Time & stamp)
+    const rclcpp::Time & stamp,
+    const rclcpp::Publisher<kau_msgs::msg::KauPath>::SharedPtr & pub)
 {
+    const rclcpp::Publisher<kau_msgs::msg::KauPath>::SharedPtr & out =
+        pub ? pub : lane_path_publisher_;
+
     if (
-        !lane_path_publisher_ ||
+        !out ||
         !path.valid
     )
     {
@@ -3428,7 +3544,7 @@ void KauLaneDetectionNode::publishLanePath(
     msg.valid_length = path.valid_length_cm;
 
 
-    lane_path_publisher_->publish(msg);
+    out->publish(msg);
 
 
     // ------------------------------------------------------------
@@ -4791,6 +4907,241 @@ double KauLaneDetectionNode::panAimGoalDeg(
 
 
 // ================================================================
+// Pan 조준 — 차선 기반 (기본 소스)
+//
+// 설계 근거는 선언부(헤더) 주석 참고. 요약하면 근거가 전역경로가
+// 아니라 이 노드가 방금 만든 경로이고, 그 경로가 이미 base_link
+// 기준이라 방위각이 적분되지 않는다는 것이다.
+// ================================================================
+
+double KauLaneDetectionNode::panAimGoalDegFromLane(
+    const LanePath & path,
+    bool * out_valid) const
+{
+    if (out_valid)
+    {
+        *out_valid = false;
+    }
+
+
+    // 게이트를 통과하지 못한 경로는 근거로 쓰지 않는다. 기각된
+    // 경로도 built 로 남아 있지만 그건 debug 화면용이다.
+    if (
+        !path.valid ||
+        path.ctrl.size() < 2
+    )
+    {
+        return 0.0;
+    }
+
+
+    // ------------------------------------------------------------
+    // 1. 근거 길이 — "가려지지 않은 부분" 은 여기서 정해진다
+    //
+    // valid_length_cm 은 근거 점이 끊기기 전까지의 호길이다.
+    // 가림이 생기면 이 값이 저절로 줄어든다.
+    // ------------------------------------------------------------
+
+    const double evidence_cm = path.valid_length_cm;
+
+    if (
+        !std::isfinite(evidence_cm) ||
+        evidence_cm < pan_aim_min_evidence_cm_
+    )
+    {
+        return 0.0;
+    }
+
+
+    // ------------------------------------------------------------
+    // 2. 조준 거리
+    //
+    // pan_aim_lookahead_m 은 자차 기준 거리로 읽히는 이름이다.
+    // 경로는 카메라 앞 x_base_cm 부터 시작하므로 그만큼 빼야
+    // 전역경로 소스와 같은 뜻이 된다.
+    //
+    // 축척을 못 구하면(CameraInfo 이전) 빼지 않는다 — 그 구간은
+    // imageCallback 이 이미 조기 반환하므로 여기까지 오지 않는다.
+    // ------------------------------------------------------------
+
+    double sx = 0.0;
+
+    double sy = 0.0;
+
+    double x_base_cm = 0.0;
+
+    const double start_offset_cm =
+        bevScale(sx, sy, x_base_cm)
+            ? (x_base_cm + path_x_offset_cm_)
+            : 0.0;
+
+
+    const double want_cm =
+        pan_aim_lookahead_m_ * 100.0 - start_offset_cm;
+
+    // 근거보다 멀리 조준하지 않는다. 그 뒤는 외삽이다.
+    const double d_cm = std::min(want_cm, evidence_cm);
+
+
+    if (!(d_cm > 1e-6))
+    {
+        // 룩어헤드가 경로 시작점보다 가깝다. 조준할 대상이 없다.
+        return 0.0;
+    }
+
+
+    // ------------------------------------------------------------
+    // 3. 호길이 d_cm 인 u (이분탐색)
+    //
+    // 호길이는 u 에 대해 단조증가라 이분탐색이면 충분하다.
+    // panAimGoalDeg 2단계와 같은 방법이고, 조각이 하나라 구간
+    // 순회가 없다.
+    // ------------------------------------------------------------
+
+    double lo = 0.0;
+
+    double hi = 1.0;
+
+    for (
+        int it = 0;
+        it < 32;
+        ++it
+    )
+    {
+        const double mid = 0.5 * (lo + hi);
+
+        if (
+            kau::bezier::segLength(path.ctrl, 0.0, mid) < d_cm
+        )
+        {
+            lo = mid;
+        }
+        else
+        {
+            hi = mid;
+        }
+    }
+
+
+    const double u = 0.5 * (lo + hi);
+
+
+    // ------------------------------------------------------------
+    // 4. 방위각 [deg] (base_link 기준, 왼쪽이 +)
+    //
+    // ctrl 이 이미 base_link 기준이고 자차가 원점이므로 뺄 것이
+    // 없다. camera_pan_joint 는 axis +Z 라 +rad 이 왼쪽이므로
+    // 이 부호가 그대로 pan 명령의 부호가 된다 (§8 회전 부호).
+    // ------------------------------------------------------------
+
+    const kau::bezier::Point2 target =
+        kau::bezier::evalSeg(path.ctrl, u);
+
+
+    if (
+        !std::isfinite(target.x) ||
+        !std::isfinite(target.y)
+    )
+    {
+        return 0.0;
+    }
+
+
+    // 조준점이 자차 원점과 겹치면 방위가 정의되지 않는다.
+    // 뒤쪽 점(x <= 0)도 조준 대상이 아니다 — 경로가 뒤집혔다는
+    // 뜻이라 그 각으로 돌리면 정반대를 본다.
+    if (
+        target.x <= 1e-6 ||
+        std::hypot(target.x, target.y) < 1e-6
+    )
+    {
+        return 0.0;
+    }
+
+
+    const double bearing_rel =
+        std::atan2(
+            target.y,
+            target.x
+        );
+
+
+    if (out_valid)
+    {
+        *out_valid = true;
+    }
+
+
+    return pan_aim_gain_ * bearing_rel * 180.0 / M_PI;
+}
+
+
+
+
+// ================================================================
+// 조준각 상한 [deg]
+//
+// 설계 근거는 선언부(헤더) 주석 참고. 지금 광학(반각 50도)에서는
+// pan_max_deg(30) 가 항상 작아 이 함수가 걸리지 않는다.
+// ================================================================
+
+double KauLaneDetectionNode::panAimLimitDeg() const
+{
+    if (
+        !camera_calibrated_ ||
+        camera_matrix_.empty()
+    )
+    {
+        return pan_max_deg_;
+    }
+
+
+    const double fx = camera_matrix_.at<double>(0, 0);
+
+    const double cx = camera_matrix_.at<double>(0, 2);
+
+
+    if (
+        !std::isfinite(fx) ||
+        fx <= 1e-6 ||
+        !std::isfinite(cx) ||
+        cx <= 0.0
+    )
+    {
+        return pan_max_deg_;
+    }
+
+
+    const double half_fov_deg =
+        std::atan(cx / fx) * 180.0 / M_PI;
+
+    const double fov_limit_deg =
+        half_fov_deg - pan_aim_fov_margin_deg_;
+
+
+    if (!(fov_limit_deg > 0.0))
+    {
+        // 여유가 반각보다 크다. 설정 실수로 보고 막지 않는다
+        // (판단 불가면 fail-open — obstacleAheadOnSide 와 같은 방침).
+        RCLCPP_WARN_ONCE(
+            this->get_logger(),
+            "pan_aim_fov_margin_deg(%.1f) 가 수평 반각(%.1f) 이상이다. "
+            "FOV 상한을 적용하지 않는다.",
+            pan_aim_fov_margin_deg_,
+            half_fov_deg
+        );
+
+        return pan_max_deg_;
+    }
+
+
+    return std::min(pan_max_deg_, fov_limit_deg);
+}
+
+
+
+
+// ================================================================
 // 소실된 쪽 전방에 장애물이 있는가 (map 프레임)
 //
 // 설계 근거는 선언부(헤더) 주석 참고.
@@ -5052,6 +5403,35 @@ void KauLaneDetectionNode::commandPan(double goal_deg)
 // 시계 주의와 같은 함정).
 // ================================================================
 
+// ================================================================
+// 기동 tilt 발행
+//
+// pan 과 달리 램프도 상태기계도 없다. BEV 가 전제하는 고정 자세를
+// 세우는 것이 전부다.
+//
+// 반복하는 이유: 드라이버(실기)나 gz 브리지(시뮬)가 이 노드보다
+// 늦게 뜨면 첫 발행이 조용히 유실된다. 반대로 계속 쏘면 웹UI 의
+// 틸트 슬라이더를 매초 되돌려 버리므로 정해진 횟수만 쏘고 멈춘다.
+//
+// 부호는 /camera/tilt 규약 그대로 **+ 가 아래**다
+// (camera_tilt_joint axis = +Y, URDF/SDF 공통).
+// ================================================================
+
+void KauLaneDetectionNode::publishCameraTilt()
+{
+    std_msgs::msg::Float64 msg;
+
+    msg.data = camera_tilt_deg_ * M_PI / 180.0;
+
+    camera_tilt_publisher_->publish(msg);
+
+    if (--camera_tilt_ticks_left_ <= 0)
+    {
+        camera_tilt_timer_->cancel();
+    }
+}
+
+
 void KauLaneDetectionNode::publishPanRamped(
     const rclcpp::Time & frame_stamp)
 {
@@ -5147,6 +5527,7 @@ void KauLaneDetectionNode::updatePanSearch(
     const LaneDetectionResult & left,
     const LaneDetectionResult & yellow,
     const LaneDetectionResult & right,
+    const LanePath & lane_path,
     const rclcpp::Time & frame_stamp)
 {
     // ------------------------------------------------------------
@@ -5157,7 +5538,7 @@ void KauLaneDetectionNode::updatePanSearch(
     // 수 있다 — 되돌릴 때 재빌드가 필요 없어야 하기 때문이다.
     //
     // 아래 상태기계는 한 줄도 건드리지 않았다. 여기서 조기 반환하지
-    // 않으면(기능 꺼짐 / 측위 없음 / 전역경로 없음) 예전 동작 그대로다.
+    // 않으면(기능 꺼짐 / 근거 없음) 예전 동작 그대로다.
     // ------------------------------------------------------------
 
     pan_aim_enable_ =
@@ -5169,6 +5550,23 @@ void KauLaneDetectionNode::updatePanSearch(
     pan_aim_gain_ =
         this->get_parameter("pan_aim_gain").as_double();
 
+    pan_aim_source_ =
+        this->get_parameter("pan_aim_source").as_string();
+
+    pan_aim_min_evidence_cm_ =
+        this->get_parameter("pan_aim_min_evidence_cm").as_double();
+
+    pan_aim_deadband_deg_ =
+        this->get_parameter("pan_aim_deadband_deg").as_double();
+
+    pan_aim_hold_frames_ =
+        static_cast<int>(
+            this->get_parameter("pan_aim_hold_frames").as_int()
+        );
+
+    pan_aim_fov_margin_deg_ =
+        this->get_parameter("pan_aim_fov_margin_deg").as_double();
+
 
     last_pan_aim_valid_ = false;
 
@@ -5178,23 +5576,123 @@ void KauLaneDetectionNode::updatePanSearch(
         pan_search_enable_
     )
     {
+        // --------------------------------------------------------
+        // 근거 선택
+        //
+        //   lane    이 노드가 방금 만든 경로 (측위 불필요, 기본)
+        //   global  /path/global + 측위 (예전 동작)
+        //
+        // 아는 값이 아니면 lane 으로 본다 — 오타로 카메라가 통째로
+        // 죽는 것보다 기본 동작으로 흐르는 쪽이 낫다.
+        // --------------------------------------------------------
+
+        const bool use_global = (pan_aim_source_ == "global");
+
+        if (
+            !use_global &&
+            pan_aim_source_ != "lane"
+        )
+        {
+            RCLCPP_WARN_THROTTLE(
+                this->get_logger(),
+                *this->get_clock(),
+                5000,
+                "pan_aim_source 가 '%s' 다 (lane | global). "
+                "lane 으로 본다.",
+                pan_aim_source_.c_str()
+            );
+        }
+
+
         bool aim_valid = false;
 
-        const double aim_deg =
-            panAimGoalDeg(
-                lookupVehiclePose(frame_stamp),
-                &aim_valid
-            );
+        double aim_deg =
+            use_global
+                ? panAimGoalDeg(
+                      lookupVehiclePose(frame_stamp),
+                      &aim_valid
+                  )
+                : panAimGoalDegFromLane(
+                      lane_path,
+                      &aim_valid
+                  );
+
+
+        // --------------------------------------------------------
+        // 근거가 빈 프레임은 직전 조준각으로 버틴다
+        //
+        // 여기서 0 으로 되돌리면 안 된다. "안 보임 -> 정면 복귀 ->
+        // 보임 -> 다시 조준" 이 §8 실측 왕복(15초 9회)의 형태
+        // 그대로다. 점선 공백 한두 장, 가림 한두 장은 홀드로 넘긴다.
+        //
+        // 한도를 넘기면 조준을 포기하고 아래 탐색 상태기계로 넘어간다
+        // — 차선이 통째로 사라진 상황은 "찾아 도는" 쪽이 맡는 게 맞다.
+        // --------------------------------------------------------
+
+        bool holding = false;
+
+        if (
+            !aim_valid &&
+            pan_aim_goal_init_ &&
+            pan_aim_hold_streak_ < pan_aim_hold_frames_
+        )
+        {
+            aim_deg = pan_aim_goal_deg_;
+
+            aim_valid = true;
+
+            holding = true;
+
+            ++pan_aim_hold_streak_;
+        }
+
 
         if (aim_valid)
         {
-            last_pan_aim_deg_ = aim_deg;
+            if (!holding)
+            {
+                pan_aim_hold_streak_ = 0;
+            }
+
+
+            // 상한 — pan_max_deg 와 "근거가 화면에 남는 각" 중
+            // 작은 쪽. commandPan 이 pan_max_deg 로 한 번 더
+            // 자르지만 데드밴드 비교를 자른 값끼리 해야 상한에
+            // 붙어 있는 동안 목표가 흔들리지 않는다.
+            const double limit_deg = panAimLimitDeg();
+
+            aim_deg =
+                std::clamp(
+                    aim_deg,
+                    -limit_deg,
+                    limit_deg
+                );
+
+
+            // 데드밴드 — 목표를 다시 세울 만큼 달라졌을 때만
+            // 세운다. 매 프레임 목표가 미세하게 바뀌면 램프가
+            // 계속 다시 출발해 "꺾다 말다" 로 보인다. 비교
+            // 기준이 직전 조준각이 아니라 **직전 목표각**이라
+            // 오차가 누적되지 않는다 (상한 = 데드밴드).
+            if (
+                !pan_aim_goal_init_ ||
+                std::abs(aim_deg - pan_aim_goal_deg_) >=
+                    pan_aim_deadband_deg_
+            )
+            {
+                pan_aim_goal_deg_ = aim_deg;
+
+                pan_aim_goal_init_ = true;
+            }
+
+
+            last_pan_aim_deg_ = pan_aim_goal_deg_;
 
             last_pan_aim_valid_ = true;
 
-            commandPan(aim_deg);
+            commandPan(pan_aim_goal_deg_);
 
-            // 상태기계를 Idle 로 눌러 둔다. 측위가 끊겨 아래로
+            // 상태기계를 Idle 로 눌러 둔다. 근거가 끊겨 아래로
             // 흘러가게 될 때 낡은 상태/카운트에서 재개하지 않도록.
             pan_state_ = PanSearchState::Idle;
 
@@ -5214,15 +5712,24 @@ void KauLaneDetectionNode::updatePanSearch(
         }
 
 
-        // 측위나 전역경로가 아직 없다. 아래 탐색 상태기계로 흘려
-        // 보낸다 — 조준이 유일한 근거였다면 이 구간에서 카메라가
-        // 통째로 죽는다 (§9 가 시야 기반 근거를 따로 둔 이유와 같다).
+        // 조준 포기. 아래 탐색 상태기계로 흘려 보낸다 — 조준이
+        // 유일한 근거였다면 이 구간에서 카메라가 통째로 죽는다
+        // (§9 가 시야 기반 근거를 따로 둔 이유와 같다).
+        //
+        // 홀드 상태를 끊어 둔다. 다음에 근거가 돌아오면 낡은
+        // 목표각이 아니라 그때의 조준각에서 새로 시작해야 한다.
+        pan_aim_hold_streak_ = 0;
+
+        pan_aim_goal_init_ = false;
+
         RCLCPP_WARN_THROTTLE(
             this->get_logger(),
             *this->get_clock(),
             5000,
-            "Pan 조준 불가 (측위 또는 /path/global 없음). "
-            "탐색 상태기계로 대체한다."
+            "%s. 탐색 상태기계로 대체한다.",
+            use_global
+                ? "Pan 조준 불가 (측위 또는 /path/global 없음)"
+                : "Pan 조준 불가 (차선 근거 부족)"
         );
     }
 
@@ -6056,6 +6563,302 @@ int KauLaneDetectionNode::pathGate(
 //   3차면 사분원을 충분히 담는다. (예전 코드는 x=f(y) 2차라
 //   코너를 아예 표현조차 못 했다.)
 // ================================================================
+
+// ================================================================
+// 차선 한 줄 -> quintic Bezier 경로  (/lane/left, /lane/right)
+//
+// buildCenterlinePath 의 3-b ~ 8 절과 **같은 식**이다. 다른 것은
+// 입력이 추적점 하나라는 것뿐이라 1~3 절(후보 합성 / spine 선정 /
+// 이탈 제거 / s 통일)이 통째로 필요 없다 — 합칠 후보가 없으므로
+// 그 점열 자체가 곧 spine 이고 s 는 그 위 누적 호길이다.
+//
+// 중심선 경로는 이 함수를 거치지 않는다. buildCenterlinePath 는
+// 한 줄도 안 건드렸으므로 /lane/center 결과는 그대로다.
+// ================================================================
+
+KauLaneDetectionNode::LanePath KauLaneDetectionNode::buildEdgePath(
+    const LaneDetectionResult & lane,
+    int bev_width,
+    int bev_height,
+    double camera_yaw_deg)
+{
+    LanePath path;
+
+    double sx = 0.0;
+
+    double sy = 0.0;
+
+    double x_base = 0.0;
+
+    if (!bevScale(sx, sy, x_base))
+    {
+        return path;
+    }
+
+
+    // 2차 적합에 최소 4점이 필요하다 (buildCenterlinePath 4절의
+    // order 결정과 같은 기준).
+    if (
+        !lane.valid ||
+        lane.track_px.size() < 4
+    )
+    {
+        return path;
+    }
+
+    const std::vector<cv::Point2d> & pts = lane.track_px;
+
+
+    // ------------------------------------------------------------
+    // 누적 호길이 (buildCenterlinePath 2절)
+    // ------------------------------------------------------------
+
+    std::vector<double> ss(pts.size(), 0.0);
+
+    std::vector<double> xs(pts.size());
+
+    std::vector<double> ys(pts.size());
+
+    std::vector<double> ws(pts.size(), 1.0);
+
+    for (
+        std::size_t i = 0;
+        i < pts.size();
+        ++i
+    )
+    {
+        if (i > 0)
+        {
+            ss[i] =
+                ss[i - 1] +
+                cv::norm(pts[i] - pts[i - 1]);
+        }
+
+        xs[i] = pts[i].x;
+
+        ys[i] = pts[i].y;
+    }
+
+    const double s_max = ss.back();
+
+    if (!(s_max > 1e-6))
+    {
+        return path;
+    }
+
+
+    // ------------------------------------------------------------
+    // 3-b. 실관측 구간 — 점열이 끊긴 지점까지만 근거로 인정한다
+    // ------------------------------------------------------------
+
+    double cover_ratio = 1.0;
+
+    {
+        const double gap_limit =
+            2.0 * std::max(4.0, track_step_px_);
+
+        double s_cover = s_max;
+
+        for (
+            std::size_t k = 1;
+            k < ss.size();
+            ++k
+        )
+        {
+            if (ss[k] - ss[k - 1] > gap_limit)
+            {
+                s_cover = ss[k - 1];
+
+                break;
+            }
+        }
+
+        cover_ratio =
+            std::clamp(s_cover / s_max, 0.0, 1.0);
+    }
+
+
+    // ------------------------------------------------------------
+    // 4. 내부 적합 x(s), y(s)
+    // ------------------------------------------------------------
+
+    const int npts =
+        static_cast<int>(ss.size());
+
+    const int order =
+        (npts >= 6) ? 3 :
+        (npts >= 4) ? 2 : 1;
+
+    std::vector<double> cx_s;
+
+    std::vector<double> cy_s;
+
+    if (
+        !polyFitW(ss, xs, ws, order, cx_s) ||
+        !polyFitW(ss, ys, ws, order, cy_s)
+    )
+    {
+        return path;
+    }
+
+
+    // ------------------------------------------------------------
+    // 5~6. 멱기저 -> Bernstein -> degree elevation
+    //
+    // BEV px -> base_link cm 환산이 여기 들어 있다. 중심선과 완전히
+    // 같은 식이어야 좌/우/중심이 같은 좌표계로 나간다.
+    // ------------------------------------------------------------
+
+    const double h_px =
+        static_cast<double>(bev_height);
+
+    const double cx_bev =
+        0.5 * static_cast<double>(bev_width);
+
+    std::vector<kau::bezier::Point2> power(order + 1);
+
+    double s_pow = 1.0;
+
+    for (
+        int k = 0;
+        k <= order;
+        ++k
+    )
+    {
+        const double ax = cx_s[order - k];
+
+        const double ay = cy_s[order - k];
+
+        if (k == 0)
+        {
+            power[0].x =
+                x_base + path_x_offset_cm_ +
+                (h_px - ay) * sy;
+
+            power[0].y =
+                path_y_offset_cm_ +
+                sx * (cx_bev - ax);
+        }
+        else
+        {
+            s_pow *= s_max;
+
+            power[k].x = -sy * ay * s_pow;
+
+            power[k].y = -sx * ax * s_pow;
+        }
+    }
+
+    const kau::bezier::Ctrl fitted =
+        kau::bezier::powerToBernstein(power);
+
+    path.ctrl =
+        kau::bezier::elevate(
+            fitted,
+            kau::bezier::DEGREE
+        );
+
+
+    // ------------------------------------------------------------
+    // 6-b. 카메라 요(yaw) 회전 보정 — 중심선과 같은 피벗/부호
+    // ------------------------------------------------------------
+
+    if (std::abs(camera_yaw_deg) > 1e-9)
+    {
+        const double yaw_rad = camera_yaw_deg * M_PI / 180.0;
+
+        const double cos_yaw = std::cos(yaw_rad);
+
+        const double sin_yaw = std::sin(yaw_rad);
+
+        for (kau::bezier::Point2 & cp : path.ctrl)
+        {
+            const double x_rel = cp.x - pan_pivot_offset_x_cm_;
+
+            const double y_rel = cp.y - pan_pivot_offset_y_cm_;
+
+            cp.x =
+                pan_pivot_offset_x_cm_ +
+                x_rel * cos_yaw - y_rel * sin_yaw;
+
+            cp.y =
+                pan_pivot_offset_y_cm_ +
+                x_rel * sin_yaw + y_rel * cos_yaw;
+        }
+    }
+
+
+    // ------------------------------------------------------------
+    // 7. 퇴화 검사
+    // ------------------------------------------------------------
+
+    if (!kau::bezier::isRegular(path.ctrl))
+    {
+        return path;
+    }
+
+
+    // ------------------------------------------------------------
+    // 8. 진단값
+    //
+    // confidence 근거량 30 은 중심선과 같은 상수를 쓴다 — 한 줄짜리
+    // 추적이라 창 수가 중심선보다 적게 나오는 것은 사실이지만,
+    // 하류가 세 경로의 confidence 를 같은 자로 비교해야 한다.
+    // ------------------------------------------------------------
+
+    path.source_windows = lane.found_count;
+
+    path.length_cm =
+        kau::bezier::segLength(path.ctrl);
+
+    path.kappa_max =
+        kau::bezier::kappaMaxExact(path.ctrl);
+
+    path.valid_length_cm =
+        kau::bezier::segLength(
+            path.ctrl,
+            0.0,
+            cover_ratio
+        );
+
+    path.confidence =
+        std::clamp(
+            static_cast<double>(path.source_windows) / 30.0,
+            0.0,
+            1.0
+        ) * cover_ratio;
+
+    const kau::bezier::Nearest near =
+        kau::bezier::nearestOnSeg(
+            path.ctrl,
+            kau::bezier::Point2{0.0, 0.0}
+        );
+
+    const kau::bezier::Point2 foot =
+        kau::bezier::evalSeg(path.ctrl, near.u);
+
+    const double th =
+        kau::bezier::heading(path.ctrl, near.u);
+
+    path.cte_cm =
+        -std::sin(th) * (0.0 - foot.x) +
+         std::cos(th) * (0.0 - foot.y);
+
+    path.heading_err =
+        std::remainder(-th, 2.0 * M_PI);
+
+    path.built = true;
+
+
+    // 좌/우 경로에는 중심선의 발행 게이트(pathGate)를 걸지 않는다.
+    // 그 게이트는 "자차가 따라갈 경로" 기준(조향 한계 / 시야이탈)
+    // 이라 도로 경계선에는 뜻이 맞지 않는다. 하류는 confidence 와
+    // valid_length_cm 으로 신뢰도를 판단한다.
+    path.valid = true;
+
+    return path;
+}
+
 
 KauLaneDetectionNode::LanePath KauLaneDetectionNode::buildCenterlinePath(
     const LaneDetectionResult & left,
@@ -7828,23 +8631,6 @@ void KauLaneDetectionNode::imageCallback(
 
 
         // ========================================================
-        // 16-c-2. Pan 탐색 (설계 문서 ⑤)
-        //
-        // 16-a 정리가 끝난 뒤(즉 이번 프레임에 "진짜" 잡혔는지가
-        // found_count 에 확정된 뒤), 16-c 복원과 무관하게 좌/우
-        // 원본 검출 상태를 본다 (복원선은 found_count 가 항상
-        // 0 이므로 여기서 읽어도 16-c 이전과 같은 값이다).
-        // ========================================================
-
-        updatePanSearch(
-            left_lane,
-            yellow_lane,
-            right_lane,
-            rclcpp::Time(msg->header.stamp)
-        );
-
-
-        // ========================================================
         // 16-d. 중심선 -> quintic Bezier 제어점 (공통 경로 형식)
         //
         // 이 노드의 최종 산출물. 이산 좌표가 아니라 제어점 6개다.
@@ -7902,6 +8688,34 @@ void KauLaneDetectionNode::imageCallback(
 
 
         // ========================================================
+        // 16-d-3. Pan 탐색 / 조준 (설계 문서 ⑤)
+        //
+        // 좌/우 검출 상태는 16-a 정리가 끝난 뒤의 값을 본다. 16-c
+        // 복원과는 무관하다 — 복원선은 found_count 가 항상 0 이라
+        // 여기서 읽어도 16-c 이전과 같은 값이다.
+        //
+        // ★ 예전에는 이 호출이 16-c-2, 즉 경로를 짓기 전에 있었다.
+        //   pan_aim_source: "lane" 이 이 프레임의 경로를 근거로
+        //   삼으므로 robustifyPath(EMA) 뒤로 내렸다. 직전 프레임
+        //   경로를 쓰면 14Hz 에서 70ms 지연이고, v_max 요구 각속도
+        //   143deg/s 기준 10도라 못 쓴다.
+        //
+        //   16-c-2 와 여기 사이에는 조기 반환이 없으므로 pan 이
+        //   갱신되지 않는 프레임은 생기지 않는다. buildCenterlinePath
+        //   가 쓰는 camera_yaw_deg 는 panAngleAt() 에서 따로 나오므로
+        //   여기서 pan 을 갱신해도 순환이 생기지 않는다.
+        // ========================================================
+
+        updatePanSearch(
+            left_lane,
+            yellow_lane,
+            right_lane,
+            lane_path,
+            rclcpp::Time(msg->header.stamp)
+        );
+
+
+        // ========================================================
         // 16-e. 경로 발행
         //
         // 게이트를 통과한 경로만 나간다. 기각된 경로는 발행하지
@@ -7914,6 +8728,45 @@ void KauLaneDetectionNode::imageCallback(
         publishLanePath(
             lane_path,
             msg->header.stamp
+        );
+
+
+        // ========================================================
+        // 좌/우 흰선 경로 (/lane/left, /lane/right)
+        //
+        // 중심선과 같은 프레임의 같은 추적 결과에서 만든다. 하류가
+        // 이 둘을 corridor 물리 경계로 쓰므로 중심선과 시간 정합이
+        // 맞아야 한다 — 그래서 여기서 같이 낸다.
+        //
+        // camera_yaw_deg 는 중심선이 쓴 값을 그대로 넘긴다 (영상
+        // 시각의 pan 각). 셋이 같은 회전을 받아야 base_link 기준
+        // 좌표계가 일치한다.
+        //
+        // 한쪽이 안 잡히면 buildEdgePath 가 valid=false 를 내고
+        // publishLanePath 가 조용히 건너뛴다. 하류는 그 토픽이
+        // 잠시 끊기는 것으로 본다.
+        // ========================================================
+
+        publishLanePath(
+            buildEdgePath(
+                left_lane,
+                bev_frame.cols,
+                bev_frame.rows,
+                camera_yaw_deg
+            ),
+            msg->header.stamp,
+            lane_left_publisher_
+        );
+
+        publishLanePath(
+            buildEdgePath(
+                right_lane,
+                bev_frame.cols,
+                bev_frame.rows,
+                camera_yaw_deg
+            ),
+            msg->header.stamp,
+            lane_right_publisher_
         );
 
 
@@ -8280,13 +9133,19 @@ void KauLaneDetectionNode::imageCallback(
         //   csrc     : coff 판정 근거 (0 없음 / 1 노란선 /
         //              2 흰선 두 개 / 3 흰선 하나+맵 단면 /
         //              4 직전 유지)
+        //   paim     : pan 조준 목표각 [deg]. 왼쪽이 +
+        //   pav      : 이 프레임에 조준이 유효했는가 (0 이면 탐색 폴백)
+        //   pasrc    : 조준 근거 (0 차선 / 1 전역경로)
+        //   pahold   : 근거 부족으로 직전 조준각을 유지한 연속 프레임
+        //              수. 0 이 아닌 값이 오래 이어지면 근거가 계속
+        //              모자란다는 뜻이다 (pan_aim_min_evidence_cm 확인)
         // ========================================================
 
         {
             // 필드를 늘리면 여기도 같이 늘릴 것. snprintf 는 넘치면
             // 조용히 자르고, lane_failure_logger.py 는 잘린 줄에서
             // 뒤쪽 필드를 못 찾는다.
-            char rec[416];
+            char rec[448];
 
             // 제어점 최대 횡편차. 게이트3(시야이탈)이 보는 값 그대로.
             double max_lat = 0.0;
@@ -8316,7 +9175,7 @@ void KauLaneDetectionNode::imageCallback(
                 "pdfix=%.2f pdext=%d "
                 "conf=%.2f edev=%.1f egate=%.1f erej=%d "
                 "pbend=%.1f pvis=%d "
-                "paim=%.1f pav=%d",
+                "paim=%.1f pav=%d pasrc=%d pahold=%d",
                 left_lane.found_count,
                 yellow_lane.found_count,
                 right_lane.found_count,
@@ -8347,7 +9206,9 @@ void KauLaneDetectionNode::imageCallback(
                 last_bend_deg_,
                 last_visible_at_zero_,
                 last_pan_aim_deg_,
-                last_pan_aim_valid_ ? 1 : 0
+                last_pan_aim_valid_ ? 1 : 0,
+                (pan_aim_source_ == "global") ? 1 : 0,
+                pan_aim_hold_streak_
             );
 
             std_msgs::msg::String status_msg;

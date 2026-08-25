@@ -33,9 +33,11 @@ ROS 쪽에는 image_raw 만 bridge 되어 있어서 camera_info 가 비어 있�
     params_file:=/path/to.yaml  다른 파라미터 파일로 교체
     pan_search:=false           카메라 pan 탐색 끄기 (기본: yaml)
     pan_aim:=false              카메라 pan 조준 끄기 (기본: yaml)
+    pan_aim_source:=global      조준 근거를 전역경로로 (기본: yaml = lane)
 
-pan_search / pan_aim 은 안 주면 yaml 값(pan_search_enable ·
-pan_aim_enable)이 그대로 산다. 줄 때만 덮는다.
+pan_search / pan_aim / pan_aim_source 는 안 주면 yaml 값
+(pan_search_enable · pan_aim_enable · pan_aim_source)이 그대로 산다.
+줄 때만 덮는다.
 
 pan_search 는 노드가 생성자에서 한 번만 읽는 값이라
 ros2 param set 으로는 바꿀 수 없다. 기동 시점에 넣어야 한다.
@@ -83,6 +85,11 @@ PAN_OVERRIDES = (
     ('pan_aim', 'pan_aim_enable'),
 )
 
+# 같은 규칙(빈 값 = 안 줬다)이지만 bool 로 바꾸지 않고 문자열 그대로 넣는다.
+PAN_STR_OVERRIDES = (
+    ('pan_aim_source', 'pan_aim_source'),
+)
+
 
 def lane_detection_node(context, *unused):
     """인지 노드 하나를 만든다.
@@ -99,6 +106,11 @@ def lane_detection_node(context, *unused):
         raw = LaunchConfiguration(arg).perform(context)
         if raw:
             overrides[param] = raw.lower() == 'true'
+
+    for arg, param in PAN_STR_OVERRIDES:
+        raw = LaunchConfiguration(arg).perform(context)
+        if raw:
+            overrides[param] = raw
 
     return [Node(
         package=PACKAGE,
@@ -179,10 +191,21 @@ def generate_launch_description():
             'pan_aim',
             default_value='',
             description=(
-                '전역경로 룩어헤드로 카메라를 미리 돌리는 조준 '
+                '룩어헤드 점을 향해 카메라를 미리 돌리는 조준 '
                 '(기본: yaml). 켜지면 pan_search 상태기계 대신 '
-                '동작하고, 측위/전역경로가 없으면 자동으로 '
-                '상태기계로 넘어간다'
+                '동작하고, 근거가 없으면 자동으로 상태기계로 '
+                '넘어간다'
+            ),
+        ),
+
+        DeclareLaunchArgument(
+            'pan_aim_source',
+            default_value='',
+            description=(
+                "조준 근거 (기본: yaml = lane). "
+                "lane = 이 노드가 만든 차선 경로 (측위 불필요), "
+                "global = /path/global + 측위. "
+                "주행 중 ros2 param set 으로도 바꿀 수 있다"
             ),
         ),
 

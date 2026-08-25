@@ -703,6 +703,70 @@
             bool * out_valid) const;
 
 
+        // ================================================================
+        // Pan 조준 — 차선 기반 (pan_aim_source: "lane", 기본)
+        //
+        // 위 panAimGoalDeg 와 같은 "룩어헤드 점의 방위각" 이지만 근거가
+        // /path/global + 측위가 아니라 **이 노드가 방금 만든 경로**다.
+        // 측위도 TF 도 전역경로도 필요 없다.
+        //
+        // 성립하는 이유는 path.ctrl 이 이미 base_link 기준이기 때문이다
+        // — buildCenterlinePath 가 camera_yaw_deg 만큼 pan 피벗 중심으로
+        // 제어점을 회전시켜 놓는다. 즉 여기서 잰 방위각은 "카메라가 보는
+        // 방향 기준" 이 아니라 **차체 기준 절대각**이다. 카메라를 10도
+        // 돌려도 차선이 그대로면 다음 프레임에 나오는 값은 같다. 각이
+        // 적분되지 않으므로 §8 되먹임(검출->pan->검출)의 발산 모드가
+        // 생기지 않는다.
+        //
+        // ★ 다만 **완전히 열린 고리는 아니다.** 그 회전 보정에 쓰는 각도는
+        //   실기에서 서보 인코더가 없어 명령의 에코다. 서보 추종 지연
+        //   delta = theta_cmd - theta_act 만큼 경로가 과회전되고, 그것이
+        //   방위각에 그대로 더해져 다음 명령을 키운다:
+        //
+        //     카메라가 실제로 본 각   psi - theta_act
+        //     +theta_cmd 회전 보정 -> psi + (theta_cmd - theta_act)
+        //
+        //   DC 루프게인이 1이면 이 오차가 안 죽는다. 그래서 이 소스에서는
+        //   pan_aim_gain 을 1 미만으로 둔다 (config 0.7). 전역경로 소스는
+        //   고리 자체가 없어 1.0 이 안전했다 — 소스를 바꿀 때 gain 도
+        //   같이 봐야 하는 이유다.
+        //
+        // 룩어헤드 거리는 근거 길이로 자른다. path.valid_length_cm 은
+        // "근거 점이 끊기기 전까지의 호길이" 이고 그 뒤는 외삽이므로
+        // (buildCenterlinePath 8절), 가림이 생기면 이 값이 저절로 줄어든다.
+        // 즉 **가려지지 않은 데까지만 보고 조준한다** 가 클램프 한 줄로
+        // 구현된다. 따로 가림 검출을 두지 않는다.
+        //
+        // 거리 기준점 주의: valid_length_cm 도 여기 이분탐색도 **경로
+        // 시작점**(카메라 앞 x_base_cm, 약 32cm) 기준이다. 반면
+        // pan_aim_lookahead_m 은 **자차 기준** 거리로 읽히는 이름이라,
+        // 전역경로 소스와 의미를 맞추려고 x_base_cm 을 빼고 들어간다.
+        //
+        // 무효 조건 (out_valid = false, 호출측이 홀드/폴백을 정한다):
+        //   - path.valid 가 아니다 (게이트 기각 포함)
+        //   - valid_length_cm < pan_aim_min_evidence_cm
+        //   - 조준점이 자차 원점과 겹쳐 방위가 정의되지 않는다
+        // ================================================================
+        double panAimGoalDegFromLane(
+            const LanePath & path,
+            bool * out_valid) const;
+
+
+        // 조준각의 상한 [deg]. pan_max_deg 와 "근거가 화면에 남는
+        // 각도" 중 작은 쪽이다.
+        //
+        // 후자는 수평 반각 atan(cx/fx) 에서 pan_aim_fov_margin_deg 를
+        // 뺀 값이다 (countVisibleAtZeroPan 과 같은 기하). 너무 돌려서
+        // 근거를 잃고 -> 조준 무효 -> 복귀 -> 다시 보임 이 되풀이되는
+        // 것을 막는 안전턱이다.
+        //
+        // 실측 fx 201.4 / cx 240 이면 반각 50도라 여유 47도 > pan_max
+        // 30도 로 **지금 광학에서는 걸리지 않는다.** pan_max_deg 를
+        // 올리거나 렌즈를 바꿀 때 살아나는 쪽이다. intrinsic 이 없으면
+        // pan_max_deg 를 그대로 반환한다.
+        double panAimLimitDeg() const;
+
+
         // 소실된 쪽 dir 방향, 전방 obstacle_ahead_max_m_ 이내에 장애물이
         // 있는가. dir 은 pan_search_dir_ 와 같은 규약 (+1 왼쪽 / -1 오른쪽).
         //
@@ -745,10 +809,17 @@
         // 제한의 dt 와 Holding 경과시간, 장애물 판정의 scan 나이를
         // 전부 이 시계로 잰다. node clock 을 쓰면 use_sim_time 설정과
         // RTF 에 따라 전부 어긋난다.
+        //
+        // lane_path 는 이 프레임의 (EMA 까지 끝난) 중심선 경로다.
+        // pan_aim_source: "lane" 일 때 조준 근거가 된다. 그래서 이
+        // 호출은 16-c-2 가 아니라 **16-d-2(robustifyPath) 뒤**에 있다
+        // — 직전 프레임 경로를 쓰면 14Hz 에서 70ms 지연이고, v_max
+        // 요구 각속도 143deg/s 기준 10도라 못 쓴다.
         void updatePanSearch(
             const LaneDetectionResult & left,
             const LaneDetectionResult & yellow,
             const LaneDetectionResult & right,
+            const LanePath & lane_path,
             const rclcpp::Time & frame_stamp);
 
 
@@ -822,9 +893,30 @@
 
         // 제어점 -> KauPath 적재 후 발행 (docs/경로_형식.md 9.5).
         // 게이트를 통과한 경로만 발행한다.
+        // pub 이 null 이면 lane_path_publisher_(/lane/center) 로 낸다.
+        // 좌/우 흰선 경로는 같은 함수에 publisher 만 바꿔 넘긴다 —
+        // map 변환 / 단위 / 필드 채우기가 셋 다 같아야 하기 때문이다.
         void publishLanePath(
             const LanePath & path,
-            const rclcpp::Time & stamp);
+            const rclcpp::Time & stamp,
+            const rclcpp::Publisher<kau_msgs::msg::KauPath>::SharedPtr &
+                pub = nullptr);
+
+
+        // 차선 한 줄(추적점 하나)을 quintic Bezier 경로로 적합한다.
+        //
+        // buildCenterlinePath 의 3-b ~ 8 절과 같은 식이다. 다른 것은
+        // 입력이 "세 차선을 합성한 중심선 후보" 가 아니라 추적점
+        // 하나라는 것뿐이라, 1~3 절(후보 합성 / spine 선정 / 이탈
+        // 제거)이 통째로 필요 없다.
+        //
+        // 좌/우 흰선을 /lane/left, /lane/right 로 내보내기 위한 것이다
+        // (측위 없이 corridor 경계를 하류에 넘기는 용도).
+        LanePath buildEdgePath(
+            const LaneDetectionResult & lane,
+            int bev_width,
+            int bev_height,
+            double camera_yaw_deg);
 
 
         // BEV 축척 [cm/px]. 세로는 intrinsic + 소실점에서 유도.
@@ -915,6 +1007,16 @@
         rclcpp::Publisher<kau_msgs::msg::KauPath>::SharedPtr
             lane_path_publisher_;
 
+        // 좌/우 흰선 경로. /lane/center 와 같은 KauPath 형식이고
+        // frame_id 도 path_frame_id_ 를 따른다. 하류(local planner)가
+        // 이 둘을 corridor 물리 경계로 쓴다 — 맵/측위를 안 쓰기 위한
+        // 대체 경로다.
+        rclcpp::Publisher<kau_msgs::msg::KauPath>::SharedPtr
+            lane_left_publisher_;
+
+        rclcpp::Publisher<kau_msgs::msg::KauPath>::SharedPtr
+            lane_right_publisher_;
+
         // RViz 전용. BEST_EFFORT. 제어 경로는 여기 의존하지 않는다.
         rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr
             viz_path_publisher_;
@@ -923,6 +1025,34 @@
         // [rad] 으로 받아 ±30 deg 로 다시 클램프한다.
         rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr
             camera_pan_publisher_;
+
+        // Tilt 명령. pan 과 달리 제어량이 아니라 **기동 시 한 번 세우는
+        // 고정 자세**다. bev_vanishing_y 가 이 각도를 전제하므로(수평
+        // 대비 9 px) 누가 안 세워 주면 BEV 기하가 그만큼 어긋난다.
+        rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr
+            camera_tilt_publisher_;
+
+        // 기동 직후 몇 번 반복 발행하고 스스로 멈추는 타이머.
+        // 한 번만 쏘면 드라이버/브리지가 늦게 뜰 때 유실되고,
+        // 계속 쏘면 웹UI 틸트 슬라이더를 매초 되돌려 버린다.
+        rclcpp::TimerBase::SharedPtr camera_tilt_timer_;
+
+        int camera_tilt_ticks_left_ = 0;
+
+
+        // 기동 시 세울 tilt 각 [deg]. **부호는 /camera/tilt 규약 그대로
+        // + 가 아래**다 (camera_tilt_joint axis = +Y, URDF/SDF 공통).
+        // bev_vanishing_y 유도에 쓰는 광학 pitch 부호와는 반대이니
+        // 헷갈리지 말 것 — 그쪽은 아래가 음수다.
+        double camera_tilt_deg_ = 0.0;
+
+        bool camera_tilt_enable_ = false;
+
+        double camera_tilt_repeat_s_ = 0.0;
+
+
+        // 기동 tilt 를 한 번 발행한다 (타이머 콜백).
+        void publishCameraTilt();
 
 
         // ================================================================
@@ -1293,6 +1423,49 @@
         double last_pan_aim_deg_ = 0.0;
 
         bool last_pan_aim_valid_ = false;
+
+
+        // 조준 근거. "lane" (기본) 또는 "global".
+        //
+        //   lane    이 노드가 방금 만든 중심선 경로 (측위 불필요)
+        //   global  /path/global + 측위 (예전 동작)
+        //
+        // 매 프레임 다시 읽으므로 실차에서 주행 중 A/B 비교가 된다.
+        // 아는 값이 아니면 "lane" 으로 보고 5초에 한 번 경고한다.
+        std::string pan_aim_source_;
+
+        // 조준하려면 근거(valid_length_cm)가 최소 이만큼 [cm] 있어야
+        // 한다. 짧은 점열은 어떤 코너에서도 직선으로 보이므로
+        // (CLAUDE.md §8 "짧은 점열로는 판정하지 않는다"), 여기서도
+        // 같은 이유로 하한을 둔다. lane 소스에서만 쓴다.
+        double pan_aim_min_evidence_cm_;
+
+        // 조준각이 직전 목표에서 이만큼 [deg] 넘게 달라졌을 때만
+        // 목표를 다시 세운다. 램프가 매 프레임 다시 출발하는 것을
+        // 막는다 (그게 "꺾다 말다" 로 보인다).
+        double pan_aim_deadband_deg_;
+
+        // 근거가 모자란 프레임을 몇 장까지 직전 조준각으로 버틸지.
+        //
+        // 여기서 0 으로 되돌리면 안 된다 — "안 보임 -> 정면 복귀 ->
+        // 보임 -> 다시 조준" 이 §8 실측 왕복(15초 9회)의 형태 그대로다.
+        // 이 장수를 넘기면 조준을 포기하고 §8 탐색 상태기계로 넘긴다
+        // (차선이 통째로 사라진 상황은 탐색이 맡는 게 맞다).
+        int pan_aim_hold_frames_;
+
+        // panAimLimitDeg 의 FOV 여유 [deg]. 선언부 주석 참고.
+        double pan_aim_fov_margin_deg_;
+
+        // 근거 부족으로 직전 조준각을 유지하고 있는 연속 프레임 수.
+        // 근거가 돌아오면 0 으로 끊는다. status 의 pahold.
+        int pan_aim_hold_streak_ = 0;
+
+        // 데드밴드 비교 기준이 되는 "마지막으로 세운 목표각".
+        // pan_goal_deg_ 를 직접 보면 안 된다 — 그건 탐색 상태기계도
+        // 같이 쓰는 값이라 폴백을 거친 뒤 기준이 오염된다.
+        double pan_aim_goal_deg_ = 0.0;
+
+        bool pan_aim_goal_init_ = false;
 
         // 재검출 인정에 필요한 최소 창 수 (Searching -> Holding).
         //

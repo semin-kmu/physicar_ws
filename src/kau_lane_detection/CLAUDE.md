@@ -494,26 +494,114 @@ FOV 가 넓어 pan 15° 정도에서는 대부분의 점이 정면에서도 보�
 
 **§8 의 탐색 상태기계를 대체한다.** `pan_aim_enable: true` (기본)이면
 상태기계는 돌지 않고 `Idle` 로 눌려 있는다. §8/§9 는 fallback 으로만
-남는다 (측위나 `/path/global` 이 없을 때).
+남는다 (근거가 없을 때).
 
 ### 왜 바꿨나
 
-| | §8 탐색 (되먹임) | 조준 (앞먹임) |
+| | §8 탐색 | 조준 |
 | --- | --- | --- |
-| 명령 근거 | 차선 검출 결과 | `/path/global` + 측위 |
-| 고리 | 검출 -> pan -> 검출 (닫힘) | 검출을 안 거침 (열림) |
-| 발진 | **있다** (§8 실측 15초 9회 왕복) | 구조적으로 없다 |
+| 판정 | 소실 래치 (3프레임 연속 miss) | 매 프레임 연속량 |
+| 명령 | 3도씩 훑는 이산 스텝 | 방위각 그대로 |
+| 발진 | **있다** (§8 실측 15초 9회 왕복) | 래치가 없어 구조적으로 없다 |
 | 지연 | 3프레임 소실 감지 + 램프 + 정착 + 3도 스텝 | 없음 |
 
 탐색은 "놓친 뒤에 찾는" 방식이라 커브가 끝날 무렵 도착한다. 조준은
 도로가 휜 만큼 미리 돌린다.
 
+> 발진의 원인은 "검출을 근거로 삼는 것" 자체가 아니라 **소실 래치**였다.
+> §8 은 "안 보임 → 돌린다 → 보임 → 복귀 → 안 보임" 을 상태로 왕복했다.
+> 조준은 같은 검출을 쓰더라도 래치 없이 매 프레임 각을 다시 내므로
+> 그 모드가 없다. 아래 `lane` 근거가 성립하는 이유가 이것이다.
+
+### 조준 근거 — `pan_aim_source`
+
+| | `lane` (기본) | `global` |
+| --- | --- | --- |
+| 근거 | 이 노드가 방금 만든 `LanePath.ctrl` | `/path/global` + 측위 |
+| 측위 | 필요 없음 | AMCL 필요 (Cartographer 금지) |
+| 앞먹임 | 보이는 데까지만 | 안 보이는 커브도 안다 |
+| 권장 gain | **0.7** (아래) | 1.0 |
+
+`lane` 이 성립하는 근거는 **`path.ctrl` 이 이미 base_link 기준**이라는
+것이다 — `buildCenterlinePath` 가 `camera_yaw_deg` 만큼 pan 피벗 중심으로
+제어점을 회전시켜 둔다 (§8 "회전 각도는 영상 시각의 값을 쓴다"). 거기서
+잰 방위각은 카메라 기준이 아니라 **차체 기준 절대각**이라, 카메라를 10도
+돌려도 차선이 그대로면 다음 프레임 값이 같다. 각이 적분되지 않는다.
+
+> BEV 픽셀에서 잰 값(`trackBendDeg` 등)을 그대로 조준각으로 쓰면 안 되는
+> 이유가 여기 있다. 그쪽은 카메라 좌표계라 pan 할수록 값이 다시 커져
+> 발산한다. §9 처럼 **불리언 트리거**로는 되지만 연속 제어에는 못 쓴다.
+> (덤으로 `trackBendDeg` 는 `std::abs` 라 부호가 없다.)
+
+**가림 대응은 `valid_length_cm` 이 전부다.** 그 값은 근거 점이 끊기기 전
+까지의 호길이이고 그 뒤는 외삽이므로, 가림이 생기면 저절로 줄어든다.
+조준 거리를 그 값으로 자르면 "가려지지 않은 데까지만 보고 조준한다" 가
+클램프 한 줄이 된다. 별도의 가림 검출을 두지 않는다.
+
+### ★ `lane` 은 완전히 열린 고리가 아니다 — gain 을 1 미만으로
+
+회전 보정에 쓰는 각도가 **실기에서는 서보 인코더가 없어 명령의 에코**다.
+서보 추종 지연 `δ = θ_cmd − θ_act` 만큼 경로가 과회전되고, 그것이 방위각에
+그대로 더해져 다음 명령을 키운다:
+
+```
+카메라가 실제로 본 각    ψ − θ_act
++θ_cmd 만큼 회전 보정 →  ψ + (θ_cmd − θ_act) = ψ + δ
+```
+
+DC 루프게인이 1이면 이 오차가 안 죽는다. 그래서 `lane` 소스의
+`pan_aim_gain` 은 **0.7** 이다. `global` 은 고리 자체가 없어 1.0 이
+안전했다 — **소스를 바꿀 때 gain 도 같이 봐야 한다.**
+
 ### 계산
 
+`global`:
+
 1. `/path/global` 전 구간에서 자차 최근접점 (`nearestOnSeg`)
-2. 거기서 **호길이로** `pan_aim_lookahead_m` (1.0 m) 전진
+2. 거기서 **호길이로** `pan_aim_lookahead_m` 전진
 3. 그 점의 base_link 기준 **방위각**
-4. `pan_aim_gain` (1.0) 배 -> `commandPan` (±`pan_max_deg` 클램프)
+4. `pan_aim_gain` 배
+
+`lane` (`panAimGoalDegFromLane`):
+
+1. `valid_length_cm >= pan_aim_min_evidence_cm` 인지 확인 (아니면 무효)
+2. 조준 거리 `d = min(pan_aim_lookahead_m·100 − x_base_cm, valid_length_cm)`
+   — `x_base_cm` 을 빼는 것은 경로가 카메라 앞 약 32 cm 에서 시작하므로
+   `global` 과 룩어헤드의 뜻을 맞추기 위함이다
+3. 호길이 `d` 인 `u` 를 이분탐색 → `evalSeg` → `atan2(y, x)`
+   (원점이 자차라 뺄 것이 없다)
+4. `pan_aim_gain` 배
+
+공통 후처리 (`updatePanSearch`):
+
+5. `min(pan_max_deg, atan(cx/fx) − pan_aim_fov_margin_deg)` 로 클램프
+6. 직전 **목표각**과 `pan_aim_deadband_deg` 이상 차이날 때만 목표 갱신
+7. `commandPan` → `publishPanRamped` (±`pan_max_deg`, `pan_rate_deg_s`)
+
+### 근거가 빈 프레임 — 홀드, 0 복귀 금지
+
+조준이 무효인 프레임에서 **정면(0)으로 되돌리면 안 된다.** "안 보임 →
+정면 복귀 → 보임 → 다시 조준" 이 §8 실측 왕복(15초 9회)의 형태 그대로다.
+`pan_aim_hold_frames`(14 ≈ 1초) 장까지는 직전 목표각을 유지하고, 그것을
+넘기면 조준을 포기하고 §8 탐색 상태기계로 넘긴다 — 차선이 통째로 사라진
+상황은 "찾아 도는" 쪽이 맡는 게 맞다.
+
+status 의 `pahold` 가 그 연속 장수다. 0 이 아닌 값이 오래 이어지면 근거가
+계속 모자란다는 뜻이므로 `pan_aim_min_evidence_cm` 을 먼저 본다.
+
+### 호출 위치 — 경로를 짓고 **나서** 돈다
+
+`updatePanSearch` 는 16-c-2 가 아니라 **16-d-3**, 즉 `robustifyPath`(EMA)
+뒤에 있다. `lane` 근거가 이 프레임의 경로이기 때문이다. 직전 프레임 경로를
+쓰면 14 Hz 에서 70 ms 지연이고, v_max 요구 각속도 143 deg/s 기준 10° 라
+못 쓴다.
+
+- 16-c-2 와 16-d-3 사이에는 조기 반환이 없다 → pan 이 갱신되지 않는
+  프레임은 생기지 않는다
+- `buildCenterlinePath` 가 쓰는 `camera_yaw_deg` 는 `panAngleAt()` 에서
+  따로 나오므로 여기서 pan 을 갱신해도 순환이 생기지 않는다
+- EMA 를 거친 경로를 쓰므로 조준 신호가 이미 저역통과돼 있다 (§8 탐색에는
+  없던 감쇠다)
 
 호길이는 정확히 잰다 — 구간 전체는 `seg_length`(사전계산), 마지막 부분
 구간만 `segLength()` 이분탐색. §9 의 `curvatureAheadKappa` 가 쓰는 u 균일
@@ -546,6 +634,10 @@ e=0 열은 `d/(2R)` 와 **0.005° 이내로 일치**한다. 포화점이 R = 0.9
 실제로 20 cm 밀려 있으면 차선도 그만큼 밀려 보이므로 카메라가 따라가야
 한다. 방위각은 그 둘을 합쳐서 낸다.
 
+아래는 **`pan_aim_source: global` 일 때만** 해당한다. `lane` 은 측위를
+아예 안 쓰므로 이 표와 경고가 통째로 사라진다 — 그게 `lane` 의 가장 큰
+이점이다.
+
 측위 잡음이 `e` 에 섞여 들어오는 건 맞다. 다만 크기가 무시할 수준이다
 (`kau_localization/README.md` 정지 실측):
 
@@ -565,13 +657,20 @@ e=0 열은 `d/(2R)` 와 **0.005° 이내로 일치**한다. 포화점이 R = 0.9
 
 ### 되돌리기
 
-`pan_aim_enable` 은 `bev_*` 파라미터와 같은 idiom으로 **매 프레임 다시
-읽는다**. `pan_search_enable`(생성자 1회)과 달리 주행 중에도 먹는다.
+`pan_aim_*` 은 `bev_*` 파라미터와 같은 idiom으로 **매 프레임 다시 읽는다**.
+`pan_search_enable`(생성자 1회)과 달리 주행 중에도 먹는다.
 
 ```sh
 ros2 param set /kau_lane_detection_node pan_aim_enable false   # 즉시 §8 로 복귀
+ros2 param set /kau_lane_detection_node pan_aim_source global  # 예전 조준으로
+ros2 param set /kau_lane_detection_node pan_aim_gain 1.0       # global 이면 같이
+
 ros2 launch kau_lane_detection lane_detection.launch.py pan_aim:=false
+ros2 launch kau_lane_detection lane_detection.launch.py pan_aim_source:=global
 ```
+
+실차에서 주행 중 A/B 가 되므로 두 근거를 같은 구간에서 비교할 수 있다.
+비교할 때 `pan_aim_gain` 을 같이 옮기는 것을 잊지 말 것.
 
 §8 상태기계 코드는 **한 줄도 지우지 않았다.** `updatePanSearch` 최상단의
 조기분기 하나만 추가했고, 거기서 반환하지 않으면 예전 동작 그대로다.
@@ -592,13 +691,23 @@ ros2 launch kau_lane_detection lane_detection.launch.py pan_aim:=false
   **조준을 켜기 전에 재실측할 것.**
 - **§12 의 "pan 사이클 미검증" 이 더 중요해진다.** 램프와 각도 시각
   보정이 한 번도 실제로 안 돌아봤는데, 이제 그게 주 경로다.
+  `pan_aim_source: lane` 에서는 그 보정 오차가 **자기 조준 입력으로
+  되먹여지므로** (위 gain 절) 더 중요해진다.
+- **`lane` 근거의 파라미터 넷이 전부 실측 전 초안값이다.**
+  `pan_aim_gain 0.7` / `pan_aim_min_evidence_cm 25` /
+  `pan_aim_deadband_deg 2` / `pan_aim_hold_frames 14`. 실차에서
+  `pan_aim_source` 를 `global` 과 번갈아 두고 같은 구간을 비교할 것.
+  볼 값은 status 의 `paim`(목표각) · `pahold`(홀드 연속 장수) ·
+  `len`(경로 유효길이) 이다.
 
 ---
 
 ## 9. Pan 트리거 판정 — 곡률 룩어헤드 + 장애물 (map 프레임)
 
-> §8-b 조준이 켜져 있으면(기본) 이 절은 **동작하지 않는다.** 측위나
-> `/path/global` 이 없어 조준이 불가할 때만 fallback 으로 쓰인다.
+> §8-b 조준이 켜져 있으면(기본) 이 절은 **동작하지 않는다.** 조준이
+> 불가할 때만 fallback 으로 쓰인다 — `pan_aim_source: lane` 이면 차선
+> 근거가 `pan_aim_hold_frames` 를 넘겨 모자랄 때, `global` 이면 측위나
+> `/path/global` 이 없을 때다.
 
 
 차선이 화면에서 사라지는 이유는 두 가지다.
