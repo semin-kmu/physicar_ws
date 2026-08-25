@@ -12,8 +12,28 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include <limits>
+// ---------------------------------------------------------------------------
+// 2026-08-25: the temporal confirmation policy changed.
+//
+// It used to demand `green_confirmation_frames` consecutive greens, so a single
+// dropped or mis-classified camera frame sent the count back to zero and the
+// vehicle occasionally never left the start line. It now latches on
+// `green_required_frames` greens within the last `green_window_frames`
+// observations.
+//
+// The policy was written and validated in kau_object_detection_lane first and
+// is reproduced here independently: this package has no build or runtime
+// dependency on that one. The two copies must be kept in step by hand.
+//
+// ONLY the temporal decision changed. The spatial detection - ROI, HSV bounds,
+// component area, aspect ratio, fill ratio - lives in green_lamp_detector and
+// was not touched, and neither were the topics, the message type, the QoS, the
+// publish period, the camera timeout or the permanent latch.
+// ---------------------------------------------------------------------------
+
+#include <cmath>
 #include <stdexcept>
+#include <vector>
 
 #include "gtest/gtest.h"
 #include "kau_object_detection/start_signal_logic.hpp"
@@ -28,10 +48,12 @@ using kau_object_detection::StartSignalOptions;
 /// Camera cadence used throughout: about 15 Hz, matching the real stream.
 constexpr double kFramePeriodS = 1.0 / 15.0;
 
+/// The shipped policy: green in 4 of the last 8 usable frames.
 StartSignalOptions default_options()
 {
   StartSignalOptions options;
-  options.green_confirmation_frames = 5;
+  options.green_window_frames = 8;
+  options.green_required_frames = 4;
   options.camera_timeout_s = 0.5;
   return options;
 }
@@ -51,9 +73,21 @@ double feed(
   return start_s;
 }
 
-// ---------------------------------------------------------------------------
-// Confirmation run
-// ---------------------------------------------------------------------------
+/// Feeds an explicit green/not-green pattern, one frame per element.
+double feed_pattern(
+  StartPermissionLatch & latch,
+  const std::vector<bool> & greens,
+  double start_s)
+{
+  for (const bool green : greens) {
+    latch.observe_frame(
+      green ? FrameOutcome::kGreen : FrameOutcome::kNotGreen, start_s);
+    start_s += kFramePeriodS;
+  }
+  return start_s;
+}
+
+}  // namespace
 
 TEST(StartSignalLogicTest, StartsForbidden)
 {
@@ -62,305 +96,320 @@ TEST(StartSignalLogicTest, StartsForbidden)
   EXPECT_FALSE(latch.start_permitted());
   EXPECT_FALSE(latch.latched());
   EXPECT_FALSE(latch.camera_active());
-  EXPECT_EQ(latch.consecutive_green_frames(), 0);
+  EXPECT_EQ(latch.green_hits(), 0);
+  EXPECT_EQ(latch.window_samples(), 0);
 }
 
-TEST(StartSignalLogicTest, StaysForbiddenBeforeTheFifthGreenFrame)
+// --- The sliding window ----------------------------------------------------
+
+/// Four greens as the very first four samples latch, even though the window is
+/// only half full. The threshold is a count, not a ratio.
+TEST(StartSignalLogicTest, FourImmediateGreensLatch)
 {
   StartPermissionLatch latch{default_options()};
 
-  double now_s = 0.0;
-  for (int frame = 1; frame <= 4; ++frame) {
-    latch.observe_frame(FrameOutcome::kGreen, now_s);
-    now_s += kFramePeriodS;
+  feed(latch, FrameOutcome::kGreen, 3, 0.0);
+  EXPECT_FALSE(latch.start_permitted()) << "three greens must not be enough";
+  EXPECT_EQ(latch.green_hits(), 3);
+  EXPECT_EQ(latch.window_samples(), 3);
 
-    EXPECT_FALSE(latch.start_permitted()) << "green frame " << frame;
-    EXPECT_EQ(latch.consecutive_green_frames(), frame);
-  }
+  latch.observe_frame(FrameOutcome::kGreen, 3.0 * kFramePeriodS);
+  EXPECT_TRUE(latch.start_permitted());
+  EXPECT_EQ(latch.green_hits(), 4);
+  EXPECT_EQ(latch.window_samples(), 4);
 }
 
-TEST(StartSignalLogicTest, PermitsOnTheFifthConsecutiveGreenFrame)
+/// The regression this change exists for: alternating green and non-green never
+/// reaches four in a row, but it does reach four within seven frames.
+TEST(StartSignalLogicTest, FourOfSevenWithMissesLatch)
+{
+  StartPermissionLatch latch{default_options()};
+
+  feed_pattern(latch, {true, false, true, false, true, false}, 0.0);
+  EXPECT_FALSE(latch.start_permitted()) << "only three greens so far";
+  EXPECT_EQ(latch.green_hits(), 3);
+
+  latch.observe_frame(FrameOutcome::kGreen, 6.0 * kFramePeriodS);
+  EXPECT_TRUE(latch.start_permitted()) << "T,F,T,F,T,F,T is 4 of the last 7";
+  EXPECT_EQ(latch.green_hits(), 4);
+  EXPECT_EQ(latch.window_samples(), 7);
+}
+
+TEST(StartSignalLogicTest, ThreeOfEightDoesNotLatch)
+{
+  StartPermissionLatch latch{default_options()};
+
+  feed_pattern(latch, {true, false, true, false, true, false, false, false}, 0.0);
+
+  EXPECT_FALSE(latch.start_permitted());
+  EXPECT_EQ(latch.green_hits(), 3);
+  EXPECT_EQ(latch.window_samples(), 8);
+}
+
+TEST(StartSignalLogicTest, ThreeLeadingGreensThenFiveMissesDoNotLatch)
+{
+  StartPermissionLatch latch{default_options()};
+
+  feed_pattern(latch, {true, true, true, false, false, false, false, false}, 0.0);
+
+  EXPECT_FALSE(latch.start_permitted());
+  EXPECT_EQ(latch.green_hits(), 3);
+  EXPECT_EQ(latch.window_samples(), 8);
+}
+
+/// The window is bounded: sample nine pushes sample one out, and a green that
+/// leaves the window stops counting.
+TEST(StartSignalLogicTest, OldGreenIsEvicted)
+{
+  StartPermissionLatch latch{default_options()};
+
+  double now_s = feed(latch, FrameOutcome::kGreen, 3, 0.0);
+  ASSERT_EQ(latch.green_hits(), 3);
+
+  // Fill the window out to eight with non-green frames.
+  now_s = feed(latch, FrameOutcome::kNotGreen, 5, now_s);
+  ASSERT_EQ(latch.window_samples(), 8);
+  ASSERT_EQ(latch.green_hits(), 3);
+
+  // The ninth frame evicts the first green.
+  latch.observe_frame(FrameOutcome::kNotGreen, now_s);
+  EXPECT_EQ(latch.window_samples(), 8) << "the window must not grow past its size";
+  EXPECT_EQ(latch.green_hits(), 2);
+  EXPECT_FALSE(latch.start_permitted());
+}
+
+/// Exactly four greens spread through the last eight samples is the boundary
+/// case, and it latches.
+TEST(StartSignalLogicTest, FourNonConsecutiveWithinEightLatch)
+{
+  StartPermissionLatch latch{default_options()};
+
+  feed_pattern(latch, {true, false, false, true, false, true, false}, 0.0);
+  ASSERT_FALSE(latch.start_permitted());
+  ASSERT_EQ(latch.green_hits(), 3);
+
+  latch.observe_frame(FrameOutcome::kGreen, 7.0 * kFramePeriodS);
+  EXPECT_TRUE(latch.start_permitted());
+  EXPECT_EQ(latch.green_hits(), 4);
+  EXPECT_EQ(latch.window_samples(), 8);
+}
+
+/// Four greens over the whole run are not four greens in the window. This is
+/// what stops the policy from degenerating into "four greens ever".
+TEST(StartSignalLogicTest, FourGreensSpreadAcrossMoreThanEightDoNotLatch)
+{
+  StartPermissionLatch latch{default_options()};
+
+  // 11 samples, greens at 0, 1, 2 and 10. Four greens overall, but the run
+  // peaked at three hits and by the last frame the window holds indices 3..10,
+  // so only the final green is still inside it.
+  feed_pattern(
+    latch,
+    {true, true, true, false, false, false,
+      false, false, false, false, true},
+    0.0);
+
+  EXPECT_FALSE(latch.start_permitted());
+  EXPECT_EQ(latch.window_samples(), 8);
+  EXPECT_EQ(latch.green_hits(), 1) << "only the green at index 10 is still in the window";
+}
+
+// --- Frame classification --------------------------------------------------
+
+/// Red, yellow, an absent signal and an unrecognised one all arrive as
+/// kNotGreen and must never count towards the threshold.
+TEST(StartSignalLogicTest, RedYellowUnknownAreFalseSamples)
+{
+  StartPermissionLatch latch{default_options()};
+
+  feed(latch, FrameOutcome::kNotGreen, 20, 0.0);
+
+  EXPECT_FALSE(latch.start_permitted());
+  EXPECT_EQ(latch.green_hits(), 0);
+  EXPECT_EQ(latch.window_samples(), 8);
+}
+
+/// A frame that failed to decode enters the window as a non-green sample. It is
+/// the conservative choice: it can evict an older green and so only ever makes
+/// latching harder.
+TEST(StartSignalLogicTest, UnusableFrameIsANonGreenSample)
+{
+  StartPermissionLatch latch{default_options()};
+
+  double now_s = feed(latch, FrameOutcome::kGreen, 3, 0.0);
+  ASSERT_EQ(latch.green_hits(), 3);
+
+  latch.observe_frame(FrameOutcome::kUnusable, now_s);
+  EXPECT_EQ(latch.green_hits(), 3) << "an unusable frame is not a green";
+  EXPECT_EQ(latch.window_samples(), 4);
+  EXPECT_FALSE(latch.start_permitted());
+}
+
+/// An unusable frame does not prove the camera is delivering, so it must not
+/// refresh the liveness clock. This is the pre-existing safety policy, kept.
+TEST(StartSignalLogicTest, UnusableFrameDoesNotCountAsCameraActivity)
+{
+  StartPermissionLatch latch{default_options()};
+
+  latch.observe_frame(FrameOutcome::kGreen, 0.0);
+  ASSERT_TRUE(latch.camera_active());
+
+  // Only unusable frames from here on. The liveness clock stays at 0.0.
+  feed(latch, FrameOutcome::kUnusable, 5, kFramePeriodS);
+
+  latch.advance_time(0.6);
+  EXPECT_FALSE(latch.camera_active());
+}
+
+// --- Camera timeout --------------------------------------------------------
+
+/// Greens seen before a long outage must not combine with greens seen after it.
+TEST(StartSignalLogicTest, TimeoutClearsWindowBeforeLatch)
+{
+  StartPermissionLatch latch{default_options()};
+
+  feed(latch, FrameOutcome::kGreen, 3, 0.0);
+  ASSERT_EQ(latch.green_hits(), 3);
+  ASSERT_FALSE(latch.start_permitted());
+
+  latch.advance_time(5.0);
+  EXPECT_FALSE(latch.camera_active());
+  EXPECT_EQ(latch.green_hits(), 0) << "the pre-outage greens must be gone";
+  EXPECT_EQ(latch.window_samples(), 0);
+
+  // One green after recovery is nowhere near the threshold.
+  latch.observe_frame(FrameOutcome::kGreen, 5.1);
+  EXPECT_FALSE(latch.start_permitted());
+  EXPECT_EQ(latch.green_hits(), 1);
+}
+
+TEST(StartSignalLogicTest, TimeoutDoesNotClearLatchedTrue)
 {
   StartPermissionLatch latch{default_options()};
 
   feed(latch, FrameOutcome::kGreen, 4, 0.0);
-  ASSERT_FALSE(latch.start_permitted());
+  ASSERT_TRUE(latch.start_permitted());
 
-  latch.observe_frame(FrameOutcome::kGreen, 4 * kFramePeriodS);
-
+  latch.advance_time(60.0);
   EXPECT_TRUE(latch.start_permitted());
   EXPECT_TRUE(latch.latched());
 }
 
-TEST(StartSignalLogicTest, ConfirmationRunLengthIsConfigurable)
-{
-  StartSignalOptions options = default_options();
-  options.green_confirmation_frames = 2;
-  StartPermissionLatch latch{options};
-
-  latch.observe_frame(FrameOutcome::kGreen, 0.0);
-  EXPECT_FALSE(latch.start_permitted());
-
-  latch.observe_frame(FrameOutcome::kGreen, kFramePeriodS);
-  EXPECT_TRUE(latch.start_permitted());
-}
-
-// ---------------------------------------------------------------------------
-// Run resets
-// ---------------------------------------------------------------------------
-
-TEST(StartSignalLogicTest, NonGreenFrameResetsTheRun)
+TEST(StartSignalLogicTest, TimeShorterThanTheTimeoutKeepsTheWindow)
 {
   StartPermissionLatch latch{default_options()};
 
-  double now_s = feed(latch, FrameOutcome::kGreen, 4, 0.0);
-  ASSERT_EQ(latch.consecutive_green_frames(), 4);
+  feed(latch, FrameOutcome::kGreen, 3, 0.0);
+  ASSERT_EQ(latch.green_hits(), 3);
 
-  // Red, yellow, unknown and an absent signal all arrive as kNotGreen.
-  latch.observe_frame(FrameOutcome::kNotGreen, now_s);
-  now_s += kFramePeriodS;
-
-  EXPECT_EQ(latch.consecutive_green_frames(), 0);
-  EXPECT_FALSE(latch.start_permitted());
-
-  // Four more greens are still one short, proving the counter really restarted.
-  now_s = feed(latch, FrameOutcome::kGreen, 4, now_s);
-  EXPECT_FALSE(latch.start_permitted());
-
-  latch.observe_frame(FrameOutcome::kGreen, now_s);
-  EXPECT_TRUE(latch.start_permitted());
-}
-
-TEST(StartSignalLogicTest, UnusableFrameResetsTheRun)
-{
-  StartPermissionLatch latch{default_options()};
-
-  double now_s = feed(latch, FrameOutcome::kGreen, 4, 0.0);
-  latch.observe_frame(FrameOutcome::kUnusable, now_s);
-  now_s += kFramePeriodS;
-
-  EXPECT_EQ(latch.consecutive_green_frames(), 0);
-  EXPECT_FALSE(latch.start_permitted());
-}
-
-TEST(StartSignalLogicTest, CameraTimeoutBeforeLatchKeepsPermissionFalse)
-{
-  StartPermissionLatch latch{default_options()};
-
-  double now_s = feed(latch, FrameOutcome::kGreen, 4, 0.0);
-  ASSERT_EQ(latch.consecutive_green_frames(), 4);
-  ASSERT_TRUE(latch.camera_active());
-
-  // The stream stops. The timer keeps running.
-  now_s += 0.6;
-  latch.advance_time(now_s);
-
-  EXPECT_FALSE(latch.start_permitted());
-  EXPECT_FALSE(latch.camera_active());
-  EXPECT_EQ(latch.consecutive_green_frames(), 0);
-}
-
-TEST(StartSignalLogicTest, TimeShorterThanTheTimeoutKeepsTheRun)
-{
-  StartPermissionLatch latch{default_options()};
-
-  const double now_s = feed(latch, FrameOutcome::kGreen, 4, 0.0);
-  latch.advance_time(now_s + 0.2);
-
-  EXPECT_EQ(latch.consecutive_green_frames(), 4);
+  // Three frame periods is well inside the 0.5 s timeout.
+  latch.advance_time(3.0 * kFramePeriodS);
   EXPECT_TRUE(latch.camera_active());
+  EXPECT_EQ(latch.green_hits(), 3);
 }
 
 TEST(StartSignalLogicTest, NoFrameAtAllLeavesPermissionFalse)
 {
   StartPermissionLatch latch{default_options()};
 
-  for (int tick = 0; tick < 50; ++tick) {
-    latch.advance_time(0.1 * tick);
-  }
+  latch.advance_time(10.0);
 
   EXPECT_FALSE(latch.start_permitted());
   EXPECT_FALSE(latch.camera_active());
+  EXPECT_EQ(latch.window_samples(), 0);
 }
 
-// ---------------------------------------------------------------------------
-// green_streak, the value the node prints as [streak/required]
-// ---------------------------------------------------------------------------
-
-TEST(StartSignalLogicTest, GreenStreakStartsAtZero)
-{
-  const StartPermissionLatch latch{default_options()};
-
-  EXPECT_EQ(latch.consecutive_green_frames(), 0);
-  EXPECT_EQ(latch.options().green_confirmation_frames, 5);
-}
-
-TEST(StartSignalLogicTest, GreenStreakWalksOneToFiveAndLatchesOnTheLast)
+/// A simulator reset can move the clock backwards. That is re-anchored, not
+/// reported as an outage that never happened.
+TEST(StartSignalLogicTest, BackwardClockDoesNotClearTheWindow)
 {
   StartPermissionLatch latch{default_options()};
 
-  double now_s = 0.0;
-  const int expected[] = {1, 2, 3, 4, 5};
-  for (const int streak : expected) {
-    latch.observe_frame(FrameOutcome::kGreen, now_s);
-    now_s += kFramePeriodS;
+  feed(latch, FrameOutcome::kGreen, 3, 100.0);
+  ASSERT_EQ(latch.green_hits(), 3);
 
-    EXPECT_EQ(latch.consecutive_green_frames(), streak);
-    EXPECT_EQ(latch.start_permitted(), streak == 5) << "at green_streak=[" << streak << "/5]";
-  }
+  latch.advance_time(50.0);
+
+  EXPECT_EQ(latch.green_hits(), 3);
+  EXPECT_TRUE(latch.camera_active());
 }
 
-TEST(StartSignalLogicTest, GreenStreakCountsConsecutiveFramesNotACumulativeTotal)
+// --- The latch is permanent ------------------------------------------------
+
+TEST(StartSignalLogicTest, LatchNeverReturnsFalse)
 {
   StartPermissionLatch latch{default_options()};
 
-  // Three greens, one red, two greens. Six green frames have now been seen in
-  // total, but the run is only two long, so the start stays forbidden.
-  double now_s = feed(latch, FrameOutcome::kGreen, 3, 0.0);
-  latch.observe_frame(FrameOutcome::kNotGreen, now_s);
-  now_s += kFramePeriodS;
-  now_s = feed(latch, FrameOutcome::kGreen, 2, now_s);
+  double now_s = feed(latch, FrameOutcome::kGreen, 4, 0.0);
+  ASSERT_TRUE(latch.start_permitted());
 
-  EXPECT_EQ(latch.consecutive_green_frames(), 2);
-  EXPECT_FALSE(latch.start_permitted());
+  now_s = feed(latch, FrameOutcome::kNotGreen, 50, now_s);
+  EXPECT_TRUE(latch.start_permitted());
 
-  // Three more complete the run of five.
-  feed(latch, FrameOutcome::kGreen, 3, now_s);
-  EXPECT_EQ(latch.consecutive_green_frames(), 5);
+  now_s = feed(latch, FrameOutcome::kUnusable, 50, now_s);
+  EXPECT_TRUE(latch.start_permitted());
+
+  latch.advance_time(now_s + 100.0);
   EXPECT_TRUE(latch.start_permitted());
 }
 
-TEST(StartSignalLogicTest, GreenStreakReturnsToZeroOnANonGreenFrame)
+/// The reported hit count freezes at the value that latched, so the log line
+/// after the latch keeps naming the evidence the decision was made on.
+TEST(StartSignalLogicTest, HitCountFreezesOnceLatched)
 {
   StartPermissionLatch latch{default_options()};
 
   const double now_s = feed(latch, FrameOutcome::kGreen, 4, 0.0);
-  ASSERT_EQ(latch.consecutive_green_frames(), 4);
+  ASSERT_TRUE(latch.latched());
+  ASSERT_EQ(latch.green_hits(), 4);
+
+  feed(latch, FrameOutcome::kNotGreen, 20, now_s);
+  EXPECT_EQ(latch.green_hits(), 4);
+  EXPECT_EQ(latch.window_samples(), 4);
+}
+
+/// Camera liveness is still tracked after the latch, for diagnostics only.
+TEST(StartSignalLogicTest, CameraActivityStillTracksAfterLatch)
+{
+  StartPermissionLatch latch{default_options()};
+
+  const double now_s = feed(latch, FrameOutcome::kGreen, 4, 0.0);
+  ASSERT_TRUE(latch.latched());
+  ASSERT_TRUE(latch.camera_active());
 
   latch.observe_frame(FrameOutcome::kNotGreen, now_s);
-
-  EXPECT_EQ(latch.consecutive_green_frames(), 0);
-  EXPECT_FALSE(latch.start_permitted());
-}
-
-TEST(StartSignalLogicTest, GreenStreakReturnsToZeroOnCameraTimeoutBeforeLatch)
-{
-  StartPermissionLatch latch{default_options()};
-
-  const double now_s = feed(latch, FrameOutcome::kGreen, 3, 0.0);
-  ASSERT_EQ(latch.consecutive_green_frames(), 3);
-
-  latch.advance_time(now_s + 0.6);
-
-  EXPECT_EQ(latch.consecutive_green_frames(), 0);
-  EXPECT_FALSE(latch.start_permitted());
-}
-
-TEST(StartSignalLogicTest, GreenStreakHoldsAtTheConfirmationCountAfterLatch)
-{
-  StartPermissionLatch latch{default_options()};
-
-  double now_s = feed(latch, FrameOutcome::kGreen, 5, 0.0);
-  ASSERT_TRUE(latch.start_permitted());
-
-  // Red, then a dead camera. The printed line must keep reading [5/5].
-  now_s = feed(latch, FrameOutcome::kNotGreen, 10, now_s);
-  latch.advance_time(now_s + 5.0);
-
-  EXPECT_EQ(latch.consecutive_green_frames(), 5);
+  EXPECT_TRUE(latch.camera_active());
   EXPECT_TRUE(latch.start_permitted());
 }
 
-// ---------------------------------------------------------------------------
-// Latch behaviour
-// ---------------------------------------------------------------------------
+// --- Configuration ---------------------------------------------------------
 
-TEST(StartSignalLogicTest, LatchSurvivesNonGreenFrames)
-{
-  StartPermissionLatch latch{default_options()};
-
-  double now_s = feed(latch, FrameOutcome::kGreen, 5, 0.0);
-  ASSERT_TRUE(latch.start_permitted());
-
-  // The signal turns red, then disappears from the frame entirely.
-  now_s = feed(latch, FrameOutcome::kNotGreen, 100, now_s);
-
-  EXPECT_TRUE(latch.start_permitted());
-  EXPECT_TRUE(latch.latched());
-}
-
-TEST(StartSignalLogicTest, LatchSurvivesCameraTimeout)
-{
-  StartPermissionLatch latch{default_options()};
-
-  const double now_s = feed(latch, FrameOutcome::kGreen, 5, 0.0);
-  ASSERT_TRUE(latch.start_permitted());
-
-  // The camera dies for a minute.
-  for (int tick = 0; tick < 600; ++tick) {
-    latch.advance_time(now_s + 0.1 * tick);
-  }
-
-  EXPECT_TRUE(latch.start_permitted());
-  EXPECT_TRUE(latch.latched());
-}
-
-TEST(StartSignalLogicTest, LatchSurvivesUnusableFrames)
-{
-  StartPermissionLatch latch{default_options()};
-
-  double now_s = feed(latch, FrameOutcome::kGreen, 5, 0.0);
-  ASSERT_TRUE(latch.start_permitted());
-
-  now_s = feed(latch, FrameOutcome::kUnusable, 30, now_s);
-
-  EXPECT_TRUE(latch.start_permitted());
-}
-
-TEST(StartSignalLogicTest, ConfirmationCountFreezesOnceLatched)
-{
-  StartPermissionLatch latch{default_options()};
-
-  double now_s = feed(latch, FrameOutcome::kGreen, 5, 0.0);
-  ASSERT_EQ(latch.consecutive_green_frames(), 5);
-
-  now_s = feed(latch, FrameOutcome::kGreen, 20, now_s);
-
-  // Nothing keeps counting after the decision is made.
-  EXPECT_EQ(latch.consecutive_green_frames(), 5);
-  EXPECT_TRUE(latch.start_permitted());
-}
-
-// ---------------------------------------------------------------------------
-// Clock robustness
-// ---------------------------------------------------------------------------
-
-TEST(StartSignalLogicTest, BackwardClockDoesNotClearTheRun)
-{
-  StartPermissionLatch latch{default_options()};
-
-  const double now_s = feed(latch, FrameOutcome::kGreen, 4, 100.0);
-  ASSERT_EQ(latch.consecutive_green_frames(), 4);
-
-  // A simulator reset moves the clock back to the start of the run.
-  latch.advance_time(now_s - 50.0);
-
-  EXPECT_EQ(latch.consecutive_green_frames(), 4);
-  EXPECT_FALSE(latch.start_permitted());
-}
-
-// ---------------------------------------------------------------------------
-// Configuration
-// ---------------------------------------------------------------------------
-
-TEST(StartSignalLogicTest, RejectsNonPositiveConfirmationFrames)
+/// A misconfigured policy must stop the node at start-up, not silently forbid
+/// or permit the start.
+TEST(StartSignalLogicTest, InvalidWindowParametersRejected)
 {
   StartSignalOptions options = default_options();
 
-  options.green_confirmation_frames = 0;
+  options.green_required_frames = 0;
   EXPECT_THROW(StartPermissionLatch{options}, std::invalid_argument);
 
-  options.green_confirmation_frames = -1;
+  options = default_options();
+  options.green_required_frames = -1;
+  EXPECT_THROW(StartPermissionLatch{options}, std::invalid_argument);
+
+  options = default_options();
+  options.green_window_frames = 0;
+  EXPECT_THROW(StartPermissionLatch{options}, std::invalid_argument);
+
+  options = default_options();
+  options.green_window_frames = -1;
+  EXPECT_THROW(StartPermissionLatch{options}, std::invalid_argument);
+
+  // Unreachable threshold: it would forbid the start for the whole race with
+  // no other symptom.
+  options = default_options();
+  options.green_window_frames = 4;
+  options.green_required_frames = 5;
   EXPECT_THROW(StartPermissionLatch{options}, std::invalid_argument);
 }
 
@@ -371,22 +420,70 @@ TEST(StartSignalLogicTest, RejectsNonPositiveCameraTimeout)
   options.camera_timeout_s = 0.0;
   EXPECT_THROW(StartPermissionLatch{options}, std::invalid_argument);
 
-  options.camera_timeout_s = -0.5;
+  options.camera_timeout_s = -1.0;
   EXPECT_THROW(StartPermissionLatch{options}, std::invalid_argument);
 
-  options.camera_timeout_s = std::numeric_limits<double>::quiet_NaN();
+  options.camera_timeout_s = std::nan("");
   EXPECT_THROW(StartPermissionLatch{options}, std::invalid_argument);
 }
 
+TEST(StartSignalLogicTest, WindowSizeAndThresholdAreConfigurable)
+{
+  StartSignalOptions options = default_options();
+  options.green_window_frames = 3;
+  options.green_required_frames = 2;
+
+  StartPermissionLatch latch{options};
+
+  feed_pattern(latch, {true, false}, 0.0);
+  EXPECT_FALSE(latch.start_permitted());
+  EXPECT_EQ(latch.green_hits(), 1);
+
+  latch.observe_frame(FrameOutcome::kGreen, 2.0 * kFramePeriodS);
+  EXPECT_TRUE(latch.start_permitted()) << "2 of the last 3 is the threshold here";
+}
+
+/// The degenerate but legal setting: one green anywhere permits the start.
 TEST(StartSignalLogicTest, AcceptsASingleFrameConfirmation)
 {
   StartSignalOptions options = default_options();
-  options.green_confirmation_frames = 1;
+  options.green_window_frames = 1;
+  options.green_required_frames = 1;
 
   StartPermissionLatch latch{options};
-  latch.observe_frame(FrameOutcome::kGreen, 0.0);
 
+  latch.observe_frame(FrameOutcome::kGreen, 0.0);
   EXPECT_TRUE(latch.start_permitted());
 }
 
-}  // namespace
+/// A window of 3 that has already evicted a green cannot latch on a stale one.
+TEST(StartSignalLogicTest, SmallWindowEvictsCorrectly)
+{
+  StartSignalOptions options = default_options();
+  options.green_window_frames = 3;
+  options.green_required_frames = 2;
+
+  StartPermissionLatch latch{options};
+
+  feed_pattern(latch, {true, false, false}, 0.0);
+  ASSERT_EQ(latch.green_hits(), 1);
+
+  // The fourth sample evicts the green.
+  latch.observe_frame(FrameOutcome::kNotGreen, 3.0 * kFramePeriodS);
+  EXPECT_EQ(latch.green_hits(), 0);
+  EXPECT_EQ(latch.window_samples(), 3);
+
+  // One green now leaves only one hit in the window, still short of two.
+  latch.observe_frame(FrameOutcome::kGreen, 4.0 * kFramePeriodS);
+  EXPECT_FALSE(latch.start_permitted());
+  EXPECT_EQ(latch.green_hits(), 1);
+}
+
+TEST(StartSignalLogicTest, OptionsAreReportedBack)
+{
+  const StartPermissionLatch latch{default_options()};
+
+  EXPECT_EQ(latch.options().green_window_frames, 8);
+  EXPECT_EQ(latch.options().green_required_frames, 4);
+  EXPECT_DOUBLE_EQ(latch.options().camera_timeout_s, 0.5);
+}

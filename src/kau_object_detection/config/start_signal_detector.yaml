@@ -6,13 +6,35 @@ start_signal_detector:
     output_topic: /perception/start_permission
 
     # --- Start permission policy ---------------------------------------------
-    # Consecutive green frames before the start is permitted. The camera runs at
-    # roughly 15 Hz, so five frames span about 0.33 s: long enough to reject a
-    # single mis-classified frame, short enough not to lose the start.
-    green_confirmation_frames: 5
-    # No usable frame for this long clears the run and keeps the permission
-    # false. Roughly seven frame intervals at 15 Hz, so ordinary jitter and a
-    # few dropped frames never trip it. Has no effect once latched.
+    # Sliding-window confirmation, 2026-08-25.
+    #
+    # The previous policy demanded five GREENS IN A ROW
+    # (green_confirmation_frames: 5). One dropped or mis-classified frame sent
+    # the count back to zero, and the vehicle occasionally never left the start
+    # line.
+    #
+    # Now: green in at least `green_required_frames` of the last
+    # `green_window_frames` observations. A miss costs one sample instead of
+    # the whole run.
+    #
+    # The same policy runs in kau_object_detection_lane. The two packages are
+    # independent copies; if you change a value here, change it there too.
+    #
+    # [frames] How far back the decision looks. The camera runs at roughly
+    # 15 Hz, so eight frames span about 0.53 s.
+    green_window_frames: 8
+    # [frames] Green samples needed inside that window. 4 of 8 tolerates up to
+    # four misses in the span while still requiring the lamp to be seen half
+    # the time, so a single stray green frame cannot start the vehicle.
+    #
+    # Must satisfy 1 <= green_required_frames <= green_window_frames. The node
+    # refuses to start otherwise rather than forbidding the start silently.
+    green_required_frames: 4
+    # [s] No usable frame for this long clears the WINDOW and keeps the
+    # permission false. Roughly seven frame intervals at 15 Hz, so ordinary
+    # jitter and a few dropped frames never trip it. Clearing matters here:
+    # greens seen before a long outage must not combine with greens seen after
+    # it. Has no effect once latched.
     camera_timeout_s: 0.5
     # The permission is published on this period regardless of the camera, so a
     # consumer sees the state even while no frame arrives. Node clock based.

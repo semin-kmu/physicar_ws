@@ -12,8 +12,28 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// ---------------------------------------------------------------------------
+// 2026-08-25: the temporal confirmation policy changed.
+//
+// It used to demand `green_confirmation_frames` consecutive greens, so a single
+// dropped or mis-classified camera frame sent the count back to zero and the
+// vehicle occasionally never left the start line. It now latches on
+// `green_required_frames` greens within the last `green_window_frames`
+// observations.
+//
+// The policy was written and validated in kau_object_detection_lane first and
+// is reproduced here independently: this package has no build or runtime
+// dependency on that one. The two copies must be kept in step by hand.
+//
+// ONLY the temporal decision changed. The spatial detection - ROI, HSV bounds,
+// component area, aspect ratio, fill ratio - lives in green_lamp_detector and
+// was not touched, and neither were the topics, the message type, the QoS, the
+// publish period, the camera timeout or the permanent latch.
+// ---------------------------------------------------------------------------
+
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -47,9 +67,20 @@ public:
     const auto output_topic = declare_parameter<std::string>(
       "output_topic", "/perception/start_permission");
 
+    // Sliding-window confirmation. Declared as int64 because that is the ROS
+    // integer parameter type, then range-checked before the narrowing cast so a
+    // value outside int cannot wrap into something that passes the latch's own
+    // validation.
+    const auto green_window_frames =
+      declare_parameter<std::int64_t>("green_window_frames", 8);
+    const auto green_required_frames =
+      declare_parameter<std::int64_t>("green_required_frames", 4);
+
     StartSignalOptions signal_options;
-    signal_options.green_confirmation_frames = static_cast<int>(
-      declare_parameter<std::int64_t>("green_confirmation_frames", 5));
+    signal_options.green_window_frames = to_frame_count(
+      green_window_frames, "green_window_frames");
+    signal_options.green_required_frames = to_frame_count(
+      green_required_frames, "green_required_frames");
     signal_options.camera_timeout_s =
       declare_parameter<double>("camera_timeout_s", 0.5);
     const auto publish_period_s =
@@ -102,11 +133,17 @@ public:
     RCLCPP_INFO(
       get_logger(),
       "ready input=%s output=%s qos_in=sensor_data(best_effort) "
-      "qos_out=reliable/keep_last(1)/volatile green_confirmation_frames=%d "
-      "camera_timeout_s=%.3f publish_period_s=%.3f",
+      "qos_out=reliable/keep_last(1)/volatile green_window_frames=%d "
+      "green_required_frames=%d camera_timeout_s=%.3f publish_period_s=%.3f",
       input_topic.c_str(), output_topic.c_str(),
-      signal_options.green_confirmation_frames, signal_options.camera_timeout_s,
-      publish_period_s);
+      signal_options.green_window_frames, signal_options.green_required_frames,
+      signal_options.camera_timeout_s, publish_period_s);
+    RCLCPP_INFO(
+      get_logger(),
+      "start confirmation: %d green frames within the last %d usable frames. "
+      "Not consecutive: a dropped or mis-classified frame no longer resets the "
+      "count. A camera timeout clears the window; the latch is permanent",
+      signal_options.green_required_frames, signal_options.green_window_frames);
     RCLCPP_INFO(
       get_logger(),
       "green lamp gate roi=[%d,%d]x[%d,%d] hue=[%d,%d] saturation_min=%d "
@@ -121,6 +158,21 @@ public:
   }
 
 private:
+  /// Narrows one ROS integer parameter to the `int` the policy uses.
+  ///
+  /// The latch validates the values themselves (at least 1, required at most
+  /// window). This only rejects magnitudes `int` cannot hold, which would
+  /// otherwise wrap into a value that passes that validation while meaning
+  /// something entirely different.
+  static int to_frame_count(const std::int64_t value, const char * name)
+  {
+    if (value < 1 || value > std::numeric_limits<int>::max()) {
+      throw std::invalid_argument(
+              std::string(name) + " must be at least 1 and fit in an int");
+    }
+    return static_cast<int>(value);
+  }
+
   void image_callback(const sensor_msgs::msg::CompressedImage::ConstSharedPtr image)
   {
     const double now_s = now().seconds();
@@ -138,7 +190,7 @@ private:
         image->format.c_str(), image->data.size());
       latch_->observe_frame(FrameOutcome::kUnusable, now_s);
       report_state_change();
-      report_green_streak();
+      report_green_window();
       return;
     }
 
@@ -150,14 +202,15 @@ private:
       RCLCPP_INFO_THROTTLE(
         get_logger(), *get_clock(), 1000,
         "frame %dx%d candidates=%d detected=%d area=%d aspect=%.2f fill=%.2f "
-        "center=(%d,%d) consecutive_green=%d",
+        "center=(%d,%d) green_hits=%d/%d samples=%d",
         frame.cols, frame.rows, detection.candidate_count, detection.detected ? 1 : 0,
         detection.area_px, detection.aspect_ratio, detection.fill_ratio,
-        detection.center_x, detection.center_y, latch_->consecutive_green_frames());
+        detection.center_x, detection.center_y, latch_->green_hits(),
+        latch_->options().green_window_frames, latch_->window_samples());
     }
 
     report_state_change();
-    report_green_streak();
+    report_green_window();
   }
 
   void publish_timer_callback()
@@ -169,46 +222,54 @@ private:
     permission_publisher_->publish(message);
 
     report_state_change();
-    report_green_streak();
+    report_green_window();
   }
 
   /// Read-only progress line for the operator watching the terminal.
   ///
-  /// `green_streak` is the length of the current run of consecutive green
-  /// frames, never a running total: a single non-green frame puts it back to
-  /// zero. It is printed the moment the value moves and otherwise once a
-  /// second, so the terminal shows the live state without one line per frame.
+  /// `green_window` is how many of the samples currently inside the window were
+  /// green, never a running total of the whole run: a green that has slid out
+  /// of the window no longer counts. `samples` is how many samples the window
+  /// holds, so a low hit count early on reads as "not enough frames yet" rather
+  /// than "not green". It is printed the moment the hit count moves and
+  /// otherwise once a second, which is the same throttle policy the
+  /// consecutive-run version used.
   ///
   /// Nothing here touches the published value, the topic, the QoS or the latch.
-  void report_green_streak()
+  void report_green_window()
   {
-    const int streak = latch_->consecutive_green_frames();
-    const int required = latch_->options().green_confirmation_frames;
+    const int hits = latch_->green_hits();
+    const int window = latch_->options().green_window_frames;
+    const int required = latch_->options().green_required_frames;
+    const int samples = latch_->window_samples();
 
-    if (streak != reported_streak_) {
-      reported_streak_ = streak;
+    if (hits != reported_hits_) {
+      reported_hits_ = hits;
       if (latch_->latched()) {
         RCLCPP_INFO(
-          get_logger(), "start_permission=true (latched, green_streak=[%d/%d])",
-          streak, required);
+          get_logger(), "start_permission=true (latched, green_hits=%d/%d)",
+          hits, window);
       } else {
         RCLCPP_INFO(
-          get_logger(), "start_permission=false green_streak=[%d/%d]", streak, required);
+          get_logger(),
+          "start_permission=false green_window=[%d/%d] required=%d samples=%d",
+          hits, window, required, samples);
       }
       return;
     }
 
-    // Unchanged value: keep a once-a-second heartbeat so a stalled run is still
-    // visible. After the latch the streak is frozen, so this is the only line
-    // that keeps reporting.
+    // Unchanged value: keep a once-a-second heartbeat so a stalled window is
+    // still visible. After the latch the window is frozen, so this is the only
+    // line that keeps reporting.
     if (latch_->latched()) {
       RCLCPP_INFO_THROTTLE(
         get_logger(), *get_clock(), 1000,
-        "start_permission=true (latched, green_streak=[%d/%d])", streak, required);
+        "start_permission=true (latched, green_hits=%d/%d)", hits, window);
     } else {
       RCLCPP_INFO_THROTTLE(
         get_logger(), *get_clock(), 1000,
-        "start_permission=false green_streak=[%d/%d]", streak, required);
+        "start_permission=false green_window=[%d/%d] required=%d samples=%d",
+        hits, window, required, samples);
     }
   }
 
@@ -220,9 +281,9 @@ private:
       reported_latched_ = latch_->latched();
       RCLCPP_INFO(
         get_logger(),
-        "start permission latched after %d consecutive green frames; "
-        "publishing true from now on",
-        latch_->consecutive_green_frames());
+        "start permission latched: green detected in %d of the last %d usable "
+        "frames; publishing true from now on",
+        latch_->green_hits(), latch_->options().green_window_frames);
     }
 
     if (latch_->camera_active() != reported_camera_active_) {
@@ -242,7 +303,7 @@ private:
   std::unique_ptr<StartPermissionLatch> latch_;
   bool log_detection_detail_{false};
   bool reported_latched_{false};
-  int reported_streak_{0};
+  int reported_hits_{0};
   bool reported_camera_active_{false};
   rclcpp::Subscription<sensor_msgs::msg::CompressedImage>::SharedPtr image_subscription_;
   rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr permission_publisher_;

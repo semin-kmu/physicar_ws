@@ -12,6 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// ---------------------------------------------------------------------------
+// 2026-08-25: the temporal confirmation policy changed.
+//
+// It used to demand `green_confirmation_frames` consecutive greens, so a single
+// dropped or mis-classified camera frame sent the count back to zero and the
+// vehicle occasionally never left the start line. It now latches on
+// `green_required_frames` greens within the last `green_window_frames`
+// observations.
+//
+// The policy was written and validated in kau_object_detection_lane first and
+// is reproduced here independently: this package has no build or runtime
+// dependency on that one. The two copies must be kept in step by hand.
+//
+// ONLY the temporal decision changed. The spatial detection - ROI, HSV bounds,
+// component area, aspect ratio, fill ratio - lives in green_lamp_detector and
+// was not touched, and neither were the topics, the message type, the QoS, the
+// publish period, the camera timeout or the permanent latch.
+// ---------------------------------------------------------------------------
+
 #include "kau_object_detection/start_signal_logic.hpp"
 
 #include <cmath>
@@ -23,8 +42,18 @@ namespace kau_object_detection
 StartPermissionLatch::StartPermissionLatch(const StartSignalOptions & options)
 : options_(options)
 {
-  if (options_.green_confirmation_frames < 1) {
-    throw std::invalid_argument("green_confirmation_frames must be at least 1");
+  if (options_.green_window_frames < 1) {
+    throw std::invalid_argument("green_window_frames must be at least 1");
+  }
+  if (options_.green_required_frames < 1) {
+    throw std::invalid_argument("green_required_frames must be at least 1");
+  }
+  // A threshold above the window can never be reached, which would forbid the
+  // start for the whole race with no other symptom. Refusing to start is the
+  // only honest response.
+  if (options_.green_required_frames > options_.green_window_frames) {
+    throw std::invalid_argument(
+            "green_required_frames must not exceed green_window_frames");
   }
   if (!std::isfinite(options_.camera_timeout_s) || options_.camera_timeout_s <= 0.0) {
     throw std::invalid_argument("camera_timeout_s must be finite and positive");
@@ -38,10 +67,41 @@ void StartPermissionLatch::refresh_camera_activity(const double now_s)
   camera_active_ = true;
 }
 
+void StartPermissionLatch::clear_window()
+{
+  window_.clear();
+  green_hits_ = 0;
+}
+
+void StartPermissionLatch::push_sample(const bool green)
+{
+  // Evict first, so the window never exceeds its configured size and the hit
+  // count always describes exactly the samples still inside it.
+  if (window_.size() >= static_cast<std::size_t>(options_.green_window_frames)) {
+    if (window_.front()) {
+      --green_hits_;
+    }
+    window_.pop_front();
+  }
+
+  window_.push_back(green);
+  if (green) {
+    ++green_hits_;
+  }
+
+  // The window does not have to be full: the threshold is a count of greens,
+  // not a ratio, so four greens as the first four samples latch immediately.
+  if (green_hits_ >= options_.green_required_frames) {
+    latched_ = true;
+  }
+}
+
 void StartPermissionLatch::observe_frame(const FrameOutcome outcome, const double now_s)
 {
   // Once the start is permitted the decision is final. Frames keep arriving and
-  // are still tracked for diagnostics, but nothing they say can revoke it.
+  // camera liveness is still tracked for diagnostics, but nothing they say can
+  // revoke it, and the window is frozen so the reported hit count stays at the
+  // value that latched it.
   if (latched_) {
     if (outcome != FrameOutcome::kUnusable) {
       refresh_camera_activity(now_s);
@@ -52,21 +112,21 @@ void StartPermissionLatch::observe_frame(const FrameOutcome outcome, const doubl
   switch (outcome) {
     case FrameOutcome::kGreen:
       refresh_camera_activity(now_s);
-      ++consecutive_green_frames_;
-      if (consecutive_green_frames_ >= options_.green_confirmation_frames) {
-        latched_ = true;
-      }
+      push_sample(true);
       break;
 
     case FrameOutcome::kNotGreen:
+      // Red, yellow, an absent signal and an unrecognised one all land here.
       refresh_camera_activity(now_s);
-      consecutive_green_frames_ = 0;
+      push_sample(false);
       break;
 
     case FrameOutcome::kUnusable:
-      // The camera delivered bytes we could not judge. That breaks the run and
-      // deliberately does not count as the camera being alive.
-      consecutive_green_frames_ = 0;
+      // The camera delivered bytes we could not judge. It enters the window as
+      // a non-green sample - the conservative choice, since it can push an
+      // older green out of the window and so only ever makes latching harder -
+      // and deliberately does not count as the camera being alive.
+      push_sample(false);
       break;
   }
 }
@@ -78,8 +138,8 @@ void StartPermissionLatch::advance_time(const double now_s)
   }
 
   if (!has_usable_frame_) {
-    // Nothing has ever arrived, so there is no run to clear and the camera was
-    // never active in the first place.
+    // Nothing has ever arrived, so there is no window to clear and the camera
+    // was never active in the first place.
     camera_active_ = false;
     return;
   }
@@ -95,7 +155,11 @@ void StartPermissionLatch::advance_time(const double now_s)
 
   if (age_s > options_.camera_timeout_s) {
     camera_active_ = false;
-    consecutive_green_frames_ = 0;
+    // The whole window goes, not just the count. Greens observed before a long
+    // outage say nothing about the signal after it, and letting them combine
+    // with greens seen after recovery could permit a start on evidence that is
+    // seconds old.
+    clear_window();
   }
 }
 
