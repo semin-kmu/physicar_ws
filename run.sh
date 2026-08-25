@@ -1,6 +1,6 @@
 # 전체 스택 기동. system_supervisor 하나만 띄우고 나머지는 그가 spawn 한다.
 #
-#     source ~/physicar_ws/run.sh
+#     source ~/physicar_ws/physicar_ws/run.sh
 #
 # 아래 "설정" 값만 고쳐서 쓴다. 인자는 받지 않는다.
 # Ctrl-C 로 내리면 supervisor 가 기동 역순으로 전부 정리한다.
@@ -17,7 +17,7 @@
 KAU_LANE_VIEWER=true
 
 # Gazebo 는 true, 실제 차량은 false.
-KAU_USE_SIM_TIME=true
+KAU_USE_SIM_TIME=false
 
 # 로그 디렉터리 이름 (~/.ros/kau/<이름>). 비우면 기동 시각으로 자동
 KAU_RUN_ID=""
@@ -32,11 +32,17 @@ KAU_AUTO_SOURCE=true
 # 이하 수정 불필요
 # ====================================================================
 
-KAU_WS="/home/physicar/physicar_ws"
+# 이 스크립트가 있는 위치를 워크스페이스 루트로 사용한다.
+# (source 로 부르면 $0 가 아니라 ${BASH_SOURCE[0]} 를 봐야 한다)
+if [ -n "${BASH_SOURCE[0]:-}" ]; then
+    KAU_WS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+else
+    KAU_WS="$(cd "$(dirname "$0")" && pwd)"
+fi
 
 if [ "${KAU_AUTO_SOURCE}" = "true" ] && \
    [ -f "${KAU_WS}/install/setup.bash" ] && \
-   ! printf '%s' "${AMENT_PREFIX_PATH:-}" | grep -q "${KAU_WS}/install"
+   ! printf '%s' "${AMENT_PREFIX_PATH:-}" | grep -qF "${KAU_WS}/install"
 then
     echo "[run.sh] ${KAU_WS}/install/setup.bash 를 잡는다"
     . "${KAU_WS}/install/setup.bash"

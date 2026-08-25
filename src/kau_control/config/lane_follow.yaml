@@ -21,7 +21,7 @@ steer_controller:
     path:
       # lane 하나만 쓴다. global 이 끼어들 자리 자체를 없앤다 --
       # 측위 없이 도는 실험 중에 전역 경로가 섞이면 원인을 못 가린다.
-      mode: "lane_only"
+      mode: "normal"
 
       sources:
         lane:
@@ -92,7 +92,7 @@ speed_controller:
     path:
       # lane 하나만 쓴다. global 이 끼어들 자리 자체를 없앤다 --
       # 측위 없이 도는 실험 중에 전역 경로가 섞이면 원인을 못 가린다.
-      mode: "lane_only"
+      mode: "normal"
 
       sources:
         lane:
@@ -140,8 +140,8 @@ speed_controller:
       # 0.4 m/s: 50 Hz 제어 기준 한 tick 에 8 mm, LookAhead 25 cm 를
       # 0.6 초에 통과한다. 차선 인지가 14 Hz 이므로 인지 한 프레임
       # 사이에 2.9 cm 진행 — 인지 지연이 조향에 묻히는 범위다.
-      v_min: 0.4
-      v_max: 0.4
+      v_min: 0.3
+      v_max: 0.5
 
       look_min_cm: 20.0
       look_max_cm: 80.0

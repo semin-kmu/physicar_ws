@@ -1,4 +1,4 @@
-image: /home/physicar/physicar_ws/src/kau_localization/maps/kau_v3.pgm
+image: kau_v3.pgm
 resolution: 0.050000
 origin: [-3.793323, -1.764733, 0.0]
 negate: 0
