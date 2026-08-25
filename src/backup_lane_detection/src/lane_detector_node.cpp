@@ -369,7 +369,7 @@ void LaneDetectorNode::onSteer(const std_msgs::msg::Float64::ConstSharedPtr msg)
 
 void LaneDetectorNode::onImage(const sensor_msgs::msg::CompressedImage::ConstSharedPtr msg)
 {
-  // 예외를 콜백 밖으로 던지지 않는다 (규약 §10).
+  // 예외를 콜백 밖으로 던지지 않는다 (규약 §11).
   try {
     if (msg->data.empty()) {return;}
 
