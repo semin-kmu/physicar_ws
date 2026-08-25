@@ -46,7 +46,7 @@ speed_controller:
     speed:
       # ★ 초기 실차 시험용 저속 세팅 (2026-08-25).
       #   트랙 주 코너가 R 63~65 cm 라 v_min 이 코너 속도를 사실상 결정한다.
-      v_min: 0.2
+      v_min: 0.3
       v_max: 0.5                        # 하드웨어 상한은 3.0
       # window = [look_min, max(look_k * v, look_min + min_span)]
       #          look_k = look_max / v_max = 50 / 0.5 = 100 cm per (m/s)
