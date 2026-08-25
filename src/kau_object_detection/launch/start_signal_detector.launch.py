@@ -24,7 +24,8 @@ from launch_ros.parameter_descriptions import ParameterValue
 
 
 def detector_node(context, *unused):
-    """검출 노드 하나를 만든다.
+    """
+    검출 노드 하나를 만든다.
 
     값의 주인은 params_file(기본 config/start_signal_detector.yaml)이다.
     토픽 인자는 명시적으로 준 것만 덮는다 -- 빈 값은 "안 줬다"는 뜻이다.
