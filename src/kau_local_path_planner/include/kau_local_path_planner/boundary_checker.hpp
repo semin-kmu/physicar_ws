@@ -24,6 +24,7 @@
 #define KAU_LOCAL_PATH_PLANNER__BOUNDARY_CHECKER_HPP_
 
 #include <limits>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -38,12 +39,42 @@ namespace local_path_planner
 using kau::bezier::Point2;
 using kau::control::Curve;
 
+// pointClearance 용 공간 인덱스. 구현은 boundary_checker.cpp 안에만 있다
+// (호출자는 존재를 알 필요가 없다 -- RoadBoundary 를 그냥 값으로 들고 다니면
+// 인덱스도 shared_ptr 로 따라온다).
+struct BoundaryIndex;
+
 // 드라이버블 링 = outer 내부 AND inner 외부. 둘 다 cm, map frame, 닫힌 폴리곤
 // (마지막 점이 첫 점과 같지 않아도 되며, 내부에서 wrap 처리한다).
 struct RoadBoundary
 {
     std::vector<Point2> outer;
     std::vector<Point2> inner;
+
+    // ------------------------------------------------------------------
+    // 2026-08-25 (성능): pointClearance 가속용 공간 인덱스.
+    //
+    // 실측 배경 -- 실제 트랙(outer 388 / inner 388 정점)에서 pointClearance 는
+    // 한 번 부를 때마다 776 개 선분에 거리 계산 + 두 번의 ray-cast 를 돌았다.
+    // plan() 한 틱이 이 함수를 4,100~8,600 번 부르므로 (roadReportWheels 가
+    // 경로 샘플마다 바퀴 4 개 x 2 점을 찍는다) 틱당 폴리곤 선분 연산이
+    // 640 만~1,340 만 회였고, 그게 plan() 전체 시간의 약 95% 였다
+    // (평균 26~50ms / 최대 210ms @ 10Hz. 예산 100ms 를 회피 상황에서 초과).
+    //
+    // 인덱스는 근사가 아니라 **후보 축소**다 -- 아래 ensureIndex() 주석의
+    // 포함 증명 참조. 같은 입력에 같은 double 이 나오므로 게이트 판정이
+    // 바뀌지 않는다 (200 틱 회귀에서 status/offset/kappa/clearance 전부
+    // 비트 단위 동일 확인).
+    //
+    // 최초 질의 때 lazy 로 만들고 이후 재사용한다. makeRoadBoundary() 는
+    // 미리 만들어 둔다 (첫 plan() 틱이 빌드 비용을 물지 않게).
+    //
+    // ★ outer/inner 를 직접 바꿨으면 resetIndex() 를 부를 것. 안 불러도
+    //   정점 개수가 달라지면 자동으로 다시 만들지만, 개수가 같은 채로
+    //   좌표만 바뀌면 낡은 인덱스를 쓰게 된다.
+    mutable std::shared_ptr<const BoundaryIndex> index;
+
+    void resetIndex() const { index.reset(); }
 };
 
 struct SimToMap
@@ -66,6 +97,8 @@ RoadBoundary makeRoadBoundary(
 // 기하 primitive (kau_object_detection/track_geometry.cpp 와 동일 알고리즘)
 // ---------------------------------------------------------------------
 
+// 아래 둘은 인덱스를 쓰지 않는 전수 탐색 참조 구현이다. pointClearance 의
+// 정답 기준(단위테스트)이자, 인덱스 격자 밖 질의의 폴백 경로다.
 bool pointInPolygon(const std::vector<Point2> & polygon, const Point2 & p);
 
 double distanceToPolygonBoundary(

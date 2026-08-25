@@ -9,7 +9,20 @@
 
 local_planner_node:
   ros__parameters:
-    plan_hz: 10.0
+    # 2026-08-25: 10.0 -> 5.0.
+    #
+    # kau_state_machine/docs/08_설정_스키마.md 의 local_path_planner.params.
+    # replan_hz 가 원래 "확정 5.0 상시" 인데 이 파일만 10 으로 어긋나 있었다.
+    # 5Hz 면 한 주기 이동이 v_max 0.5m/s 에서 10cm 라 재계획 지연이 문제되지
+    # 않는다 (아래 validated_horizon_cm 재계산 참조).
+    #
+    # ★ 이 값을 바꾸면 같이 봐야 하는 곳:
+    #   - validated_horizon_cm (이 파일 아래. 한 주기 이동이 들어간다)
+    #   - kau_gui/config/gui.yaml 의 watch 줄 "/path/local ... | 5"
+    #     (기대 주기라, 안 맞추면 감시등 계산이 틀어진다)
+    #   - kau_control/config/path_source.yaml 의 sources.local.timeout
+    #     (1.0s. 주기 0.2s 이므로 여유 충분 -- 지금은 손댈 것 없음)
+    plan_hz: 5.0
     map_frame: "map"
     base_frame: "base_footprint"
 
@@ -149,13 +162,19 @@ local_planner_node:
     #        = max(k_v*v, ld_min) + 100*v/plan_hz + 5   [cm, v in m/s]
     #
     # 저속 세팅(v_max 0.5)에서는 k_v*v(25cm) < ld_min(30cm) 이라 Ld 가 30 에
-    # 고정된다. 따라서
+    # 고정된다. plan_hz 5.0 기준으로
     #
-    #     v 0.2 -> 30 + 2 + 5 = 37cm
-    #     v 0.5 -> 30 + 5 + 5 = 40cm    <- speed_controller v_max
+    #     v 0.2 -> 30 + 4 + 5 = 39cm
+    #     v 0.5 -> 30 + 10 + 5 = 45cm   <- speed_controller v_max
     #
-    # 60 은 여기에 1.5 배 여유. 하한 35 에 붙이지 않은 이유는 Ld 가 고정이라
+    # 60 은 여기에 1.33 배 여유. 하한 35 에 붙이지 않은 이유는 Ld 가 고정이라
     # 여유 전부가 측위 오차 + 경로 지연 흡수에만 쓰이기 때문이다.
+    #
+    # 2026-08-25 plan_hz 10 -> 5 재계산: 한 주기 이동이 5 -> 10cm 로 늘어
+    # 필요값이 40 -> 45cm 가 됐다. 60 이 여전히 이를 넘으므로 값은 그대로
+    # 두지만, 여유가 1.5 -> 1.33 배로 줄었다. v_max 를 올리거나 plan_hz 를
+    # 더 낮추면 이 식을 다시 풀 것 (예: plan_hz 5, v 1.0 -> 50+20+5 = 75cm
+    # 로 60 을 넘긴다).
     #
     # 이력
     #   kCommittedHorizonCm 52.422  세그먼트 단위로 잘라 실효 75cm (= v 1.0).
