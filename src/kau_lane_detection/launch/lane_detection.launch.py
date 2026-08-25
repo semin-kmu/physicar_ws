@@ -36,6 +36,8 @@ ROS 쪽에는 image_raw 만 bridge 되어 있어서 camera_info 가 비어 있�
     pan_search:=false           카메라 pan 탐색 끄기 (기본: yaml)
     pan_aim:=false              카메라 pan 조준 끄기 (기본: yaml)
     pan_aim_source:=global      조준 근거를 전역경로로 (기본: yaml = lane)
+    camera_tilt:=10             기동 tilt 각 [deg, + = 아래] (기본: yaml = 5)
+    camera_tilt_enable:=false   기동 tilt 를 아예 안 세움 (기본: yaml = true)
 
 실차 카메라 드라이버는 캘리브 파일이 없으면 intrinsic 을 0 으로 채워
 발행하고, 인지 노드는 그걸 거부한다. 예전에는 사람이 매번 손으로
@@ -50,6 +52,15 @@ pan_search / pan_aim / pan_aim_source 는 안 주면 yaml 값
 
 pan_search 는 노드가 생성자에서 한 번만 읽는 값이라
 ros2 param set 으로는 바꿀 수 없다. 기동 시점에 넣어야 한다.
+
+camera_tilt 는 반대로 런타임에도 먹는다:
+
+    ros2 param set /kau_lane_detection_node camera_tilt_deg 10.0
+
+그리고 밖에서 /camera/tilt 를 직접 잡으면 이 노드는 손을 뗀다
+(다시 param set 하면 되돌아온다). 어느 쪽이든 BEV 세 행
+(bev_vanishing_y / bev_src_top_y / bev_src_bottom_y)은 따라가지
+않으므로, 노드가 로그로 찍어 주는 유도값을 같이 param set 할 것.
 
 yaml 기본은 켜짐이다. 탐색/유지/복귀 동안에는 카메라 자세가 BEV 의
 전제(pan=0)와 어긋나므로 그 사이 /lane/center 를 새로 짓지 않고
@@ -89,14 +100,20 @@ IMAGE_BRIDGE = (
 
 
 # 인자 이름 -> 노드 파라미터 이름. yaml 의 같은 키를 덮는 자리다.
-PAN_OVERRIDES = (
+BOOL_OVERRIDES = (
     ('pan_search', 'pan_search_enable'),
     ('pan_aim', 'pan_aim_enable'),
+    ('camera_tilt_enable', 'camera_tilt_enable'),
 )
 
 # 같은 규칙(빈 값 = 안 줬다)이지만 bool 로 바꾸지 않고 문자열 그대로 넣는다.
-PAN_STR_OVERRIDES = (
+STR_OVERRIDES = (
     ('pan_aim_source', 'pan_aim_source'),
+)
+
+# 실수로 넣어야 하는 값. 문자열로 넣으면 노드가 타입 불일치로 죽는다.
+FLOAT_OVERRIDES = (
+    ('camera_tilt', 'camera_tilt_deg'),
 )
 
 
@@ -111,15 +128,20 @@ def lane_detection_node(context, *unused):
         'use_sim_time': ParameterValue(
             LaunchConfiguration('use_sim_time'), value_type=bool),
     }
-    for arg, param in PAN_OVERRIDES:
+    for arg, param in BOOL_OVERRIDES:
         raw = LaunchConfiguration(arg).perform(context)
         if raw:
             overrides[param] = raw.lower() == 'true'
 
-    for arg, param in PAN_STR_OVERRIDES:
+    for arg, param in STR_OVERRIDES:
         raw = LaunchConfiguration(arg).perform(context)
         if raw:
             overrides[param] = raw
+
+    for arg, param in FLOAT_OVERRIDES:
+        raw = LaunchConfiguration(arg).perform(context)
+        if raw:
+            overrides[param] = float(raw)
 
     # 플랫폼 오버레이. config/lane_detection.yaml 의 BEV 행 좌표는
     # 시뮬 카메라(cy=180.000) 기준이라 실차(cy=169.603)에서는 지평선이
@@ -272,6 +294,29 @@ def generate_launch_description():
                 "lane = 이 노드가 만든 차선 경로 (측위 불필요), "
                 "global = /path/global + 측위. "
                 "주행 중 ros2 param set 으로도 바꿀 수 있다"
+            ),
+        ),
+
+        # 기동 tilt. 빈 값이면 yaml (camera_tilt_deg / camera_tilt_enable).
+        DeclareLaunchArgument(
+            'camera_tilt',
+            default_value='',
+            description=(
+                '기동 시 세울 카메라 하향각 [deg, + = 아래] '
+                '(기본: yaml = 5.0). BEV 세 행이 이 각을 전제하므로 '
+                '바꾸면 bev_vanishing_y / bev_src_top_y / '
+                'bev_src_bottom_y 도 같이 유도해야 한다 — 노드가 '
+                '기동 로그에 유도값을 찍어 준다'
+            ),
+        ),
+
+        DeclareLaunchArgument(
+            'camera_tilt_enable',
+            default_value='',
+            description=(
+                '기동 tilt 발행 자체를 끈다 (기본: yaml = true). '
+                '끄면 카메라 자세를 밖에서 세워야 하고, 노드는 '
+                '/camera/tilt 를 읽지도 쓰지도 않는다'
             ),
         ),
 

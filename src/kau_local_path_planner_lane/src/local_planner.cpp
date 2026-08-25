@@ -323,15 +323,18 @@ PlanResult LocalPlanner::plan(
 
 void LocalPlanner::fillRoadDiag(PlanResult & result, const Curve & cv) const
 {
+    // 전 구간 스캔 한 번으로 committed 구간 최솟값까지 같이 받는다. 예전엔
+    // 같은 스캔을 horizon 으로 끊어 한 번 더 돌았는데, 그건 전 구간 스캔의
+    // 접두부를 그대로 다시 계산하는 것이라 값이 같으면서 (스테이션당 곡선
+    // 최근접 투영 16 회) 전 구간 판정 한 번을 통째로 더 쓰는 셈이었다.
     const RoadReport full = roadReportWheels(
-        boundary_, cv, wheels_, kRoadSafetyMarginCm, kRoadSampleIntervalCm);
+        boundary_, cv, wheels_, kRoadSafetyMarginCm, kRoadSampleIntervalCm,
+        kInf, validatedHorizon(cv));
     result.min_wheels_on = full.min_wheels_on;
     result.road_clear_full = full.min_clear_cm;
     result.road_viol_s = full.first_viol_s_cm;
     result.road_off_len = full.off_integral_cm;
-    result.road_clear_committed = roadReportWheels(
-        boundary_, cv, wheels_, kRoadSafetyMarginCm, kRoadSampleIntervalCm,
-        validatedHorizon(cv)).min_clear_cm;
+    result.road_clear_committed = full.min_clear_upto_cm;
 }
 
 double LocalPlanner::validatedHorizon(const Curve & cv) const

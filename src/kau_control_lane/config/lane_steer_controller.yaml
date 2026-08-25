@@ -1,0 +1,78 @@
+# 조향 제어 parameter (Pure Pursuit) — 차선 추종 전용
+#
+# 단위: 길이 cm / 각도 deg   (ROS 경계에서만 m, rad 로 변환)
+#
+# 알고리즘과 차량 제원은 kau_control/config/steer_controller.yaml 과 같다.
+# 다른 값만 아래 주석에 근거를 적는다 (Ld 범위, cte_abort).
+#
+# ★ 경로 입력(topic · timeout · pose_source)은 여기 없다.
+#   config/lane_source.yaml 한 곳이다. 두 제어기가 그 파일을 같이 받는다.
+#
+# **주행 공간이나 차량이 바뀌면 다시 잡아야 한다.**
+
+# ★ 섹션이 노드 이름이 아니라 `/**` 인 이유
+#
+# ROS 2 는 **노드 이름 섹션이 `/**` 섹션을 항상 이긴다** (파일 순서와
+# 무관하다). 그래서 이 파일을 `lane_steer_controller:` 로 적으면
+# launch 인자(pose_source:=tf)나 `-p controller.ld_max_cm:=...` 같은 CLI 오버라이드가
+# 조용히 씹힌다 -- 둘 다 `/**` 로 들어가기 때문이다.
+#
+# 이 파일은 해당 노드에만 넘기므로 `/**` 라도 남의 노드에 새지 않는다.
+# 대신 오버라이드가 정상적으로 먹는다 (실측 확인, 2026-08-25).
+#
+/**:
+  ros__parameters:
+
+    # --- 인터페이스 ---
+    # pose_source: identity 면 map_frame / base_frame / tf_timeout 은 놀고,
+    # 경로 갱신이 유일한 생존 신호가 된다 (lane.timeout).
+    map_frame: "map"
+    base_frame: "base_link"
+    speed_topic: "/speed"               # Ld 계산에 쓸 현재 속도 명령
+
+    control_hz: 50.0
+    tf_timeout: 0.2                     # s, pose_source=tf 일 때만 쓰인다
+
+    # 경로가 차량 기준이므로 cte 는 곧 "중앙선에서 얼마나 벗어났나" 다.
+    # 도로 반폭이 31.25 cm 이니 40 cm 를 넘었으면 도로 밖 무언가를
+    # 차선으로 물었다고 보고 세운다.
+    cte_abort_cm: 40.0
+
+    # --- 차량 제원 ---
+    vehicle:
+      wheelbase_cm: 18.0                # 확정. driver_params.yaml 과 일치할 것
+      max_steer_deg: 20.0               # 확정. 하드웨어 한계
+      # Pure Pursuit 기준점(후륜축)이 base_frame 원점에서 떨어진 종방향 거리.
+      # PhysiCar URDF 는 base_footprint 를 휠베이스 중앙에 두므로 -wheelbase/2.
+      # 0 으로 두면 코너에서 계속 안쪽으로 파고든다.
+      # lane_speed_controller.yaml 의 같은 값과 반드시 일치시킬 것.
+      rear_axle_offset_cm: -9.0
+
+    # --- Pure Pursuit ---
+    # ld_max 가 kau_control 기본(175)이 아니라 80 인 이유: lane detection 의
+    # valid_length 가 80 cm 안팎이고 그 너머는 외삽이라, 175 로 둬도 노드가
+    # valid_length 로 다시 잘라낸다. 여기서 미리 맞춰두면 로그의 Ld 가
+    # 실제 값과 일치해 읽기 쉽다.
+    #
+    # ld_min 은 25. 30 으로 두면 관측 구간이 35 cm 밑으로 떨어질 때마다
+    # "LookAhead 를 둘 곳이 없다" 로 정지한다. 25 면 코너에서 관측이
+    # 짧아져도 조금 더 버틴다. 더 내리면 조향이 떨린다
+    # (휠베이스 18 cm 대비 너무 짧다).
+    controller:
+      k_v: 0.5                          # s, Ld = k_v * v
+      ld_min_cm: 25.0
+      ld_max_cm: 80.0
+
+    # --- 시각화 ---
+    # RViz 는 KauPath 를 못 그리므로 nav_msgs/Path 로 분리 발행한다.
+    viz:
+      enabled: true
+      samples_per_seg: 20
+
+    # --- 디버깅 GUI (kau_gui) ---
+    # 제어 루프가 이미 구하는 값(조향각, Ld, 추종오차)을 그대로 내보낸다.
+    # topic 은 kau_control 과 같다 -- GUI 는 어느 제어기가 내는지 구분하지
+    # 않고 그리므로, 두 스택을 동시에 띄우면 안 된다 (README §3).
+    debug:
+      enabled: true
+      topic: "/debug/steer"

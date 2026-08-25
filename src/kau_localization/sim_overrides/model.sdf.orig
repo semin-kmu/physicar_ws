@@ -214,7 +214,7 @@
       <parent>camera_pan_link</parent>
       <child>camera_tilt_link</child>
       <axis>
-        <xyz>0 -1 0</xyz>
+        <xyz>0 1 0</xyz>
         <limit>
           <lower>-0.5236</lower>
           <upper>0.5236</upper>
@@ -259,7 +259,18 @@
         <visualize>false</visualize>
         <topic>camera/image_raw</topic>
         <camera>
-          <horizontal_fov>1.7453</horizontal_fov>
+          <!-- 실차 발행본(480x360) 과 광학을 맞춘 값. 2026-08-25
+               실차: 640x480 센서 -> physicar_camera 드라이버가
+               getOptimalNewCameraMatrix(K_raw, D_raw*0.7, alpha=0) 로
+               undistort + crop -> 480x360 발행 -> kau_lane_detection_node
+               가 잔여왜곡을 remap 으로 편 뒤 얻는 핀홀 K 는
+                   fx = fy = 261.559  (FOV 85.08 deg)
+               fx = (width/2)/tan(hfov/2) 이므로
+                   hfov = 2*atan(240/261.559) = 1.48488 rad
+               예전 값 1.7453(100 deg)은 렌즈 스펙 FOV 였다. 센서 원본은
+               실제로 98.4 deg 를 보지만 드라이버의 alpha=0 crop 이 그만큼을
+               잘라내므로 실차 파이프라인에는 그 화각이 나오지 않는다. -->
+          <horizontal_fov>1.48488</horizontal_fov>
           <image>
             <width>480</width>
             <height>360</height>
@@ -269,19 +280,23 @@
             <near>0.01</near>
             <far>50</far>
           </clip>
-          <distortion>
-            <k1>-0.045</k1>
-            <k2>-0.0001</k2>
-            <k3>0.001</k3>
-            <p1>-0.0003</p1>
-            <p2>-0.0001</p2>
-            <center>0.5 0.5</center>
-          </distortion>
+          <!-- <distortion> 제거 (2026-08-25).
+               이 카메라는 headless ogre2 로 렌더되는데(sim_api.py:126)
+               gz-rendering8 의 DistortionPass 는 ogre1 에만 구현돼 있다
+               (libgz-rendering8-ogre2 에 Distortion 심볼이 하나도 없고,
+                libgz-rendering8-ogre 에는 OgreDistortionPass 가 있다).
+               즉 왜곡은 영상에 전혀 적용되지 않는데 gz-sensors 는 이 계수를
+               CameraInfo.d 에 그대로 실어 보낸다. 그러면
+               kau_lane_detection_node 가 왜곡 없는 영상을 왜곡됐다고 믿고
+               undistort 해서 없던 왜곡을 만들어 넣는다.
+               실차 쪽은 노드의 remap 이 잔여왜곡을 실제로 펴서 핀홀이 되므로,
+               시뮬도 D=0 핀홀로 두는 것이 양쪽을 맞추는 길이다. -->
           <noise>
             <type>gaussian</type>
             <mean>0</mean>
             <stddev>0.0070000000000000001</stddev>
           </noise>
+          <visibility_mask>4294967291</visibility_mask>
         </camera>
         <pose>0.030 0 0.014 0 0 0</pose>
         <gz_frame_id>camera_optical_frame</gz_frame_id>

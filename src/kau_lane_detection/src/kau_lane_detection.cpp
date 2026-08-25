@@ -166,8 +166,8 @@ KauLaneDetectionNode::KauLaneDetectionNode()
     // ------------------------------------------------------------
     // 기동 tilt
     //
-    // BEV 는 bev_vanishing_y 로 카메라 pitch 를 전제한다 (2 deg 하향
-    // 기준 169.57, 수평이면 178.70 — 9 px 차이). 그 각도를 실제로
+    // BEV 는 bev_vanishing_y 로 카메라 pitch 를 전제한다 (5 deg 하향
+    // 기준 155.81, 수평이면 178.70 — 23 px 차이). 그 각도를 실제로
     // 세우는 주체가 없으면 지평선이 그만큼 어긋난 채 돌아가므로 이
     // 노드가 기동 시 직접 세운다. 제어량이 아니라 고정 자세라
     // 램프도 상태기계도 없다.
@@ -188,13 +188,28 @@ KauLaneDetectionNode::KauLaneDetectionNode()
     camera_tilt_deg_ =
         this->declare_parameter<double>(
             "camera_tilt_deg",
-            2.0
+            5.0
         );
 
     camera_tilt_repeat_s_ =
         this->declare_parameter<double>(
             "camera_tilt_repeat_s",
             5.0
+        );
+
+    // 지금 yaml 의 BEV 세 행은 이 각도를 전제하고 유도된 값이다.
+    camera_tilt_bev_ref_deg_ = camera_tilt_deg_;
+
+    // 남이 /camera/tilt 를 잡으면 손을 뗀다 (아래 tiltEchoCallback).
+    camera_tilt_echo_subscriber_ =
+        this->create_subscription<std_msgs::msg::Float64>(
+            "/camera/tilt",
+            10,
+            std::bind(
+                &KauLaneDetectionNode::tiltEchoCallback,
+                this,
+                std::placeholders::_1
+            )
         );
 
     if (camera_tilt_enable_)
@@ -5419,9 +5434,19 @@ void KauLaneDetectionNode::commandPan(double goal_deg)
 
 void KauLaneDetectionNode::publishCameraTilt()
 {
+    // 남이 이미 다른 각을 잡았으면 되돌리지 않는다.
+    if (camera_tilt_yielded_)
+    {
+        camera_tilt_timer_->cancel();
+
+        return;
+    }
+
     std_msgs::msg::Float64 msg;
 
     msg.data = camera_tilt_deg_ * M_PI / 180.0;
+
+    camera_tilt_last_sent_rad_ = msg.data;
 
     camera_tilt_publisher_->publish(msg);
 
@@ -5429,6 +5454,278 @@ void KauLaneDetectionNode::publishCameraTilt()
     {
         camera_tilt_timer_->cancel();
     }
+}
+
+
+// ================================================================
+// /camera/tilt 에코 — 남의 명령이면 양보한다
+//
+// 예전에는 이 노드가 기동 후 camera_tilt_repeat_s 동안 1 Hz 로
+// 계속 쏘기만 해서, 그 사이에
+//
+//   ros2 topic pub -1 /camera/tilt std_msgs/msg/Float64 "{data: 0.1745}"
+//
+// 로 손수 세운 각이 다음 틱에 camera_tilt_deg 로 되돌아갔다.
+// 틸트를 훑어 보려면 매번 yaml 을 고치고 재시작해야 했다.
+//
+// 이제는 우리가 마지막으로 보낸 값과 다른 값이 토픽에 오면
+// **그 즉시 손을 뗀다** (타이머도 끈다). 우리 발행도 같은 토픽으로
+// 돌아오므로 비교 대상은 "마지막으로 우리가 보낸 각" 이다.
+//
+// 대신 BEV 세 행은 그 각을 모른다. 그래서 새 각 기준 유도값을
+// 로그로 찍어 준다 — 그대로 ros2 param set 하면 기하가 맞는다.
+//
+// 다시 이 노드가 주인이 되려면 camera_tilt_deg 를 param set 한다
+// (refreshCameraTilt 가 양보를 풀고 즉시 발행한다).
+// ================================================================
+
+void KauLaneDetectionNode::tiltEchoCallback(
+    const std_msgs::msg::Float64::SharedPtr msg)
+{
+    if (!camera_tilt_enable_)
+    {
+        return;
+    }
+
+    // 우리가 보낸 것과 같으면 (부동소수 왕복 오차 허용) 무시한다.
+    if (
+        std::isfinite(camera_tilt_last_sent_rad_) &&
+        std::abs(msg->data - camera_tilt_last_sent_rad_) < 1e-6
+    )
+    {
+        return;
+    }
+
+
+    const double external_deg = msg->data * 180.0 / M_PI;
+
+    // 같은 외부 각이 반복해서 오면 한 번만 경고한다.
+    if (
+        camera_tilt_yielded_ &&
+        std::isfinite(camera_tilt_external_deg_) &&
+        std::abs(external_deg - camera_tilt_external_deg_) < 1e-6
+    )
+    {
+        return;
+    }
+
+
+    camera_tilt_yielded_ = true;
+
+    // camera_tilt_deg_ 는 **파라미터 캐시**다. 여기에 외부 각을 덮으면
+    // 다음 프레임 refreshCameraTilt() 가 "param 이 바뀌었다" 로 오인해
+    // 원래 각을 되쏘고 양보가 즉시 풀린다 (실측으로 잡은 버그).
+    camera_tilt_external_deg_ = external_deg;
+
+
+    double van = 0.0;
+
+    double top = 0.0;
+
+    double bot = 0.0;
+
+    if (tiltDerivedBevRows(external_deg, van, top, bot))
+    {
+        RCLCPP_WARN(
+            this->get_logger(),
+            "외부 /camera/tilt %+.2f deg 를 받아 기동 tilt 를 양보한다. "
+            "BEV 세 행은 %+.2f deg 를 전제하므로 지평선이 %.1f px "
+            "어긋난 상태다. 이 각으로 맞추려면:\n"
+            "  ros2 param set /kau_lane_detection_node bev_vanishing_y %.2f\n"
+            "  ros2 param set /kau_lane_detection_node bev_src_top_y %.2f\n"
+            "  ros2 param set /kau_lane_detection_node bev_src_bottom_y %.2f",
+            external_deg,
+            camera_tilt_bev_ref_deg_,
+            std::abs(bev_vanishing_y_ - van),
+            van,
+            top,
+            bot
+        );
+    }
+    else
+    {
+        RCLCPP_WARN(
+            this->get_logger(),
+            "외부 /camera/tilt %+.2f deg 를 받아 기동 tilt 를 양보한다. "
+            "BEV 세 행은 %+.2f deg 를 전제한다 — 유도값은 "
+            "CameraInfo 수신 후에 찍는다.",
+            external_deg,
+            camera_tilt_bev_ref_deg_
+        );
+    }
+}
+
+
+// ================================================================
+// camera_tilt_deg 런타임 재독 (bev_* 와 같은 idiom)
+//
+// 생성자에서 한 번만 읽던 값이라 ros2 param set 이 조용히 무시됐다.
+// 이제 매 프레임 다시 읽어, 바뀌었으면 즉시 한 번 발행한다.
+// param set 은 "다시 노드가 주인" 이라는 명시적 의사표시이므로
+// 외부 양보 상태도 같이 푼다.
+// ================================================================
+
+void KauLaneDetectionNode::refreshCameraTilt()
+{
+    if (!camera_tilt_enable_)
+    {
+        return;
+    }
+
+
+    const double tilt_deg =
+        this->get_parameter(
+            "camera_tilt_deg"
+        ).as_double();
+
+    if (std::abs(tilt_deg - camera_tilt_deg_) < 1e-9)
+    {
+        return;
+    }
+
+
+    camera_tilt_deg_ = tilt_deg;
+
+    // param set 은 "다시 이 노드가 주인" 이라는 명시적 의사표시다.
+    camera_tilt_yielded_ = false;
+
+    camera_tilt_external_deg_ =
+        std::numeric_limits<double>::quiet_NaN();
+
+
+    std_msgs::msg::Float64 msg;
+
+    msg.data = camera_tilt_deg_ * M_PI / 180.0;
+
+    camera_tilt_last_sent_rad_ = msg.data;
+
+    camera_tilt_publisher_->publish(msg);
+
+
+    double van = 0.0;
+
+    double top = 0.0;
+
+    double bot = 0.0;
+
+    if (tiltDerivedBevRows(tilt_deg, van, top, bot))
+    {
+        RCLCPP_INFO(
+            this->get_logger(),
+            "camera_tilt_deg -> %+.2f deg 발행. 이 각 기준 BEV 유도값은 "
+            "vanishing %.2f / top %.2f / bottom %.2f 다 "
+            "(현재 세 행은 %+.2f deg 기준: %.2f / %.2f / %.2f).",
+            tilt_deg,
+            van,
+            top,
+            bot,
+            camera_tilt_bev_ref_deg_,
+            bev_vanishing_y_,
+            bev_src_top_y_,
+            bev_src_bottom_y_
+        );
+    }
+    else
+    {
+        RCLCPP_INFO(
+            this->get_logger(),
+            "camera_tilt_deg -> %+.2f deg 발행.",
+            tilt_deg
+        );
+    }
+}
+
+
+// ================================================================
+// 틸트 -> BEV 세 행
+//
+//   alpha = tilt + MOUNT_PITCH_BIAS_DEG        (아래가 +)
+//   y(d)  = cy + fy*tan(atan(h/d) - alpha)     지면거리 d 인 행
+//   van   = cy - fy*tan(alpha)                 지평선 행
+//
+// 지면 밴드 d 는 **현재 세 행에서 역산**해 보존한다. 즉 look-ahead
+// 는 그대로 두고 틸트가 바뀐 만큼만 세 행을 함께 옮긴다.
+//
+//   d(y) = h / tan(atan((y - cy)/fy) + alpha_ref)
+//
+// MOUNT_PITCH_BIAS_DEG 0.284 는 마운트 실측편차다 (CLAUDE.md §3 —
+// 옛 bev_vanishing_y 179.0 이 당시 cy 180.0 보다 1 px 위였던 것).
+// ================================================================
+
+bool KauLaneDetectionNode::tiltDerivedBevRows(
+    double tilt_deg,
+    double & vanishing_y,
+    double & top_y,
+    double & bottom_y) const
+{
+    static constexpr double MOUNT_PITCH_BIAS_DEG = 0.284;
+
+    if (
+        !camera_calibrated_ ||
+        camera_matrix_.empty() ||
+        camera_height_cm_ <= 1e-6
+    )
+    {
+        return false;
+    }
+
+
+    const double fy = camera_matrix_.at<double>(1, 1);
+
+    const double cy = camera_matrix_.at<double>(1, 2);
+
+    if (fy <= 1e-6)
+    {
+        return false;
+    }
+
+
+    const double h = camera_height_cm_;
+
+    const double a_ref =
+        (camera_tilt_bev_ref_deg_ + MOUNT_PITCH_BIAS_DEG) * M_PI / 180.0;
+
+    const double a_new =
+        (tilt_deg + MOUNT_PITCH_BIAS_DEG) * M_PI / 180.0;
+
+
+    // 현재 행 -> 지면거리 (기준 틸트로 역산)
+    const auto ground_cm =
+        [&](double y)
+        {
+            const double depression =
+                std::atan((y - cy) / fy) + a_ref;
+
+            const double t = std::tan(depression);
+
+            return (t > 1e-6) ? (h / t) : -1.0;
+        };
+
+    // 지면거리 -> 행 (새 틸트로 재유도)
+    const auto row_of =
+        [&](double d_cm)
+        {
+            return cy + fy * std::tan(std::atan(h / d_cm) - a_new);
+        };
+
+
+    const double d_top = ground_cm(bev_src_top_y_);
+
+    const double d_bot = ground_cm(bev_src_bottom_y_);
+
+    if (d_top <= 0.0 || d_bot <= 0.0)
+    {
+        return false;
+    }
+
+
+    vanishing_y = cy - fy * std::tan(a_new);
+
+    top_y = row_of(d_top);
+
+    bottom_y = row_of(d_bot);
+
+    return true;
 }
 
 
@@ -7789,6 +8086,9 @@ void KauLaneDetectionNode::imageCallback(
         // ========================================================
 
         refreshBevParameters();
+
+        // camera_tilt_deg 도 같은 자리에서 다시 읽는다 (ros2 param set).
+        refreshCameraTilt();
 
 
         // --------------------------------------------------------

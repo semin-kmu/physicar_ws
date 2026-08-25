@@ -88,7 +88,7 @@ public:
 
     void build(const std::vector<Point2> & polygon)
     {
-        poly_ = &polygon;
+        poly_ = polygon;   // 복사본을 소유한다. 아래 poly_ 선언 주석 참조
         n_ = static_cast<int>(polygon.size());
         cells_.clear();
         rows_.clear();
@@ -130,7 +130,7 @@ public:
     // distanceToPolygonBoundary 와 같은 값. 격자 밖이면 전수 탐색.
     double distance(const Point2 & p) const
     {
-        const std::vector<Point2> & poly = *poly_;
+        const std::vector<Point2> & poly = poly_;
         const int cx = static_cast<int>(std::floor((p.x - x0_) / cell_));
         const int cy = static_cast<int>(std::floor((p.y - y0_) / cell_));
         if (cx < 0 || cy < 0 || cx >= nx_ || cy >= ny_)
@@ -151,7 +151,7 @@ public:
     // pointInPolygon 과 같은 값.
     bool inside(const Point2 & p) const
     {
-        const std::vector<Point2> & poly = *poly_;
+        const std::vector<Point2> & poly = poly_;
         const int r = static_cast<int>(std::floor((p.y - y0_) / kRowHeightCm));
         if (r < 0 || r >= nrow_)
         {
@@ -230,7 +230,7 @@ private:
     // ----------------------------------------------------------------
     void buildCells()
     {
-        const std::vector<Point2> & poly = *poly_;
+        const std::vector<Point2> & poly = poly_;
         cells_.assign(static_cast<std::size_t>(nx_) * static_cast<std::size_t>(ny_),
                      std::vector<int>{});
         const double half_diag = 0.5 * std::hypot(cell_, cell_);
@@ -308,7 +308,7 @@ private:
     // ----------------------------------------------------------------
     void buildRows(double lo_y, double hi_y)
     {
-        const std::vector<Point2> & poly = *poly_;
+        const std::vector<Point2> & poly = poly_;
         nrow_ = std::max(
             1, static_cast<int>(
                    std::ceil(((hi_y + kPadCm) - y0_) / kRowHeightCm)));
@@ -333,7 +333,15 @@ private:
         }
     }
 
-    const std::vector<Point2> * poly_ = nullptr;
+    // 폴리곤을 **복사해서 갖는다**. 가리키기만 하면 안 된다 --
+    // RoadBoundary 는 index(shared_ptr) 를 기본 복사자로 그대로 넘기므로
+    // (헤더 주석 "인덱스도 shared_ptr 로 따라온다"), 원본을 가리키던
+    // 포인터가 원본이 사라진 뒤에도 남아 dangling 이 된다.
+    // 실제로 `boundary_ = loadBoundary()` 의 임시 객체와
+    // `LocalPlanner(RoadBoundary boundary)` 의 값 전달에서 그렇게 됐고,
+    // 첫 pointClearance 질의에서 SIGSEGV 로 노드가 즉사했다.
+    // 388 정점 x 2 = 약 12KB 라 복사 비용은 무시할 수 있다.
+    std::vector<Point2> poly_;
     int n_ = 0;
 
     double x0_ = 0.0, y0_ = 0.0, cell_ = 25.0;

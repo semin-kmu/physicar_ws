@@ -16,6 +16,11 @@ namespace local_path_planner_lane
 using kau::bezier::Ctrl;
 using kau::bezier::Point2;
 
+// 세그먼트 하나가 담당할 최대 회전각. quintic Hermite 1 개로 표현 가능한
+// 원호 한계에서 온다 -- 이보다 크게 잡으면 sigma 후보(kSigmaRatios) 를 어떻게
+// 골라도 중간이 부풀어 곡률이 튄다.
+constexpr double kMaxTurnPerSegRad = M_PI / 4.0;   // 45deg
+
 Curve extendCurve(const Curve & cv, double target_length, int bound_depth)
 {
     const double real_length = cv.length();
@@ -24,24 +29,52 @@ Curve extendCurve(const Curve & cv, double target_length, int bound_depth)
         return cv;
     }
     const Frame f = referenceFrame(cv, real_length);
-    const Knot start{f.point, f.heading, f.kappa};
+    Knot cur{f.point, f.heading, f.kappa};
 
     const double remain = target_length - real_length;
-    const double dth = start.kappa * remain;
-    const double mid_th = start.theta + 0.5 * dth;
-    const Point2 tail_p{
-        start.p.x + remain * std::cos(mid_th),
-        start.p.y + remain * std::sin(mid_th)};
-    const Knot tail{tail_p, kau::control::wrapPi(start.theta + dth), start.kappa};
 
-    const auto [seg, kb] = fitSegment(start, tail, bound_depth);
-    (void)kb;
-    if (!seg)
-    {
-        return cv;
-    }
+    // 2026-08-25 (곡선 구간 미추종 수정): 예전 코드는 tail 점을 시작점에서
+    // **호길이** remain 만큼 떨어진 곳에 놓았다. 등곡률 원호의 현(chord)
+    // 길이는 호길이가 아니라 2*sin(dth/2)/kappa 이고, 둘의 비는
+    // 1/sinc(dth/2) 라 회전각이 커질수록 벌어진다:
+    //     dth  17deg -> +0.4%   57deg -> +4.3%   126deg -> +23%
+    // 코너(R=60cm, remain=132cm -> dth=126deg)에서 tail 이 25cm 밖에 찍히고,
+    // 그걸 quintic 하나로 억지로 이으면서 backbone 곡률이 0.01839 ->
+    // 0.02255 로 부풀어 차량 한계(0.02022)를 넘겼다. 그 순간 전 후보가
+    // kappa_bound 로 탈락하고 leastViolation 이 R=24cm 짜리 경로를 발행한다
+    // (차량 최소회전반경 49.5cm -- 물리적으로 못 따라간다).
+    // 실측(합성 원호): backbone 기하오차 R=60 에서 22.6cm -> 0.1cm.
+    //
+    // 더해서, 회전각이 아무리 커도 세그먼트 1 개로 붙이던 것을
+    // kMaxTurnPerSegRad 단위로 쪼갠다.
+    const double dth_total = cur.kappa * remain;
+    const int n = std::max(
+        1, static_cast<int>(std::ceil(std::abs(dth_total) / kMaxTurnPerSegRad)));
+    const double step = remain / n;
+
     std::vector<Ctrl> segs(cv.ctrl().begin(), cv.ctrl().end());
-    segs.push_back(*seg);
+    for (int i = 0; i < n; ++i)
+    {
+        const double dth = cur.kappa * step;
+        // |dth| 가 아주 작으면 2*sin(dth/2)/kappa 가 0/0 이라 직선(step)으로.
+        const double chord = (std::abs(dth) < 1e-9)
+            ? step
+            : 2.0 * std::sin(0.5 * dth) / cur.kappa;
+        const double mid_th = cur.theta + 0.5 * dth;
+        const Knot next{
+            Point2{cur.p.x + chord * std::cos(mid_th),
+                   cur.p.y + chord * std::sin(mid_th)},
+            kau::control::wrapPi(cur.theta + dth), cur.kappa};
+
+        const auto [seg, kb] = fitSegment(cur, next, bound_depth);
+        (void)kb;
+        if (!seg)
+        {
+            break;   // 여기까지만 늘린다 (원본 실패 시 cv 반환과 같은 방침)
+        }
+        segs.push_back(*seg);
+        cur = next;
+    }
     return Curve(std::move(segs), cv.closed());
 }
 

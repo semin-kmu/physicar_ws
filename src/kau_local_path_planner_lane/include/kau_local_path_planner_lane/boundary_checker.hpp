@@ -77,12 +77,23 @@ struct RoadReport
     double min_clear_cm    = 0.0;
     double first_viol_s_cm = -1.0;
     double off_integral_cm = 0.0;
+
+    // cm, report_horizon_cm 이내 구간만의 min_clear_cm. 진단이 "전 구간" 과
+    // "committed 구간" 두 값을 같이 쓰는데, 후자를 얻으려고 같은 스캔을 한
+    // 번 더 도는 게 비쌌다 (스테이션당 곡선 최근접 투영 16 회). 한 번의
+    // 스캔에서 접두 구간 최솟값을 같이 누적한다 -- 전체 스캔의 접두부라
+    // 값은 두 번 도는 것과 정확히 같다.
+    double min_clear_upto_cm = 0.0;
 };
 
+// report_horizon_cm: min_clear_upto_cm 을 채울 구간 상한. 기본(무한대) 이면
+// min_clear_upto_cm == min_clear_cm 이다. s_max_cm(스캔 자체를 끊는 값) 과
+// 달리 계산량을 줄이지 않고 누적 대상만 가른다.
 RoadReport roadReportWheels(
     const RoadBoundary & boundary, const Curve & cv, const WheelFootprint & wheels,
     double road_safety_margin_cm, double sample_interval_cm,
-    double s_max_cm = std::numeric_limits<double>::infinity());
+    double s_max_cm = std::numeric_limits<double>::infinity(),
+    double report_horizon_cm = std::numeric_limits<double>::infinity());
 
 inline bool roadOkWheels(
     const RoadBoundary & boundary, const Curve & cv, const WheelFootprint & wheels,

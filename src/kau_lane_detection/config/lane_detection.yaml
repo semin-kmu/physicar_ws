@@ -67,18 +67,29 @@ kau_lane_detection_node:
     # 여유 16 px.
     # 2026-08-25 재유도 (fx 201.4 -> 261.559, 카메라 2도 하향 틸트).
     # 옛 광학에서 튜닝된 지면 영역 32.3~184.3 cm 를 그대로 되찾는 행.
-    bev_src_top_y: 190.32
-    bev_src_bottom_y: 286.10      # 아랫변 y (좌/우 흰선이 화면에 들어오는 상한)
+    #
+    # 2026-08-25 틸트 2.0 -> 5.0 deg 재유도. **지면 영역은 그대로다**
+    # (32.35~184.36 cm) — 틸트를 3도 더 숙인 만큼 같은 지면이 영상에서
+    # 위로 올라가므로, 세 행이 전부 같은 양(-13.7 px)만큼 함께 내려간다.
+    # 즉 look-ahead 는 변하지 않는다. 바뀌는 것은 화면 배분이다:
+    # 지면이 차지하는 행이 190 -> 204 개로 늘고 (하단이 19.7 -> 17.7 cm
+    # 까지 내려온다), 지평선 위 배경이 그만큼 줄어든다.
+    #
+    #   y = cy + fy*tan(atan(h/d) - alpha),  alpha = 틸트 + 0.284
+    #   h = camera_height_cm 14.65, fy = 261.559, cy = 180.0 (시뮬)
+    bev_src_top_y: 176.62
+    bev_src_bottom_y: 270.47      # 아랫변 y (좌/우 흰선이 화면에 들어오는 상한)
     bev_src_bottom_width: 480.0   # 아랫변 폭
 
     # 소실점 y. BEV 위쪽이 아래보다 좁으면 올리고, 넓으면 내린다.
     # 179.0 = live undistort 프레임 직접 스윕으로 위/아래 간격이
     # 일치한 값 (위 194.9 / 아래 195.4).
-    # cy(180.0) + fy(261.559)*tan(-2.284deg) = 169.57
-    #   -2.284deg = 카메라 2도 하향 + 기존 실측편차 -0.284deg
-    #   ★ 2도 하향은 /camera/tilt 로 직접 세워야 한다 (노드가 명령하지
-    #     않는다 — §12 "tilt 미구현"). 안 세우면 지평선이 9px 어긋난다.
-    bev_vanishing_y: 169.57
+    # cy(180.0) + fy(261.559)*tan(-5.284deg) = 155.81
+    #   -5.284deg = 카메라 5도 하향 + 기존 실측편차 -0.284deg
+    #   (틸트 2.0 deg 이던 시절 값은 169.57 이었다.)
+    #   ★ 이 하향각은 노드가 기동 시 /camera/tilt 로 직접 세운다
+    #     (camera_tilt_deg, 아래). 안 세우면 지평선이 24px 어긋난다.
+    bev_vanishing_y: 155.81
 
     # dst 좌우 여백 비율. 클수록 차선이 가운데로 모인다.
     # 0.25 -> 좌/우 흰선이 약 129px, 351px
@@ -695,12 +706,16 @@ kau_lane_detection_node:
     # bev_vanishing_y 유도에 쓰는 광학 pitch 부호와는 반대다
     # (그쪽은 아래가 음수: vanishing_y = cy + fy*tan(pitch)).
     #
-    # 2.0 deg 하향 기준 유도값 (fy 261.559):
-    #   시뮬 cy 180.000 -> bev_vanishing_y 169.57  (현재 설정)
-    #   실차 cy 169.603 -> bev_vanishing_y 159.17
-    # 이 값을 바꾸면 bev_vanishing_y 를 반드시 같이 다시 유도할 것.
+    # 5.0 deg 하향 기준 유도값 (fy 261.559):
+    #   시뮬 cy 180.000 -> bev_vanishing_y 155.81  (현재 설정)
+    #   실차 cy 169.603 -> bev_vanishing_y 145.41  (platform_overrides)
+    # 이 값을 바꾸면 bev_vanishing_y 뿐 아니라 bev_src_top_y /
+    # bev_src_bottom_y 도 반드시 같이 다시 유도할 것 — 셋이 같은
+    # 지평선을 공유해야 한다 (위 BEV 절의 y = cy + fy*tan(...) 식).
+    #
+    # 하드웨어 한계는 ±30 deg 다 (physicar_driver_node MAX_TILT).
     camera_tilt_enable: true
-    camera_tilt_deg: 2.0
+    camera_tilt_deg: 10.0
 
     # 1 Hz 로 이 시간(초)만큼 반복 발행하고 타이머를 끈다.
     camera_tilt_repeat_s: 5.0

@@ -47,6 +47,7 @@
     #include "kau_lane_detection/road_map.hpp"
 
     #include <cstdint>
+    #include <limits>
     #include <memory>
     #include <deque>
     #include <string>
@@ -1051,8 +1052,52 @@
         double camera_tilt_repeat_s_ = 0.0;
 
 
+        // /camera/tilt 를 되받는다. 이 노드의 발행도 그대로 돌아오므로
+        // **마지막으로 우리가 보낸 값과 비교**해서 남의 명령을 가린다.
+        rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr
+            camera_tilt_echo_subscriber_;
+
+        // 우리가 마지막으로 발행한 각 [rad]. NaN 이면 아직 안 보냈다.
+        double camera_tilt_last_sent_rad_ =
+            std::numeric_limits<double>::quiet_NaN();
+
+        // 외부(ros2 topic pub · 웹UI · teleop)가 다른 각을 잡은 뒤로는
+        // 이 노드가 tilt 를 다시 쓰지 않는다. camera_tilt_deg 를
+        // ros2 param set 으로 주면 "다시 네가 주인" 이라는 뜻이므로 풀린다.
+        bool camera_tilt_yielded_ = false;
+
+        // 양보한 뒤 밖에서 잡힌 각 [deg]. camera_tilt_deg_ 를 여기에
+        // 덮으면 안 된다 — 그쪽은 **파라미터의 캐시**라서 값이 어긋나는
+        // 순간 refreshCameraTilt() 가 "param 이 바뀌었다" 로 오인해
+        // 곧바로 되쏜다 (양보가 한 프레임 만에 풀렸던 실측 버그다).
+        double camera_tilt_external_deg_ =
+            std::numeric_limits<double>::quiet_NaN();
+
+        // 지금 BEV 세 행(vanishing/top/bottom)이 전제하는 틸트 [deg].
+        // 기동 시 yaml 의 camera_tilt_deg 로 잠기고, 이후 유도 로그의
+        // 기준이 된다 (파라미터가 아니라 "현재 기하의 근거" 다).
+        double camera_tilt_bev_ref_deg_ = 0.0;
+
+
         // 기동 tilt 를 한 번 발행한다 (타이머 콜백).
         void publishCameraTilt();
+
+        // camera_tilt_deg 를 매 프레임 다시 읽는다. 바뀌었으면 즉시
+        // 발행하고 양보 상태를 푼다 (bev_* 와 같은 idiom).
+        void refreshCameraTilt();
+
+        // /camera/tilt 에코 콜백. 남의 명령이면 양보한다.
+        void tiltEchoCallback(
+            const std_msgs::msg::Float64::SharedPtr msg);
+
+        // 틸트 tilt_deg 에서 성립하는 BEV 세 행을 유도한다.
+        // 지면 밴드(가까운/먼 거리)는 현재 세 행에서 역산해 보존한다.
+        // camera_matrix_ / camera_height_cm_ 이 없으면 false.
+        bool tiltDerivedBevRows(
+            double tilt_deg,
+            double & vanishing_y,
+            double & top_y,
+            double & bottom_y) const;
 
 
         // ================================================================

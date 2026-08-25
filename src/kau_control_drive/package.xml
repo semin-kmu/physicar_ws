@@ -1,0 +1,35 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>kau_control_drive</name>
+  <version>0.0.0</version>
+  <description>/path/drive(kau_path_arbiter 가 차선/회피 경로 중 고른 것) 하나만 보는 주행 제어. drive_steer_controller -> /steering (Pure Pursuit + 조향 슬루 제한), drive_speed_controller -> /speed (곡률 기반 목표속도). kau_control / kau_control_lane 과 같은 topic 을 내므로 동시에 띄우지 않는다</description>
+  <maintainer email="physicar@todo.todo">physicar</maintainer>
+  <license>TODO: License declaration</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>kau_msgs</depend>
+  <!-- 곡선 수학(bezier/curve/kau_path)과 제어 파라미터/Pure Pursuit 를
+       **사본 없이** 그대로 쓴다. kau_control_lane 은 세 헤더를 복사해
+       들고 있지만, 세 번째 사본을 만들지 않는다. -->
+  <depend>kau_control</depend>
+  <depend>eigen</depend>
+
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <!-- /path/drive 발행자 -->
+  <exec_depend>kau_path_arbiter</exec_depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+  <test_depend>ament_cmake_gtest</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

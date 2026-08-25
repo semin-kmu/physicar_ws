@@ -42,6 +42,10 @@ using kau::control::Curve;
 // pointClearance 용 공간 인덱스. 구현은 boundary_checker.cpp 안에만 있다
 // (호출자는 존재를 알 필요가 없다 -- RoadBoundary 를 그냥 값으로 들고 다니면
 // 인덱스도 shared_ptr 로 따라온다).
+//
+// ★ 그래서 인덱스는 폴리곤을 **복사해서** 갖는다. 원본을 가리키기만 하면
+//   복사본이 원본보다 오래 살 때 dangling 이 된다 (실제로 그 버그가 있었다.
+//   boundary_checker.cpp 의 poly_ 선언 주석 참조).
 struct BoundaryIndex;
 
 // 드라이버블 링 = outer 내부 AND inner 외부. 둘 다 cm, map frame, 닫힌 폴리곤

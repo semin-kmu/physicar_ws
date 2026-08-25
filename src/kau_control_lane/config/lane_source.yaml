@@ -1,0 +1,62 @@
+# ============================================================
+# 경로 입력 — lane_steer_controller · lane_speed_controller 공용
+#
+# ★ 경로를 바꾸려면 아래 lane.topic / lane.frame **두 줄**을 같이 고친다.
+#   (launch 를 쓰면 source:=local | center 인자 한 줄이면 된다)
+#
+# 이 파일이 경로 입력 설정의 유일한 주인이다. `/**` 이라 이 파일을 받는
+# 두 노드에 같은 값이 들어간다 -- 조향과 속도가 서로 다른 경로를 보는
+# 사고가 구조적으로 안 난다.
+#
+# kau_control 의 config/path_source.yaml 에 대응하지만, mode 프리셋이 없다.
+# 소스는 한 번에 하나고, 그게 끊기면 다른 데로 내려가지 않고 **선다.**
+# 그것이 이 패키지의 전제다.
+#
+# 읽는 곳
+#   launch   kau_control_lane/launch/control_lane.launch.py
+# ============================================================
+
+/**:
+  ros__parameters:
+
+    lane:
+      # --------------------------------------------------------
+      # ★ 어떤 경로를 따라갈 것인가 — 두 조합만 있다.
+      #
+      #   local  (기본)  /path/local        base_footprint
+      #                  kau_local_path_planner_lane 이 차선(중앙선+좌/우
+      #                  흰선)과 장애물을 보고 그린 **회피 경로**.
+      #                  장애물을 피한다. plan_hz 5 Hz.
+      #
+      #   center         /lane/center       base_link
+      #                  kau_lane_detection 이 뽑은 **중앙선 그 자체**.
+      #                  장애물을 모른다. 계획 없이 인지만으로 도는 최소
+      #                  구성이라, planner 를 의심할 때 이쪽으로 내린다.
+      #                  14 Hz.
+      #
+      # topic 과 frame 은 **짝이다.** 하나만 바꾸면 경로가 전부 버려지고
+      # 차가 안 움직인다 (2 초마다 ERROR 로 어디를 고치라고 찍는다).
+      # --------------------------------------------------------
+      topic: "/path/local"
+      frame: "base_footprint"
+
+      # s, 넘으면 정지.
+      #   local  5 Hz(0.2 s) -> 1.0 은 5 주기 연속 실패
+      #   center 14 Hz       -> 0.5 로 내린다 (최대 7 프레임)
+      timeout: 1.0
+
+      latched: false                  # 발행측 durability 와 맞출 것
+
+      # --------------------------------------------------------
+      # 차량 pose 를 어디서 얻는가.
+      #
+      #   identity  경로가 차량 프레임으로 들어온다. 차량이 곧 그 프레임의
+      #             원점이라 TF 를 보지 않는다. **측위(Cartographer/AMCL)
+      #             없이 카메라와 라이다만으로 돈다.**
+      #             위 두 조합(local · center) 모두 여기에 해당한다.
+      #
+      #   tf        경로가 map 프레임으로 들어온다. map -> base_frame TF 를
+      #             본다. 측위가 끊기면 정지한다. 이 패키지에서는 쓸 일이
+      #             없고, kau_control 의 경로를 물려 볼 때만 쓴다.
+      # --------------------------------------------------------
+      pose_source: "identity"

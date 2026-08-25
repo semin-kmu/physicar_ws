@@ -1,0 +1,69 @@
+# kau_path_arbiter 파라미터.
+#
+# 장애물이 없으면 차선을 그대로 따라가고, 있을 때만 회피 경로로 넘어간다.
+# 근거는 include/kau_path_arbiter/arbiter.hpp 머리주석의 실측표 참고.
+
+path_arbiter_node:
+  ros__parameters:
+
+    # --- 토픽 / 프레임 ---
+    lane_topic: "/lane/center"          # base_link, 14Hz
+    local_topic: "/path/local"          # base_footprint, 5Hz
+    output_topic: "/path/drive"
+
+    # 중계 경로에 붙일 frame_id.
+    #
+    # base_footprint <-> base_link 는 URDF 상 순수 Z 오프셋이라
+    # (physicar.urdf.xacro base_joint: origin xyz="0 0 wheel_radius")
+    # 평면 좌표가 같다. 그래서 제어점을 건드리지 않고 이름만 바꿔 낸다.
+    # 그 전제가 깨지는 frame(예: map)이 들어오면 노드가 중계를 거부하고
+    # ERROR 를 찍는다 -- kau_lane_detection 의 path_frame_id 기본값이
+    # "map" 이므로 base_link 로 두었는지 반드시 확인할 것.
+    output_frame: "base_footprint"
+
+    # --- 장애물 관심 영역 (자차 기준, cm) ---
+    #
+    # 이 상자 안의 장애물만 회피 대상이다. 넓게 잡으면 옆 차로/연석 때문에
+    # 평상시 주행이 계속 플래너를 타고, 좁게 잡으면 회피 진입이 늦는다.
+    #
+    # x 상한 150 은 /lane/center 관측 길이(168cm)와 플래너 l_plan(180cm)
+    # 안쪽이다 -- 그보다 먼 장애물은 어차피 이번 계획으로 못 피한다.
+    # 반폭 40 은 노면 반폭 중앙값 35cm + 여유다.
+    trigger_min_x_cm: 0.0
+    trigger_max_x_cm: 150.0
+    trigger_half_width_cm: 40.0
+
+    # --- 히스테리시스 (비대칭) ---
+    #
+    # 진입은 즉시(안전), 해제는 느리게(떨림 방지). 장애물이 인지 경계에서
+    # 깜빡일 때 5Hz/14Hz 두 소스를 오가면 조향이 튄다.
+    #
+    # release 2.0s = v 0.5m/s 에서 100cm -- 장애물을 지나쳐 뒤로 보낼 거리.
+    # ★ v_max 를 바꾸면 이 값을 다시 볼 것 (필요 거리 / v).
+    engage_sec: 0.0
+    release_sec: 2.0
+
+    # 이 시간 넘게 새 메시지가 없으면 그 소스는 끊긴 것으로 본다.
+    # kau_control_lane/config/lane_source.yaml 의 timeout 과 같은 근거.
+    lane_timeout_sec: 0.5               # 14Hz -> 최대 7 프레임
+    local_timeout_sec: 1.0              #  5Hz -> 5 주기
+
+    # 회피 중 /path/local 이 끊기면 차선으로 내려갈 것인가.
+    #
+    # false 로 둔다. 장애물이 있는데 장애물을 모르는 경로로 내려가는 건
+    # 장애물을 향해 그대로 가는 것과 같다. 발행을 멈추면 제어기가
+    # timeout 으로 선다 -- 그쪽이 안전하다.
+    fallback_to_lane_on_local_loss: false
+
+    # 이 시간 넘게 /perception/obstacles 가 안 오면 경고한다.
+    #
+    # 장애물 토픽이 통째로 없으면 이 노드는 조용히 차선만 따라간다 --
+    # "장애물이 없다" 가 아니라 회피 기능이 죽어 있는 것이다. 장애물 없는
+    # 트랙에서는 잘 도는 것처럼 보이다가 실전에서 그대로 들이받으므로
+    # 5 초마다 WARN 을 찍는다 (인지 노드/플래너가 떠 있는지 확인할 것).
+    obstacle_timeout_sec: 1.0
+
+    # 모드 판정 주기. 발행은 이벤트 구동이라 이 타이머와 무관하다
+    # (회피 중 /path/local 이 죽으면 발행 이벤트가 없어 히스테리시스
+    # 해제가 멈추므로, 판정만 따로 돌린다).
+    mode_hz: 20.0

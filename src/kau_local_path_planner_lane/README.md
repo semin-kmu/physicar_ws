@@ -126,6 +126,52 @@ src/local_planner_node.cpp   ROS2 wiring (구독/발행/TF/파라미터) 만 담
   가능. gtest 2개 추가(`test_boundary_checker.cpp`/
   `test_collision_checker.cpp`, 원 근사로는 놓치는 위반을 사각형이
   잡아내는지 확인). 61→63 tests, 0 errors, 0 failures.
+### 2026-08-25 곡선 구간 미추종 수정
+
+합성 원호 폐루프(제어기가 발행 경로를 100% 따라간다고 가정, 40틱 x 10cm)로
+재현했더니 직선은 횡오차 0.03cm 인데 **곡선은 어느 반지름이든 2m 까지 단조
+발산**했다. 원인 세 가지가 겹쳐 있었다.
+
+1. **`odom_topic` 기본값이 존재하지 않는 토픽**(`/odometry/filtered`)이었다.
+   실제 발행자는 physicar_bringup 의 ekf 이고 토픽은 `/odom` 이다
+   (`kau_gui/README.md` 142: "`/odometry/filtered` 는 존재하지 않는다").
+   odom 이 없으면 `plan()` 의 `odom_delta` 가 항상 `nullopt` 라
+   `previous_path_` 가 한 번도 재정렬되지 않고, 그러면 (a) `computeAnchor`
+   의 최근접점이 매 틱 s≈0 에 머물러 **kappa0 가 자기가 직전에 쓴 값을 다시
+   읽는다 — 0 에서 영원히 안 움직인다**(코너 한복판에서도 "지금 직진 중"으로
+   계획한다), (b) continuity 항(`w_continuity=10.0`, 최대 가중치)이 옛 ego
+   frame 기준으로 채점돼 매 틱 코너 바깥으로 끌어당긴다. 실측: R=100cm 에서
+   ok 7/40 · 횡오차 206cm → odom 연결만으로 40/40 · 19cm.
+   노드가 odom 미수신 시 5 초마다 WARN 을 찍도록 했다.
+2. **`l_plan` 300 → 180** (위 튜닝값 절 참고).
+3. **`extendCurve` 의 등곡률 외삽이 틀렸다.** tail 점을 시작점에서 *호길이*
+   `remain` 만큼 떨어진 곳에 놓았는데, 등곡률 원호의 현 길이는
+   `2*sin(dth/2)/kappa` 다. 비는 `1/sinc(dth/2)` 라 17° 에서 +0.4% 지만
+   126° (R=60cm, remain=132cm) 에서 **+23%** 다. 게다가 회전각이 얼마든
+   quintic 세그먼트 **1 개**로 붙였다. 그 결과 backbone 이 최대 22.6cm(R=60)
+   벗어나고 곡률이 0.01839 → 0.02255 로 부풀어 차량 한계(0.020221)를
+   넘겼다 — 그 순간 전 후보가 `kappa_bound` 로 탈락하고 `leastViolation` 이
+   R=24cm 짜리 경로를 발행한다(최소회전반경 49.5cm, 물리적으로 못 따라감).
+   정확한 chord + 45°/세그먼트 분할로 고쳤다: 기하오차 22.6cm → 0.1cm.
+   회귀 방지 gtest 는 `test/test_lane_backbone.cpp`.
+
+세 개를 다 적용한 뒤 폐루프 실측 (ok틱수 / 최대 횡오차, 40틱):
+
+| 코너 R | 수정 전 | 수정 후 |
+|---|---|---|
+| 직선 | 40 / 0.03cm | 40 / 0.00cm |
+| 150cm | — | 40 / 3.6cm |
+| 100cm | 7 / **206cm** | 40 / 2.6cm |
+| 80cm | 2 / **215cm** | 40 / 2.6cm |
+| 70cm | — | 40 / 3.0cm |
+| 60cm | 0 / **214cm** | 17 / 37cm (미해결, 아래 참고) |
+
+**남은 한계**: R=60cm 코너는 여전히 못 넘는다. l_plan 180cm 로 R=60 을 돌면
+172° 회전인데 corridor knot 3 개로는 그 형상을 표현하지 못한다. knot 수를
+늘리거나 l_plan 을 곡률에 따라 가변으로 두는 게 맞는 방향이고, 이번 수정
+범위 밖이다. 트랙 경계 폴리곤 실측 코너 반경이 0.5~0.9m 라 R=60 은 실제로
+나오는 값이다.
+
 - **토픽 예외처리**: KAU_AMET_Test 의 "Lane/Global/Object 두절" 3가지
   대응(`plan()` docstring)이 이미 이 포트에 구조적으로 반영돼 있음을
   이번에 확인했다 (추가 수정 불필요) — Lane 은 `lane_curve_` 가
@@ -169,8 +215,14 @@ src/local_planner_node.cpp   ROS2 wiring (구독/발행/TF/파라미터) 만 담
 
 ## KAU_AMET_Test 세션에서 확정한 튜닝값 (config/local_planner.yaml 참고)
 
-- `l_plan=300`: 400 이상으로 늘리면 2-segment 고정 구조와 충돌해 오히려
-  악화됨 (실측 확인, 늘리지 말 것 — segment 수를 늘리는 게 맞는 방향).
+- `l_plan=180` (2026-08-25, 300 에서 변경): **Planning Horizon 은 Observation
+  Horizon 을 넘으면 안 된다.** 300 은 global path 를 쓰던 옛 패키지 값인데,
+  이 패키지의 backbone 은 `/lane/center` 하나뿐이고 그 관측 길이는 168cm 다.
+  corridor knot 이 `0.6/0.8/1.0 * l_plan` 이므로 300 이면 knot 3 개가
+  180/240/300cm — 전부 관측 밖이라, 경로 모양을 정하는 점 전체가 외삽 위에
+  놓였다. 합성 원호 폐루프 실측에서 180 이 전 R 구간 유일한 40/40 이다.
+  190 이상은 R=70cm 코너에서 40/40 → 14/40 으로 절벽처럼 무너진다.
+  자세한 표는 `config/local_planner.yaml` 의 `l_plan` 주석 참고.
 - `preview=450`: `l_plan+preview=750cm` 총 예고거리. 스윕 결과 이 근방이
   최적, 600 이상은 오히려 진짜 물리적 min_clear 가 나빠짐.
 - `w_lane=1.0`: heading jitter 원인으로 의심했으나 0~1.0 스윕해도 결과

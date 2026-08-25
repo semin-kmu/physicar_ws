@@ -1005,7 +1005,15 @@ status 토픽과 debug_image 오버레이에 이미 들어 있어 중복이었�
   degenerate 판정 시 경고만 내고, 코드 주석 자체가 *"path_ema_ctrl_ 를
   되돌리거나, 최소한 발행은 건너뛰는 처리 필요"* 라고 적고 있다.
   뒤틀린 제어점이 `path.ctrl` 로 그대로 나간다 (§7).
-- **tilt 미구현.** pan 만 있다.
+- **tilt 는 기동 시 한 번 세우는 고정 자세다.** 제어량이 아니다 —
+  `camera_tilt_deg`(5.0, + = 아래)를 `camera_tilt_repeat_s` 동안 1 Hz 로
+  `/camera/tilt` 에 발행하고 타이머를 끈다. `bev_vanishing_y` /
+  `bev_src_top_y` / `bev_src_bottom_y` 가 이 각도를 전제하므로
+  (`y = cy + fy·tan(atan(h/d) − alpha)`, `alpha = 틸트 + 0.284`)
+  틸트를 바꾸면 셋을 반드시 같이 다시 유도할 것. **실차에서 실제로
+  5도가 서는지, 지평선이 155.81(시뮬)/145.41(실차) 행에 오는지는
+  아직 검증 못 했다.** pan 과 달리 되먹임이 없어 명령이 먹지 않아도
+  (예: `camera_engaged()`) 노드는 모른다.
 - **`curve_ahead_kappa_thresh` / `curve_ahead_bend_deg_thresh` /
   `obstacle_ahead_max_m` 실측 전 초안값.** 1.5m 룩어헤드, 15deg 꺾임,
   1.0m 장애물 거리 다 아직 안 재고 잡았다 (§9).

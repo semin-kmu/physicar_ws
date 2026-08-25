@@ -202,10 +202,23 @@ private:
     {
         declare_parameter<double>("plan_hz", 5.0);
         declare_parameter<std::string>("base_frame", "base_footprint");
-        // KAU_AMET_ROS 세션 메모: kau_control 쪽 yaml 에 "/odometry/filtered
-        // 존재 안 함, /odom 으로 바꿔야 됨" 이라는 미해결 메모가 있다 --
-        // 실차에서 안 뜨면 이 파라미터를 launch 인자로 "/odom" 으로 바꿀 것.
-        declare_parameter<std::string>("odom_topic", "/odometry/filtered");
+        // 2026-08-25: "/odometry/filtered" -> "/odom".
+        //
+        // 그 토픽은 이 시스템에 **존재하지 않는다** (kau_gui/README.md 142:
+        // "`/odometry/filtered` 는 존재하지 않는다"). 실제 발행자는
+        // physicar_bringup 의 ekf_filter_node 이고 토픽은 `/odom` 이다.
+        //
+        // 조용히 안 뜨는 것으로 끝나지 않는다. odom 이 없으면 plan() 의
+        // odom_delta 가 항상 nullopt 라 previous_path_ 가 한 번도 재정렬되지
+        // 않고, 그러면
+        //   - computeAnchor 의 최근접점이 매 틱 s~0 에 머물러 kappa0 가
+        //     자기가 직전에 쓴 값을 다시 읽는다 -> 0 에서 영원히 안 움직인다
+        //     (코너 한복판에서도 "지금 직진 중"으로 계획한다)
+        //   - continuity 항(w_continuity=10.0, 최대 가중치)이 옛 ego frame
+        //     기준으로 채점돼 매 틱 코너 바깥으로 끌어당긴다
+        // 합성 원호 폐루프 실측(완벽 추종 가정, 40틱): R=100cm 코너에서
+        // ok 7/40 · 횡오차 206cm 발산 -> odom 연결만으로 40/40 · 19cm.
+        declare_parameter<std::string>("odom_topic", "/odom");
 
         declare_parameter<bool>("publish_viz_path", true);
         declare_parameter<std::string>("viz_topic", "/viz/path/local");
@@ -235,6 +248,8 @@ private:
         declare_parameter<double>("w_end", 0.6);
         declare_parameter<double>("w_continuity", 10.0);
         declare_parameter<double>("w_road", 6.0);
+        declare_parameter<double>("kappa_barrier_knee", 0.60);
+        declare_parameter<double>("kappa_barrier_cap", 0.0);   // 0 = 꺼짐
         declare_parameter<double>("clear_target", 15.0);
         declare_parameter<double>("d_scale", 18.0);
 
@@ -259,6 +274,8 @@ private:
         p.w_end = get_parameter("w_end").as_double();
         p.w_continuity = get_parameter("w_continuity").as_double();
         p.w_road = get_parameter("w_road").as_double();
+        p.kappa_barrier_knee = get_parameter("kappa_barrier_knee").as_double();
+        p.kappa_barrier_cap = get_parameter("kappa_barrier_cap").as_double();
         p.clear_target = get_parameter("clear_target").as_double();
         p.d_scale = get_parameter("d_scale").as_double();
         p.anchor_blend_lo_cm = get_parameter("anchor_blend_lo_cm").as_double();
@@ -316,6 +333,17 @@ private:
         // 변위 (map 아니라 odom frame 내 상대량). 옵션이라 odom 이 없으면
         // 무보정으로 그대로 동작한다(재계획 주기가 짧다는 근사).
         std::optional<OdomDelta> odom_delta;
+        if (!latest_odom_)
+        {
+            // odom 이 없으면 previous_path_ 가 재정렬되지 않아 kappa0 가 0 에
+            // 고정되고(코너를 직진으로 계획한다) continuity 항이 옛 frame 을
+            // 기준으로 채점된다 -- 곡선에서 횡오차가 발산한다. 조용히 넘어가면
+            // 안 되는 상태라 토픽 이름과 함께 계속 경고한다.
+            RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
+                "odom(%s) 수신 없음 -- 경로 재정렬/kappa0 갱신이 멈춘다 "
+                "(곡선에서 횡오차 발산). 토픽 이름을 확인할 것.",
+                get_parameter("odom_topic").as_string().c_str());
+        }
         if (latest_odom_)
         {
             const double x = latest_odom_->pose.pose.position.x * 100.0;

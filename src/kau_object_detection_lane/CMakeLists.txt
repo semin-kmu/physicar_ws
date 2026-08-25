@@ -1,6 +1,16 @@
 cmake_minimum_required(VERSION 3.8)
 project(kau_object_detection_lane)
 
+# CMake 의 기본 빌드 타입은 "빈 문자열" 이고, 그러면 GCC 에 -O 가
+# 아예 안 붙는다 (= -O0).
+# 프레임당 도는 픽셀/클러스터 루프가 -O0 에서 몇 배로 느려진다.
+# 2026-08-25: build/ 를 훑어보니 이 패키지가 실제로 그 상태였다
+# (kau_control/kau_lane_detection 만 Release, 나머지는 빈 값).
+# --cmake-args 없이 `colcon build` 해도 안전하도록 기본값을 박아 둔다.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+  set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
+endif()
+
 # This package is deliberately self-contained. It must never gain a
 # find_package on kau_object_detection, nor link against that package's
 # targets: the whole point is that the Lane-only stack builds and runs with

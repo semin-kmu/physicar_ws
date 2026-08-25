@@ -28,7 +28,11 @@ double edgeMargin(
     {
         return max_search_cm;
     }
-    const Point2 q = edge->point(st.s);
+    // nearestGlobal 이 (seg, u) 를 이미 확정해 줬는데 point(st.s) 는 그걸
+    // 호길이로 되돌린 뒤 locate()+뉴턴으로 다시 (seg, u) 를 푼다. 왕복을
+    // 없애고 제어점에서 바로 평가한다 -- 같은 점이고(실측 차이 1e-10 cm),
+    // 역산 오차가 없는 만큼 오히려 정확하다.
+    const Point2 q = kau::bezier::evalSeg(edge->seg(st.seg), st.u);
     const double d = sign * ((q.x - origin.x) * normal.x + (q.y - origin.y) * normal.y);
     return d;
 }
@@ -72,15 +76,75 @@ double marginAlongNormal(
 namespace
 {
 
+// ------------------------------------------------------------------
+// 2026-08-25: 도로 이탈 판정 복구.
+//
+// `marginAlongNormal` 은 반환 직전에 `clamp(d, 0.0, ...)` 로 음수를 0 으로
+// 깎는다. 그건 그 함수의 **본래 용도**(코리도 폭: "이 방향으로 얼마나 더
+// 갈 수 있나")에서는 옳다 -- 이미 밖이면 남은 폭은 0 이고, 음수가 되면
+// `corridorOffsets` 의 safe_lower > safe_upper 로 뒤집혀 `std::clamp` 가
+// 정의되지 않은 동작이 된다.
+//
+// 그런데 여유 판정(clearance) 경로가 같은 함수를 그대로 쓰는 바람에
+// **여유가 절대 음수가 될 수 없었고**, 그 결과 도로 이탈 판정이 통째로
+// 무력했다 (실측: 경로를 도로 밖 50m 로 보내도 min_wheels_on=4,
+// off_integral=0, roadOkWheels=통과). w_road 비용 항도 항상 0 이었다.
+//
+// 두 용도를 분리한다. 폭 질의는 기존 `marginAlongNormal`(비음수) 을 계속
+// 쓰고, 판정은 아래 부호 있는 버전을 쓴다. 상한(max_search_cm) clamp 는
+// 남긴다 -- 그건 "아주 멀리 안쪽" 을 잘라 주는 것이라 판정에 해가 없다.
+//
+// 부호 규약: 좌 edge 는 +normal 쪽, 우 edge 는 -normal 쪽에 있다고 보고
+// 각각 "안쪽이면 양수" 가 되게 잰다. 따라서 도로 안이면 둘 다 양수이고,
+// 왼쪽으로 벗어나면 left 항이 음수가 된다.
+// ------------------------------------------------------------------
+double signedMarginAlongNormal(
+    const RoadBoundary & boundary, const Point2 & origin, const Point2 & normal,
+    double sign, double footprint_cm, double max_search_cm = 200.0)
+{
+    double d;
+    if (sign > 0.0)
+    {
+        d = edgeMargin(boundary.left, origin, normal, 1.0, max_search_cm);
+        if (!boundary.left.has_value())
+        {
+            // 반대쪽만 관측됐으면 LANE_WIDTH 로 근사 (marginAlongNormal 동일).
+            const double r =
+                edgeMargin(boundary.right, origin, normal, -1.0, max_search_cm);
+            if (boundary.right.has_value())
+            {
+                d = kLaneWidthCm - r;
+            }
+        }
+    }
+    else
+    {
+        d = edgeMargin(boundary.right, origin, normal, -1.0, max_search_cm);
+        if (!boundary.right.has_value())
+        {
+            const double l =
+                edgeMargin(boundary.left, origin, normal, 1.0, max_search_cm);
+            if (boundary.left.has_value())
+            {
+                d = kLaneWidthCm - l;
+            }
+        }
+    }
+    // 상한만 자른다. 하한 0 clamp 를 걸면 "밖으로 나갔다" 가 표현되지 않는다.
+    d = std::min(d, max_search_cm);
+    return d - footprint_cm;
+}
+
 // 한 station(위치+heading)에서 좌/우 edge 까지의 안전 여유 최솟값.
+// 음수면 침범 (boundary_checker.hpp 의 roadClearance 규격 그대로).
 double stationClearance(
     const RoadBoundary & boundary, const Point2 & center, double heading,
     double footprint_cm)
 {
     const Point2 normal{-std::sin(heading), std::cos(heading)};
-    const double left_m = marginAlongNormal(
+    const double left_m = signedMarginAlongNormal(
         boundary, center, normal, 1.0, footprint_cm, 200.0);
-    const double right_m = marginAlongNormal(
+    const double right_m = signedMarginAlongNormal(
         boundary, center, normal, -1.0, footprint_cm, 200.0);
     return std::min(left_m, right_m);
 }
@@ -116,7 +180,8 @@ EdgeProjection projectStation(const RoadBoundary & boundary, const Point2 & cent
         const kau::control::TrackState st = boundary.left->nearestGlobal(center);
         if (st.valid)
         {
-            proj.left_pt = boundary.left->point(st.s);
+            // edgeMargin 과 같은 이유로 point(st.s) 왕복을 쓰지 않는다.
+            proj.left_pt = kau::bezier::evalSeg(boundary.left->seg(st.seg), st.u);
         }
     }
     if (boundary.right.has_value() && boundary.right->nseg() > 0)
@@ -124,7 +189,7 @@ EdgeProjection projectStation(const RoadBoundary & boundary, const Point2 & cent
         const kau::control::TrackState st = boundary.right->nearestGlobal(center);
         if (st.valid)
         {
-            proj.right_pt = boundary.right->point(st.s);
+            proj.right_pt = kau::bezier::evalSeg(boundary.right->seg(st.seg), st.u);
         }
     }
     return proj;
@@ -170,8 +235,10 @@ double marginFromProjection(
             d = max_search_cm;
         }
     }
-    d = std::clamp(d, 0.0, max_search_cm);
-    return std::max(0.0, d - footprint_cm);
+    // signedMarginAlongNormal 과 같은 규약 -- 상한만 자르고 부호는 살린다.
+    // (여기서 하한 0 clamp 를 걸면 도로 이탈 판정이 통째로 무력해진다.)
+    d = std::min(d, max_search_cm);
+    return d - footprint_cm;
 }
 
 double stationClearanceFromProjection(
@@ -259,11 +326,14 @@ double roadClearanceRect(
 
 RoadReport roadReportWheels(
     const RoadBoundary & boundary, const Curve & cv, const WheelFootprint & wheels,
-    double road_safety_margin_cm, double sample_interval_cm, double s_max_cm)
+    double road_safety_margin_cm, double sample_interval_cm, double s_max_cm,
+    double report_horizon_cm)
 {
     RoadReport rep;
     bool reached_limit = false;
+    bool past_horizon = false;
     rep.min_clear_cm = std::numeric_limits<double>::infinity();
+    rep.min_clear_upto_cm = std::numeric_limits<double>::infinity();
 
     const double y_outer = wheels.outerY();
     const double y_inner = wheels.innerY();
@@ -301,13 +371,20 @@ RoadReport roadReportWheels(
             const Point2 normal{-std::sin(heading), std::cos(heading)};
             const EdgeProjection proj = projectStation(boundary, center);
 
+            // 이 스테이션이 report 구간에 드는가. 아래 s_max_cm 절단과 같은
+            // 규약이다 -- 경계를 넘긴 첫 스테이션까지는 포함한다(그래야
+            // s_max_cm 로 끊어 두 번 도는 것과 값이 정확히 일치한다).
+            const double s_here = station + u * seg_len;
+            const bool in_report_span = !past_horizon;
+
             int wheels_on = 0;
+            double station_min_clear = std::numeric_limits<double>::infinity();
             for (double wx : {x_rear, x_front})
             {
                 for (double sy : {-1.0, 1.0})
                 {
-                    rep.min_clear_cm = std::min(
-                        rep.min_clear_cm,
+                    station_min_clear = std::min(
+                        station_min_clear,
                         stationClearanceFromProjection(
                             proj, corner(wx, sy * y_outer), normal, road_safety_margin_cm));
                     if (stationClearanceFromProjection(
@@ -318,8 +395,18 @@ RoadReport roadReportWheels(
                 }
             }
 
+            rep.min_clear_cm = std::min(rep.min_clear_cm, station_min_clear);
+            if (in_report_span)
+            {
+                rep.min_clear_upto_cm =
+                    std::min(rep.min_clear_upto_cm, station_min_clear);
+            }
+            if (s_here >= report_horizon_cm)
+            {
+                past_horizon = true;
+            }
+
             rep.min_wheels_on = std::min(rep.min_wheels_on, wheels_on);
-            const double s_here = station + u * seg_len;
             if (wheels_on < 4)
             {
                 if (rep.first_viol_s_cm < 0.0)
@@ -345,6 +432,10 @@ RoadReport roadReportWheels(
     if (!std::isfinite(rep.min_clear_cm))
     {
         rep.min_clear_cm = 0.0;
+    }
+    if (!std::isfinite(rep.min_clear_upto_cm))
+    {
+        rep.min_clear_upto_cm = 0.0;
     }
     return rep;
 }

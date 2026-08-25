@@ -77,6 +77,29 @@ struct PlannerParams
     // -> 0.05 * w_road = 1.5, w_road = 30.
     double w_road = 30.0;
 
+    // --- 곡률 배리어 (2026-08-25) ---
+    //
+    // 코너 바깥쪽 오프셋이 곡률 수요를 낮추는데(kappa/(1-d*kappa)) 오프셋
+    // 페널티가 그 이득보다 비싸서 플래너가 못 고르던 문제를 푼다. 선형
+    // 곡률항은 그대로 두고, bound 가 kappa_lim 의 knee 배를 넘는 구간에서만
+    // 추가로 붙는다 (path_evaluator.cpp 의 kappaBarrier 주석 참고).
+    //
+    //   u = bound/kappa_lim,  x = (u-knee)/(1-knee),  barrier = min(cap, x^2/(1-x))
+    //
+    // cap 이 필요한 이유: 상한 없이 두면 배리어가 w_road(30)/w_continuity(10)
+    // 를 눌러버려 곡률만 쫓다가 도로를 물고 흔들린다 (실측: R=80cm 코너에서
+    // 횡오차 2.6 -> 24.9cm 로 악화). cap=0 이면 배리어 자체가 꺼진다.
+    // 기본 0.0 = **꺼짐**. 폐루프 실측에서 아직 값어치를 못 했다:
+    //   R=100  cte 2.61 -> 5.47cm (악화)  kmax 0.01352 -> 0.01199 (개선)
+    //   R=80   cte 2.64 -> 4.45cm (악화)  kmax 거의 동일
+    //   R=70   변화 없음      R=60  변화 없음 (후보가 전멸이라 재정렬 대상이 없다)
+    // 곡률 여유는 벌지만 횡오차를 잃는 교환이고, 정작 곡률 여유가 아쉬운
+    // R=60 에서는 효과가 0 이다 -- backbone 자체가 한계를 넘어 후보가 전멸하기
+    // 때문이라 비용함수로는 손댈 수 없다. backbone bridge 를 고친 뒤 다시
+    // 켜고 재측정할 것. cap 을 0 보다 크게 하면 즉시 활성화된다.
+    double kappa_barrier_knee = 0.60;
+    double kappa_barrier_cap  = 0.0;
+
     double clear_target = 15.0;     // cm, 이 이상 여유면 장애물 항 0
 
     double d_scale = 18.0;          // cm, 후보 offset 정규화 기준 (L_plan 무관 고정값)

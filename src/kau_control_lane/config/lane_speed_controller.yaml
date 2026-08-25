@@ -1,0 +1,112 @@
+# 속도 제어 parameter (곡률 기반 목표속도 + PID) — 차선 추종 전용
+#
+# 단위: 길이 cm / 곡률 1/cm / 속도 m/s
+#
+#   kappa_win = 전방 window 의 최대 |kappa|
+#   v_want    = law(kappa_win) -> [v_min, v_max] -> EMA        (대기 중에도 상시)
+#   v_ref     = 출발 허가 전이면 0, 허가 후엔 v_want 로 가감속 제한
+#   /speed    = clamp(v_ref + PID(v_ref - v_meas), 0, v_max)
+#
+# 알고리즘은 kau_control/config/speed_controller.yaml 과 같다.
+#
+# ★ 경로 입력(topic · timeout · pose_source)은 여기 없다.
+#   config/lane_source.yaml 한 곳이다. 두 제어기가 그 파일을 같이 받는다.
+#
+# **주행 공간이나 차량이 바뀌면 다시 잡아야 한다.**
+
+# ★ 섹션이 노드 이름이 아니라 `/**` 인 이유
+#
+# ROS 2 는 **노드 이름 섹션이 `/**` 섹션을 항상 이긴다** (파일 순서와
+# 무관하다). 그래서 이 파일을 `lane_speed_controller:` 로 적으면
+# launch 인자(speed:=0.4)나 `-p speed.v_max:=...` 같은 CLI 오버라이드가
+# 조용히 씹힌다 -- 둘 다 `/**` 로 들어가기 때문이다.
+#
+# 이 파일은 해당 노드에만 넘기므로 `/**` 라도 남의 노드에 새지 않는다.
+# 대신 오버라이드가 정상적으로 먹는다 (실측 확인, 2026-08-25).
+#
+/**:
+  ros__parameters:
+
+    # --- 인터페이스 ---
+    map_frame: "map"
+    base_frame: "base_link"
+
+    control_hz: 50.0
+    tf_timeout: 0.2                     # s, pose_source=tf 일 때만 쓰인다
+    cte_abort_cm: 40.0                  # lane_steer_controller.yaml 과 같은 값
+
+    # --- 차량 제원 ---
+    # kappa_max(= 기하 최소회전반경) 계산에 쓴다. steer 쪽과 같은 값일 것.
+    vehicle:
+      wheelbase_cm: 18.0
+      max_steer_deg: 20.0
+      rear_axle_offset_cm: -9.0
+
+    # --- 목표속도 ---
+    speed:
+      # ★ 첫 실험은 상수 속도로 시작한다 (v_min == v_max).
+      #
+      # 곡률 기반 속도 제어는 전방 구간의 곡률을 보고 감속하는데, 차선
+      # 경로는 앞 80 cm 짜리 토막이라 코너를 미리 못 본다. 코너에 들어간
+      # 뒤에야 감속하므로 이 조합은 아직 검증되지 않았다. 먼저 상수 속도로
+      # 조향을 확인하고, 그다음에 v_min 을 내려 (예: 0.3 / 0.5) 가감속을 켠다.
+      #
+      # 0.4 m/s: 50 Hz 제어 기준 한 tick 에 8 mm, LookAhead 25 cm 를
+      # 0.6 초에 통과한다. 차선 인지가 14 Hz 이므로 인지 한 프레임
+      # 사이에 2.9 cm 진행 — 인지 지연이 조향에 묻히는 범위다.
+      v_min: 0.3
+      v_max: 0.5
+
+      # window = [look_min, max(look_k * v, look_min + min_span)]
+      #          look_k = look_max / v_max
+      # look_max 는 valid_length(80 cm 안팎) 를 넘겨봐야 볼 것이 없다.
+      look_min_cm: 20.0
+      look_max_cm: 80.0
+      min_span_cm: 20.0
+
+      # v_min 이 나오는 곡률 = margin * kappa_max.
+      #   1.0 -> R 49.45 cm (= 차량 최소회전반경). 여기서만 최저속.
+      #   0.8 -> R 61.8 cm   0.6 -> R 82.4 cm
+      # **내릴수록 더 완만한 곡선에서 감속한다** (방향 헷갈리기 쉬움).
+      margin: 1.0
+      use_sqrt_law: true                # true: 등횡가속도, false: 선형 보간
+
+      # accel_max 는 **출발 순간에 걸린다**: 출발 허가 전 v_ref 가 0 으로
+      # 묶여 있다가 허가와 함께 v_want 까지 올라가는데, 그 기울기를 정하는
+      # 것이 이 값이다. 출발이 거칠면 여기를 내린다.
+      accel_max: 1.5                    # m/s^2, 목표속도 증가율 상한
+      decel_max: 2.0                    # m/s^2, 감속은 넉넉히 허용
+      ema_tau: 0.4                      # s, 목표속도 EMA 시상수 (0 이면 끔)
+
+      # --- 속도 피드백 ---
+      # ★ 오도메트리 노드가 아직 없다. 노드가 생기면 아래 topic 만 바꾸고
+      #   require_feedback 을 true 로 올린다 (타입은 nav_msgs/Odometry,
+      #   twist.twist.linear.x 를 읽는다).
+      #
+      #   false : 피드백이 없거나 stale 이면 PID 보정 없이 v_ref 만 발행
+      #   true  : 피드백이 없으면 즉시 정지
+      feedback_topic: "/odometry/filtered"
+      feedback_timeout: 0.2             # s, 이보다 오래되면 stale
+      require_feedback: false
+
+    # --- 출발 게이트 (신호등) ---
+    # 초록불이 되기 전에는 /speed 를 0 으로 묶는다.
+    #
+    #   초기값 · 미수신 · false -> 0 발행
+    #   true 1회 수신           -> latch. 이후 값은 로깅만 하고 판정에서 제외
+    #
+    # ★ 차선 추종만 따로 시험할 때는 required 를 false 로 내려야 신호등
+    #   없이 굴러간다. 실주행·대회에서는 반드시 true.
+    start_gate:
+      permission_topic: "/perception/start_permission"
+      required: true
+
+    # --- PID ---
+    # v_ref 를 피드포워드로 깔고 오차분만 보정하므로 게인은 작게 시작한다.
+    # 피드백이 붙기 전까지는 이 값들이 쓰이지 않는다.
+    pid:
+      kp: 0.5
+      ki: 0.5
+      kd: 0.0
+      i_max: 0.5                        # 적분항 상한 [m/s]. windup 방지
+      out_max: 0.5                      # 보정량 상한 [m/s]

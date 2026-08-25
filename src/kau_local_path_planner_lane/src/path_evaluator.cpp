@@ -71,6 +71,57 @@ double pathPreviewCost(
     return std::max(0.0, kappa_via_d - kappa_lim) / kappa_lim;
 }
 
+namespace
+{
+
+// ------------------------------------------------------------------
+// 곡률 배리어 (2026-08-25).
+//
+// 문제: 곡선에서 코너 **바깥쪽** 오프셋이 곡률 수요를 크게 낮추는데
+// (kappa/(1-d*kappa), R=60cm 좌커브에서 d=-18cm 면 0.01667 -> 0.01282,
+// 실효반경 60 -> 78cm) 비용함수가 그쪽을 못 고르고 있었다. 오프셋
+// 페널티가 곡률 이득보다 비쌌기 때문이다:
+//     d=18.7cm 오프셋 페널티  w_ref*|d|/18 + w_end*0.8|d|/18 = 1.54
+//     같은 오프셋의 곡률 이득  w_kappa*(dkappa)/kappa_max     = 0.40
+// 실측(R=70cm 코너, 후보 덤프): 살아남는 후보가 바깥쪽 둘뿐인데
+// (d=-12.6 kmax 0.01628 / d=-4.2 kmax 0.01716), 곡률이 더 나쁜 -4.2 를
+// cost 2.187 < 2.875 로 골랐다.
+//
+// 고침: 선형항(bound/kappa_max_vehicle)은 그대로 두고, 한계 근처에서만
+// 급상승하는 항을 **더한다**. 무릎(knee) 아래에서는 정확히 0 이라
+// 직선/완만한 곡선의 기존 거동은 바뀌지 않는다 (R=150 에서 +0.07,
+// 직선에서 0.00). 한계에 다가갈수록 발산해 "곡률 여유"를 오프셋
+// 선호보다 확실히 비싸게 만든다.
+//
+//     u = bound / kappa_lim,  x = (u - knee) / (1 - knee)
+//     barrier = x^2 / (1 - x)      (u <= knee 면 0)
+//
+// x^2 으로 시작해 무릎에서 값도 기울기도 연속이다(비용 지형에 계단이
+// 생기면 후보 선택이 틱마다 튄다). 분모의 하한은 bound 가 kappa_lim 을
+// 넘는 구간(prediction horizon 완화로 살아남은 후보)에서 inf/NaN 이
+// 되지 않게 한다 -- 그 후보들은 이미 kPredictionViolationPenalty 를
+// 따로 맞으므로 여기서는 유한하고 아주 큰 값이면 충분하다.
+// ------------------------------------------------------------------
+constexpr double kKappaBarrierFloor = 1.0e-3;   // 분모 하한 (0 나눗셈 방지)
+
+double kappaBarrier(double bound, double kappa_lim, double knee, double cap)
+{
+    if (!(kappa_lim > 0.0) || !(cap > 0.0) || !std::isfinite(bound))
+    {
+        return 0.0;
+    }
+    const double k = std::clamp(knee, 0.0, 0.99);
+    const double u = bound / kappa_lim;
+    if (u <= k)
+    {
+        return 0.0;
+    }
+    const double x = (u - k) / (1.0 - k);
+    return std::min(cap, x * x / std::max(kKappaBarrierFloor, 1.0 - x));
+}
+
+}  // namespace
+
 double cost(
     const PlannerParams & params, double kappa_max_vehicle,
     const Curve & global_path, double kappa_lim, double s0,
@@ -81,9 +132,9 @@ double cost(
     // 2026-08-25 (lane-only 재설계): `pathPreviewCost`(global path 곡률
     // 프리뷰) 제거 -- global path 가 없어져 l_plan 너머 "미래 곡률"을 알
     // 방법이 없다 (KAU_AMET_Test Python 세션과 동일 판단). 인자로 받는
-    // global_path/s0/kappa_lim 은 이제 이 함수 안에서 안 쓴다(시그니처는
-    // 호출부 변경을 최소화하려고 유지).
-    (void)global_path; (void)s0; (void)kappa_lim;
+    // global_path/s0 은 이제 이 함수 안에서 안 쓴다(시그니처는 호출부
+    // 변경을 최소화하려고 유지). kappa_lim 은 아래 배리어가 다시 쓴다.
+    (void)global_path; (void)s0;
     const double sc = params.d_scale;
     const double obs = std::max(
         0.0, (params.clear_target - clear) / params.clear_target);
@@ -91,7 +142,10 @@ double cost(
 
     return params.w_obstacle * obs
          + params.w_ref * peak / sc
-         + params.w_kappa * bound / kappa_max_vehicle
+         + params.w_kappa * (bound / kappa_max_vehicle
+                             + kappaBarrier(bound, kappa_lim,
+                                            params.kappa_barrier_knee,
+                                            params.kappa_barrier_cap))
          + params.w_end * std::abs(0.80 * d) / sc
          + params.w_continuity * cont
          + params.w_road * std::max(0.0, road_off_ratio);

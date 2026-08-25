@@ -1,0 +1,72 @@
+# kau_control_drive 파라미터 -- drive_steer_controller · drive_speed_controller 공용.
+#
+# `/**` 이라 이 파일을 받는 두 노드에 같은 값이 들어간다. 조향과 속도가
+# 서로 다른 경로를 보는 사고가 구조적으로 안 난다
+# (kau_control_lane/config/lane_source.yaml 과 같은 방침).
+
+/**:
+  ros__parameters:
+
+    drive:
+      # kau_path_arbiter 가 장애물 유무에 따라 차선/회피 경로 중 골라 내는
+      # 토픽이다. topic 과 frame 은 **짝이다** -- 하나만 바꾸면 경로가 전부
+      # 버려지고 차가 안 움직인다 (2 초마다 ERROR 로 찍는다).
+      topic: "/path/drive"
+      frame: "base_footprint"
+
+      # 소스별 timeout.
+      #
+      # /path/drive 는 차선(14Hz)과 회피 경로(5Hz)를 오간다. 하나로 덮으면
+      # 14Hz 에 맞출 때 회피 모드의 멀쩡한 경로를 죽은 것으로 보고, 5Hz 에
+      # 맞출 때 차선 모드 두절을 1 초 가까이 못 알아챈다. KauPath.source 를
+      # 보고 갈라 쓴다.
+      timeout_lane: 0.5      # 14Hz -> 최대 7 프레임
+      timeout_local: 1.0     #  5Hz -> 5 주기
+
+    control_hz: 50.0
+
+    vehicle:
+      wheelbase_cm: 18.0          # 확정
+      max_steer_deg: 20.0         # 확정 (R_min 49.5cm)
+      # 확정값인데 kau_control / kau_control_lane 의 조향 제어기는 선언만
+      # 하고 쓰지 않는다. 이 패키지는 실제로 건다 (steer_limiter.hpp).
+      max_steer_rate_dps: 600.0
+
+    controller:
+      k_v: 0.5                    # s, Ld = k_v * v
+      ld_min_cm: 25.0
+      ld_max_cm: 80.0
+
+      # 경로 소스 전환 직후에만 적용할 더 조인 조향 변화율과 그 지속시간.
+      #
+      # 차선 경로와 회피 경로는 서로 다른 곡선이라 전환 순간 lookahead 점이
+      # 튀고, 그대로 두면 조향이 계단처럼 꺾인다. 전환 **횟수**는 arbiter 의
+      # 히스테리시스가 줄이고, 여기서는 남은 전환의 **날카로움**만 줄인다.
+      #
+      # 150deg/s x 0.4s = 60deg 로 전 범위(40deg)를 훑고도 남는다 -- 정상
+      # 조향을 막지 않으면서 계단만 시간축으로 편다.
+      # (근본 해법은 경로 자체의 블렌딩이다. 아직 안 되어 있다.)
+      transition_rate_dps: 150.0
+      transition_sec: 0.4
+
+    speed:
+      # 저속 세팅. kau_local_path_planner_lane 의 validated_horizon_cm 이
+      # v_max 0.5 기준으로 잡혀 있으므로 같이 봐야 한다.
+      v_min: 0.2
+      v_max: 0.5
+      look_min_cm: 20.0
+      look_max_cm: 150.0
+      min_span_cm: 20.0
+      margin: 0.8
+      accel_max: 1.0
+      decel_max: 2.0
+      ema_tau: 0.4
+
+    speed_topic: "/speed"
+
+    viz:
+      enabled: true
+
+    debug:
+      enabled: true
+      topic: "/debug/steer"
