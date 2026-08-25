@@ -73,7 +73,6 @@ namespace
 {
 
 // 한 station(위치+heading)에서 좌/우 edge 까지의 안전 여유 최솟값.
-// margin 이 이미 footprint 를 뺀 값이므로 min 이 곧 그 station 의 clearance.
 double stationClearance(
     const RoadBoundary & boundary, const Point2 & center, double heading,
     double footprint_cm)
@@ -84,6 +83,104 @@ double stationClearance(
     const double right_m = marginAlongNormal(
         boundary, center, normal, -1.0, footprint_cm, 200.0);
     return std::min(left_m, right_m);
+}
+
+// ------------------------------------------------------------------
+// 2026-08-25 (성능 응급수정): roadClearanceRect/roadReportWheels 가 바퀴
+// 코너(station 당 최대 8개) 마다 stationClearance -> marginAlongNormal ->
+// edge->nearestGlobal 을 **독립적으로** 호출해, plan() 한 번에 수만 번의
+// nearestGlobal(내부적으로 다항식 실근 탐색)이 실행됐다 (실측: 경로 1개
+// 생성에 18초!). polygon+공간인덱스 기반이던 옛 boundary_checker 는 이
+// 문제가 없었는데(인덱스가 O(1) 근사), edge Curve 기반으로 바꾸면서
+// "코너마다 재탐색"을 그대로 옮긴 게 원인이다.
+//
+// 고정: station 의 **중심점 1개만** 좌/우 edge 에 최근접 투영(nearestGlobal
+// 2회, edge 당 1회)하고, 바퀴 코너들은 그 결과 위에서 순수 벡터 연산
+// (내적)으로 얻는다 -- KAU_AMET_Test Python 세션에서 이미 검증된
+// "centerline 점 1개만 탐색 + 나머지는 평행이동" 원리와 동일. 코너가
+// 중심에서 최대 ~23cm 떨어져 있을 뿐이라 근사 오차는 무시할 수준이고,
+// nearestGlobal 호출이 station 당 8~16회 -> 2회로 줄어든다.
+// ------------------------------------------------------------------
+
+struct EdgeProjection
+{
+    std::optional<Point2> left_pt;
+    std::optional<Point2> right_pt;
+};
+
+EdgeProjection projectStation(const RoadBoundary & boundary, const Point2 & center)
+{
+    EdgeProjection proj;
+    if (boundary.left.has_value() && boundary.left->nseg() > 0)
+    {
+        const kau::control::TrackState st = boundary.left->nearestGlobal(center);
+        if (st.valid)
+        {
+            proj.left_pt = boundary.left->point(st.s);
+        }
+    }
+    if (boundary.right.has_value() && boundary.right->nseg() > 0)
+    {
+        const kau::control::TrackState st = boundary.right->nearestGlobal(center);
+        if (st.valid)
+        {
+            proj.right_pt = boundary.right->point(st.s);
+        }
+    }
+    return proj;
+}
+
+double marginFromProjection(
+    const EdgeProjection & proj, const Point2 & point, const Point2 & normal,
+    double sign, double footprint_cm, double max_search_cm = 200.0)
+{
+    double d;
+    if (sign > 0.0)
+    {
+        if (proj.left_pt)
+        {
+            d = (proj.left_pt->x - point.x) * normal.x + (proj.left_pt->y - point.y) * normal.y;
+        }
+        else if (proj.right_pt)
+        {
+            const double r = -((proj.right_pt->x - point.x) * normal.x
+                               + (proj.right_pt->y - point.y) * normal.y);
+            d = kLaneWidthCm - r;
+        }
+        else
+        {
+            d = max_search_cm;
+        }
+    }
+    else
+    {
+        if (proj.right_pt)
+        {
+            d = -((proj.right_pt->x - point.x) * normal.x
+                 + (proj.right_pt->y - point.y) * normal.y);
+        }
+        else if (proj.left_pt)
+        {
+            const double l = (proj.left_pt->x - point.x) * normal.x
+                            + (proj.left_pt->y - point.y) * normal.y;
+            d = kLaneWidthCm - l;
+        }
+        else
+        {
+            d = max_search_cm;
+        }
+    }
+    d = std::clamp(d, 0.0, max_search_cm);
+    return std::max(0.0, d - footprint_cm);
+}
+
+double stationClearanceFromProjection(
+    const EdgeProjection & proj, const Point2 & point, const Point2 & normal,
+    double footprint_cm)
+{
+    return std::min(
+        marginFromProjection(proj, point, normal, 1.0, footprint_cm),
+        marginFromProjection(proj, point, normal, -1.0, footprint_cm));
 }
 
 }  // namespace
@@ -141,6 +238,8 @@ double roadClearanceRect(
             const double heading = std::atan2(tangent.y, tangent.x);
             const double ch = std::cos(heading);
             const double sh = std::sin(heading);
+            const Point2 normal{-std::sin(heading), std::cos(heading)};
+            const EdgeProjection proj = projectStation(boundary, center);
             for (double dx : {body.rearEdge(), body.frontEdge()})
             {
                 for (double dy : {-body.half_width_cm, body.half_width_cm})
@@ -149,7 +248,8 @@ double roadClearanceRect(
                         center.x + dx * ch - dy * sh,
                         center.y + dx * sh + dy * ch};
                     best = std::min(
-                        best, stationClearance(boundary, corner, heading, road_safety_margin_cm));
+                        best, stationClearanceFromProjection(
+                            proj, corner, normal, road_safety_margin_cm));
                 }
             }
         }
@@ -198,6 +298,8 @@ RoadReport roadReportWheels(
                 return Point2{center.x + dx * ch - dy * sh,
                               center.y + dx * sh + dy * ch};
             };
+            const Point2 normal{-std::sin(heading), std::cos(heading)};
+            const EdgeProjection proj = projectStation(boundary, center);
 
             int wheels_on = 0;
             for (double wx : {x_rear, x_front})
@@ -206,10 +308,10 @@ RoadReport roadReportWheels(
                 {
                     rep.min_clear_cm = std::min(
                         rep.min_clear_cm,
-                        stationClearance(boundary, corner(wx, sy * y_outer), heading,
-                                         road_safety_margin_cm));
-                    if (stationClearance(boundary, corner(wx, sy * y_inner), heading,
-                                         road_safety_margin_cm) >= 0.0)
+                        stationClearanceFromProjection(
+                            proj, corner(wx, sy * y_outer), normal, road_safety_margin_cm));
+                    if (stationClearanceFromProjection(
+                            proj, corner(wx, sy * y_inner), normal, road_safety_margin_cm) >= 0.0)
                     {
                         ++wheels_on;
                     }
