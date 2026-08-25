@@ -9,6 +9,17 @@
 //
 // 직선에서는 v_max, 곡선에서는 곡률이 클수록 낮아진다 (params.hpp 의 sqrt law).
 //
+// 출발 게이트 (start_gate.*)
+//     신호등이 초록이 되기 전에는 /speed 를 0 으로 묶는다. 허가는
+//     /perception/start_permission (std_msgs/Bool) 으로 들어온다.
+//
+//         초기값 · 미수신 · false  -> 0 발행
+//         true 1회 수신            -> latch. 이후 값은 로깅만 하고 무시
+//
+//     대기 중에도 곡률 -> 목표속도 -> EMA 는 계속 돌린다 (warm). 허가가
+//     떨어지면 EMA 수렴값이 이미 서 있어 차가운 시작이 없고, v_ref 만
+//     0 에서 accel_max 로 올라간다.
+//
 // 속도 피드백(v_meas)
 //     아직 오도메트리 노드가 없다. topic 이름은 speed.feedback_topic
 //     parameter 로 두었으니 노드가 생기면 YAML 한 줄만 바꾸면 된다.
@@ -27,6 +38,7 @@
 #include <rclcpp/rclcpp.hpp>
 
 #include <nav_msgs/msg/odometry.hpp>
+#include <std_msgs/msg/bool.hpp>
 #include <std_msgs/msg/float64.hpp>
 
 #include "kau_control/params.hpp"
@@ -67,6 +79,13 @@ public:
         declare_parameter<double>("speed.feedback_timeout", 0.2);
         declare_parameter<bool>("speed.require_feedback", false);
 
+        // 출발 게이트. state_machine 이 /state_machine/speed_limit 을 내기
+        // 시작하면 permission_topic 구독을 그 토픽으로 갈아끼운다
+        // (kau_state_machine/docs/01 계약 14). 게이트 판정부는 그대로 쓴다.
+        declare_parameter<std::string>(
+            "start_gate.permission_topic", "/perception/start_permission");
+        declare_parameter<bool>("start_gate.required", true);
+
         declare_parameter<double>("pid.kp", 0.5);
         declare_parameter<double>("pid.ki", 0.5);
         declare_parameter<double>("pid.kd", 0.0);
@@ -87,6 +106,35 @@ public:
                 v_meas_  = m->twist.twist.linear.x;
 
                 fb_stamp_ = now();
+            });
+
+
+        // 발행자(start_signal_detector)와 같은 QoS 여야 매칭된다:
+        // RELIABLE / KEEP_LAST(1) / VOLATILE.
+        //
+        // 미수신 대비 timeout 은 두지 않는다. 초기값이 false 이고 latch 전에는
+        // true 를 봐야만 열리므로, 안 오면 안 열리는 것이 이미 기본값이다.
+        permission_sub_ = create_subscription<std_msgs::msg::Bool>(
+            get_parameter("start_gate.permission_topic").as_string(),
+            rclcpp::QoS(rclcpp::KeepLast(1)).reliable().durability_volatile(),
+            [this](std_msgs::msg::Bool::SharedPtr m)
+            {
+                // 소비 측 latch. 검출 노드가 재시작하면 그쪽 latch 가 풀려
+                // false 를 다시 내는데, 그것을 그대로 따르면 트랙 한복판에서
+                // 멈춘다. 주행 중 신호등은 정의상 오검출이다 (docs/01 4-3).
+                if (start_permitted_)
+                {
+                    return;
+                }
+
+                if (m->data)
+                {
+                    start_permitted_ = true;
+
+                    RCLCPP_INFO(
+                        get_logger(),
+                        "출발 허가 수신 (latch). 주행을 시작한다");
+                }
             });
 
 
@@ -119,10 +167,15 @@ public:
 
         RCLCPP_INFO(
             get_logger(),
-            "speed_controller 시작. v=%.2f~%.2f m/s 피드백=%s (%s)",
+            "speed_controller 시작. v=%.2f~%.2f m/s 피드백=%s (%s) "
+            "출발게이트=%s",
             sp_.v_min, sp_.v_max,
             get_parameter("speed.feedback_topic").as_string().c_str(),
-            require_fb_ ? "필수" : "없으면 v_ref 만 발행");
+            require_fb_ ? "필수" : "없으면 v_ref 만 발행",
+            gate_required_
+                ? get_parameter("start_gate.permission_topic")
+                    .as_string().c_str()
+                : "없음 (start_gate.required=false)");
     }
 
 private:
@@ -146,6 +199,8 @@ private:
 
         fb_timeout_ = get_parameter("speed.feedback_timeout").as_double();
         require_fb_ = get_parameter("speed.require_feedback").as_bool();
+
+        gate_required_ = get_parameter("start_gate.required").as_bool();
 
         PidParams pp;
 
@@ -211,6 +266,41 @@ private:
         // EMA 식은 원본 시뮬(full_simulation.py)과 같다.
         v_want_ +=
             sp_.emaAlpha(dt) * (sp_.target(kappa_win, vehicle_) - v_want_);
+
+
+        // --- 출발 게이트 ---
+        // 여기가 게이트 자리다. 위의 목표속도 계산(곡률 -> target -> EMA)은
+        // 대기 중에도 이미 돌았으므로 v_want_ 는 계속 warm 이고, 허가 즉시
+        // 그 값으로 붙는다 (docs/01 4-3 "min 은 EMA 뒤").
+        //
+        // v_ref_ 를 0 으로 잡아 두는 것이 급가속 방지의 전부다. 허가가
+        // 떨어지면 아래 rateLimit 이 0 에서 accel_max 로 끌어올린다
+        // (accel_max 1.5 에서 0.5 m/s 까지 0.33 s). 게이트를 rateLimit
+        // **뒤**에 두면 v_ref_ 가 대기 중 v_max 까지 차올라 허가 순간
+        // 계단으로 튄다 -- 순서를 바꾸면 안 되는 이유다.
+        //
+        // 경로 이상 · 종점 정지(stop())는 이 위에서 이미 처리됐다. 그쪽은
+        // rateLimit 을 거치지 않고 즉시 0 이라 안전 경로가 느려지지 않는다.
+        if (gate_required_ && !start_permitted_)
+        {
+            v_ref_ = 0.0;
+
+            // 게이트로 눌려 있는 동안 오차(v_ref - v_meas)를 적분하면
+            // 허가 순간 포화된 적분항이 그대로 실린다. 대기 중 적분 상태에
+            // 보존할 정보가 없으므로 얼리지 않고 매 tick 씻는다.
+            pid_.reset();
+
+            publishSpeed(0.0);
+
+            RCLCPP_INFO_THROTTLE(
+                get_logger(), *get_clock(), 2000,
+                "출발 허가 대기 중 (%s). v_want=%.2f m/s 로 대기",
+                get_parameter("start_gate.permission_topic")
+                    .as_string().c_str(),
+                v_want_);
+
+            return;
+        }
 
         v_ref_ = sp_.rateLimit(v_ref_, v_want_, dt);
 
@@ -288,12 +378,19 @@ private:
     bool   require_fb_ = false;
     bool   goal_logged_ = false;
 
+    // 출발 허가. **반드시 false 로 시작한다.** true 를 한 번 보면 latch 되고
+    // 그 뒤 들어오는 값은 무시한다.
+    bool   start_permitted_ = false;
+    bool   gate_required_   = true;
+
     rclcpp::Time fb_stamp_{0, 0, RCL_ROS_TIME};
     rclcpp::Time last_tick_{0, 0, RCL_ROS_TIME};
 
     rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr speed_pub_;
 
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr fb_sub_;
+
+    rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr permission_sub_;
 
     rclcpp::TimerBase::SharedPtr timer_;
 

@@ -3,7 +3,8 @@
 # 단위: 길이 cm / 곡률 1/cm / 속도 m/s
 #
 #   kappa_win = 전방 window 의 최대 |kappa|
-#   v_ref     = law(kappa_win) -> [v_min, v_max] -> EMA -> 가감속 제한
+#   v_want    = law(kappa_win) -> [v_min, v_max] -> EMA        (대기 중에도 상시)
+#   v_ref     = 출발 허가 전이면 0, 허가 후엔 v_want 로 가감속 제한
 #   /speed    = clamp(v_ref + PID(v_ref - v_meas), 0, v_max)
 #
 # 직선이면 v_max, 곡률이 클수록 낮아진다.
@@ -102,9 +103,16 @@ speed_controller:
       # 불필요하게 v_min 까지 떨어지던 것을 0.23 m/s 로 올린다.
       margin: 1.0
       use_sqrt_law: true                # true: 등횡가속도, false: 선형 보간
-      # 속도 폭이 0.3 m/s 뿐이라 이 두 값은 현재 **한 번도 안 걸린다**
-      # (ema_tau 가 더 느리다). 상한 안전망으로만 남겨 둔다.
-      accel_max: 1.5                    # m/s^2, 목표속도 증가율 상한
+      # 주행 중에는 속도 폭이 0.3 m/s 뿐이라 이 두 값이 **거의 안 걸린다**
+      # (ema_tau 가 더 느리다). 다만 accel_max 는 **출발 순간에 걸린다**:
+      # 출발 허가 전 v_ref 가 0 으로 묶여 있다가 허가와 함께 v_want 까지
+      # 올라가는데, 그 기울기를 정하는 것이 이 값이다.
+      #
+      #   0 -> 0.5 m/s 도달 시간 = v_max / accel_max = 0.5 / 1.5 = 0.33 s
+      #
+      # ★ 출발이 거칠면 여기를 내린다 (0.5 로 두면 1.0 s). 내릴수록 주행 중
+      #   가속에도 걸리기 시작하므로 코너 탈출이 같이 둔해진다.
+      accel_max: 1.5                    # m/s^2, 목표속도 증가율 상한 (= 출발 가속)
       decel_max: 2.0                    # m/s^2, 감속은 넉넉히 허용
       ema_tau: 0.4                      # s, 목표속도 EMA 시상수 (0 이면 끔)
 
@@ -120,6 +128,25 @@ speed_controller:
       feedback_topic: "/odometry/filtered"   # /odom 으로 바꿔야됨 저런 토픽 존재안함. 
       feedback_timeout: 0.2             # s, 이보다 오래되면 stale
       require_feedback: false           # 실차에선 True 로 바꿔야됨. 
+
+    # --- 출발 게이트 (신호등) ---
+    # 초록불이 되기 전에는 /speed 를 0 으로 묶는다.
+    #
+    #   초기값 · 미수신 · false -> 0 발행
+    #   true 1회 수신           -> latch. 이후 값은 로깅만 하고 판정에서 제외
+    #
+    # latch 하는 이유: start_signal_detector 가 재시작하면 그쪽 latch 가 풀려
+    # false 를 다시 발행한다. 그대로 따르면 트랙 한복판에서 멈춘다.
+    #
+    # 미수신 timeout 은 두지 않는다. 초기값이 false 라 "안 오면 안 간다" 가
+    # 이미 기본 동작이다 (화이트리스트 판정).
+    start_gate:
+      # ★ kau_state_machine 이 /state_machine/speed_limit 을 내기 시작하면
+      #   이 토픽을 그쪽으로 갈아끼운다 (docs/01 계약 14). 한시적 직결이다.
+      permission_topic: "/perception/start_permission"
+      # false 로 두면 게이트 없이 곧바로 달린다. **신호등 없이 주행부만
+      # 시험할 때만** 쓴다. 실주행·대회에서는 반드시 true.
+      required: true
 
     # --- PID ---
     # v_ref 를 피드포워드로 깔고 오차분만 보정하므로 게인은 작게 시작한다.

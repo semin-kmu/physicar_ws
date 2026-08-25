@@ -323,30 +323,41 @@ KauLaneDetectionNode::KauLaneDetectionNode()
     // peak 가 실제 중앙선(x=239) 이 아니라 왼쪽 잔디(x=117)
     // 에 꽂혔다. 그러면 흰선 탐색 밴드도 같이 어긋나
     // 세 차선이 전부 무너진다.
+
+    // 실제 트랙을 카메라로 찍은 결과 다음과 같다.
+    // HLS
+
+    // YELLOW
+
+    // [0, 80, 100] / [20, 255, 255]
+
+    // WHITE
+
+    // [0, 205, 0] [179, 255, 255] ← h_LOW 값이 190~210이 되어야 함, 실차 보고 수정할 것
     // ------------------------------------------------------------
 
     yellow_hls_lo_ =
         this->declare_parameter<std::vector<int64_t>>(
             "yellow_hls_lo",
-            {15, 70, 150}
+            {0, 80, 100}
         );
 
     yellow_hls_hi_ =
         this->declare_parameter<std::vector<int64_t>>(
             "yellow_hls_hi",
-            {35, 255, 255}
+            {20, 255, 255}
         );
 
     white_hls_lo_ =
         this->declare_parameter<std::vector<int64_t>>(
             "white_hls_lo",
-            {0, 200, 20}
+            {0, 205, 0}
         );
 
     white_hls_hi_ =
         this->declare_parameter<std::vector<int64_t>>(
             "white_hls_hi",
-            {180, 255, 70}
+            {180, 255, 255}
         );
 
 
