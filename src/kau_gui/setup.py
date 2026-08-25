@@ -1,3 +1,5 @@
+from glob import glob
+
 from setuptools import setup
 
 package_name = 'kau_gui'
@@ -11,6 +13,7 @@ setup(
          ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
         ('share/' + package_name + '/config', ['config/gui.yaml']),
+        ('share/' + package_name + '/launch', glob('launch/*.launch.py')),
         ('share/' + package_name + '/scripts', ['scripts/setup_venv.sh']),
     ],
     install_requires=['setuptools'],

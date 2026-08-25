@@ -76,6 +76,13 @@ venv 를 activate 하지 않는 이유는 python 실행 파일이 바뀌면 `ros
 colcon build --packages-select kau_msgs kau_control kau_gui --symlink-install
 source install/setup.bash
 
+ros2 launch kau_gui gui.launch.py
+```
+
+launch 가 `config/gui.yaml` 을 물린다. `ros2 run` 으로 직접 띄우면 파일을
+손으로 줘야 하고, 빠뜨리면 코드 기본값으로 조용히 돈다:
+
+```bash
 ros2 run kau_gui kau_gui --ros-args \
   --params-file src/kau_gui/config/gui.yaml
 ```

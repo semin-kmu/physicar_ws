@@ -20,7 +20,8 @@ from flask import Flask, Response, jsonify
 from werkzeug.serving import make_server
 
 
-PORT = 5000
+# 파라미터 port 의 기본값. 값의 주인은 config/lane_detection.yaml 이다.
+DEFAULT_PORT = 5000
 
 
 # ============================================================
@@ -36,6 +37,17 @@ class LaneViewerNode(Node):
         )
 
         self.bridge = CvBridge()
+
+        # --------------------------------------------------------
+        # Parameters
+        # --------------------------------------------------------
+
+        self.port = int(
+            self.declare_parameter(
+                "port",
+                DEFAULT_PORT
+            ).value
+        )
 
         # --------------------------------------------------------
         # Latest frame
@@ -179,7 +191,7 @@ def stop_view():
         server = None
 
 
-def start_server(app):
+def start_server(app, port):
 
     global server
 
@@ -208,7 +220,7 @@ def start_server(app):
         )
 
         probe.bind(
-            ("", PORT)
+            ("", port)
         )
 
         probe.close()
@@ -217,7 +229,7 @@ def start_server(app):
     except OSError:
 
         print(
-            "web view: port 5000 is already "
+            f"web view: port {port} is already "
             "in use."
         )
 
@@ -230,7 +242,7 @@ def start_server(app):
 
     server = make_server(
         "0.0.0.0",
-        PORT,
+        port,
         app,
         threaded=True
     )
@@ -464,7 +476,7 @@ def main(args=None):
     #
     # 신호를 직접 받아 루프를 빠져나오면 그 창 자체가 없다. 웹서버 스레드는
     # daemon 이라 알아서 죽지만, 포트를 바로 놓아주도록 stop_view() 로
-    # 명시해 내린다 (다시 띄울 때 "port 5000 is already in use" 방지).
+    # 명시해 내린다 (다시 띄울 때 "port ... is already in use" 방지).
     rclpy.init(
         args=args,
         signal_handler_options=SignalHandlerOptions.NO
@@ -481,7 +493,7 @@ def main(args=None):
     app =create_app()
 
 
-    web_server = start_server(app)
+    web_server = start_server(app, viewer_node.port)
 
 
     if web_server is None:

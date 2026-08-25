@@ -183,6 +183,9 @@ stages:
       - name: kau_lane_detection_viewer
         package: kau_lane_detection
         executable: lane_viewer.py
+        # 인지 노드와 같은 파일이다. 그 안의 kau_lane_detection_viewer
+        # 섹션(port)만 이 노드에 적용된다.
+        param_files: ["kau_lane_detection:config/lane_detection.yaml"]
         option: lane_viewer
 
   # 단계 5 · 전역 경로
@@ -219,13 +222,14 @@ stages:
 
   # 단계 7 · 상태 머신
   #
-  # mission_profile.yaml 은 아직 주석뿐이라 param_files 에 넣지 않는다.
+  # mission_profile.yaml · recovery.yaml 은 아직 주석뿐이라 넣지 않는다.
   - id: 7
     delay_sec: 1.0
     nodes:
       - name: state_machine
         package: kau_state_machine
         executable: state_machine
+        param_files: ["kau_state_machine:config/state_machine.yaml"]
 
   # 단계 8 · 조향. 구동보다 먼저 연다 (01 section 4-2)
   - id: 8

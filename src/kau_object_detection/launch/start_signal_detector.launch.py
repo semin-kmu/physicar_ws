@@ -17,10 +17,36 @@
 from pathlib import Path
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
+
+
+def detector_node(context, *unused):
+    """검출 노드 하나를 만든다.
+
+    값의 주인은 params_file(기본 config/start_signal_detector.yaml)이다.
+    토픽 인자는 명시적으로 준 것만 덮는다 -- 빈 값은 "안 줬다"는 뜻이다.
+    """
+    overrides = {
+        'use_sim_time': ParameterValue(
+            LaunchConfiguration('use_sim_time'), value_type=bool),
+    }
+    for key in ('input_topic', 'output_topic'):
+        raw = LaunchConfiguration(key).perform(context)
+        if raw:
+            overrides[key] = raw
+
+    return [Node(
+        package='kau_object_detection',
+        executable='start_signal_detector_node',
+        name='start_signal_detector',
+        output='screen',
+        parameters=[LaunchConfiguration('params_file'), overrides],
+        arguments=['--ros-args', '--log-level',
+                   LaunchConfiguration('log_level')],
+    )]
 
 
 def generate_launch_description():
@@ -33,15 +59,18 @@ def generate_launch_description():
         default_value=str(default_parameter_file),
         description='YAML holding the ROI, HSV and shape gates of the green lamp.',
     )
+    # 아래 둘은 yaml 에 값이 있다. 빈 값이 기본이고, 주면 그때만 yaml 을 덮는다.
     input_topic_argument = DeclareLaunchArgument(
         'input_topic',
-        default_value='/camera/image_raw/compressed',
-        description='Compressed camera stream the start signal is read from.',
+        default_value='',
+        description='Compressed camera stream the start signal is read from '
+                    '(default: yaml).',
     )
     output_topic_argument = DeclareLaunchArgument(
         'output_topic',
-        default_value='/perception/start_permission',
-        description='std_msgs/Bool topic carrying the latched start permission.',
+        default_value='',
+        description='std_msgs/Bool topic carrying the latched start permission '
+                    '(default: yaml).',
     )
     log_level_argument = DeclareLaunchArgument(
         'log_level',
@@ -58,20 +87,5 @@ def generate_launch_description():
         output_topic_argument,
         log_level_argument,
         use_sim_time_argument,
-        Node(
-            package='kau_object_detection',
-            executable='start_signal_detector_node',
-            name='start_signal_detector',
-            output='screen',
-            parameters=[
-                LaunchConfiguration('params_file'),
-                {
-                    'input_topic': LaunchConfiguration('input_topic'),
-                    'output_topic': LaunchConfiguration('output_topic'),
-                    'use_sim_time': ParameterValue(
-                        LaunchConfiguration('use_sim_time'), value_type=bool),
-                },
-            ],
-            arguments=['--ros-args', '--log-level', LaunchConfiguration('log_level')],
-        ),
+        OpaqueFunction(function=detector_node),
     ])

@@ -99,6 +99,10 @@ laser_scan_clusterer:
     object_list_pose_timeout_s: 0.3
     # No usable scan for this long makes the node report STATUS_LIDAR_UNAVAILABLE.
     object_list_scan_timeout_s: 0.3
+    # How long the transform lookup may wait for a TF covering the scan stamp.
+    # Only a short wait is useful: a scan whose transform never arrives has to
+    # be reported, not held.
+    object_list_transform_timeout_s: 0.05
     # Watchdog tick. Node clock, so it follows simulation time.
     object_list_watchdog_period_s: 0.1
     # Republication period while the watchdog holds. Must stay below

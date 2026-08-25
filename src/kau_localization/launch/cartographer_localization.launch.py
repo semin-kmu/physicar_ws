@@ -57,7 +57,6 @@ from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 
 from launch_ros.actions import Node
-from launch_ros.parameter_descriptions import ParameterValue
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from map_arg import resolve_map  # noqa: E402  (launch 폴더의 공용 헬퍼)
@@ -98,32 +97,42 @@ def launch_setup(context, *_args, **_kwargs):
         ],
     )
 
+    # 값의 주인은 params_file(기본 config/cartographer_localization.yaml)이다.
+    # 뒤에 오는 dict 가 같은 키를 덮으므로 **명시적으로 준 인자만** 넣는다.
+    # 빈 값이 기본인 인자는 "안 줬다"는 뜻이라 yaml 값이 그대로 산다.
+    params_file = LaunchConfiguration('params_file').perform(context)
+
+    grid_overrides = {'use_sim_time': use_sim_time}
+    for key in ('resolution', 'publish_period_sec'):
+        raw = LaunchConfiguration(key).perform(context)
+        if raw:
+            grid_overrides[key] = float(raw)
+
     occupancy_grid_node = Node(
         package='cartographer_ros',
         executable='cartographer_occupancy_grid_node',
         name='cartographer_occupancy_grid_node',
         output='log',
-        parameters=[{
-            'use_sim_time': use_sim_time,
-            'resolution': ParameterValue(
-                LaunchConfiguration('resolution'), value_type=float),
-            'publish_period_sec': ParameterValue(
-                LaunchConfiguration('publish_period_sec'), value_type=float),
-        }],
+        parameters=[params_file, grid_overrides],
         condition=IfCondition(LaunchConfiguration('publish_map')),
     )
+
+    # lua 경로 둘은 설치 트리마다 달라 yaml 에 못 적는다. 여기서 채운다.
+    relay_overrides = {
+        'use_sim_time': use_sim_time,
+        'configuration_directory': config_dir,
+        'configuration_basename': config_file,
+    }
+    start_pose = LaunchConfiguration('start_pose').perform(context)
+    if start_pose:
+        relay_overrides['start_pose'] = start_pose
 
     initial_pose_relay = Node(
         package=PACKAGE,
         executable='initial_pose_relay',
         name='initial_pose_relay',
         output='screen',
-        parameters=[{
-            'use_sim_time': use_sim_time,
-            'configuration_directory': config_dir,
-            'configuration_basename': config_file,
-            'start_pose': LaunchConfiguration('start_pose'),
-        }],
+        parameters=[params_file, relay_overrides],
         condition=IfCondition(LaunchConfiguration('initial_pose')),
     )
 
@@ -166,18 +175,24 @@ def generate_launch_description():
             'config_file', default_value='physicar_2d_localization.lua',
             description='config/ 안의 lua 파일명.'),
         DeclareLaunchArgument(
-            'resolution', default_value='0.05',
-            description='/map 격자 해상도 [m].'),
+            'params_file',
+            default_value=str(share / 'config' / 'cartographer_localization.yaml'),
+            description='initial_pose_relay / occupancy_grid_node 파라미터.'),
+        # 아래 둘은 위 yaml 에 값이 있다. 주면 그때만 덮는다.
         DeclareLaunchArgument(
-            'publish_period_sec', default_value='1.0',
-            description='/map 발행 주기 [s].'),
+            'resolution', default_value='',
+            description='/map 격자 해상도 [m] (기본: yaml).'),
+        DeclareLaunchArgument(
+            'publish_period_sec', default_value='',
+            description='/map 발행 주기 [s] (기본: yaml).'),
         DeclareLaunchArgument(
             'initial_pose', default_value='true',
             description='RViz 2D Pose Estimate(/initialpose) 릴레이 사용 여부.'),
         DeclareLaunchArgument(
             'start_pose', default_value='',
             description='시작 위치를 알 때 "x,y,yaw" (m, m, rad). 기동 직후 '
-                        '릴레이가 스스로 재측위한다. 비우면 /initialpose 대기.'),
+                        '릴레이가 스스로 재측위한다. 기본은 yaml (빈 값 = '
+                        '/initialpose 대기).'),
         DeclareLaunchArgument(
             'publish_map', default_value='true',
             description='occupancy_grid_node 로 /map 을 발행할지.'),

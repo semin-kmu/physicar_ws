@@ -1,0 +1,16 @@
+# state_machine 노드 파라미터. 설계는 docs/05~06.
+#
+# 이 값은 원래 어디에도 파일로 없었고 nodes/state_machine.py 의
+# declare_parameter 기본값에만 있었다. 다른 패키지와 같은 규칙 --
+# 노드 파라미터는 config/ 의 yaml 이 값의 주인이다 -- 을 맞추려고 뽑았다.
+#
+# system_supervisor 의 bringup_yaml · run_id · option.* 는 여기 없다.
+# 그 노드는 이 파일을 포함한 manifest 를 **읽어서 나머지를 띄우는** 쪽이라
+# 자기 설정을 자기가 띄우는 파일에서 받을 수 없다 (기동 순서상 닭-달걀).
+# run.sh 의 KAU_* 변수와 state_machine.launch.py 의 인자가 그 자리다.
+
+state_machine:
+  ros__parameters:
+
+    # 평가 tick [Hz]. 발행은 tick 안에서만 한다 (docs/00 불변식 1).
+    tick_hz: 20.0

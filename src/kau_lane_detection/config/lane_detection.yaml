@@ -395,6 +395,11 @@ kau_lane_detection_node:
     # 0.4 면 시상수가 약 2 프레임 (14 Hz 에서 0.15 s).
     path_ema_alpha: 0.4
 
+    # 추정치가 한 프레임에 움직일 수 있는 최대 속도 [cm/s].
+    # 실제 상한은 이 값 x dt 라 프레임이 느려지면 같이 넓어진다
+    # (path_ema_gate_cm 과 단위가 다른 이유. CLAUDE.md 7).
+    path_max_step_cm_per_s: 80.0
+
     # 관측이 추정치에서 이만큼(제어점 6개의 평균거리) 벗어나면
     # 섞지 않는다. 차로 폭 31.25 의 절반쯤.
     #
@@ -772,6 +777,16 @@ kau_lane_detection_node:
     # 섞으면 나중에 어느 쪽이 하드웨어 문제였는지 못 가린다.
     pan_sign: 1.0
 
+    # pan 회전축이 base_link 원점에서 떨어진 거리 [cm].
+    # 경로를 base_link 로 되돌릴 때의 회전 피벗이다.
+    #
+    # ★ (0,0) 은 초안값이다 (CLAUDE.md 12). URDF 실측은 약 (5,0).
+    #   pan=0 에서는 값이 얼마든 결과가 같으므로 카메라 마운트를
+    #   재실측할 때 같이 넣는다. 피벗이 d 만큼 어긋나면 오차는
+    #   d*2sin(theta/2) -- 15 도에서 1.3 cm, 30 도에서 2.6 cm 다.
+    pan_pivot_offset_x_cm: 0.0
+    pan_pivot_offset_y_cm: 0.0
+
     # ============================================================
     # Pan 조준 (feedforward)
     #
@@ -843,3 +858,15 @@ kau_lane_detection_node:
     #
     # ★ 실측 전 초안값. 튜닝 필요.
     pan_aim_gain: 1.0
+
+
+# ============================================================
+# BEV 웹 뷰어 (scripts/lane_viewer.py). 관측 전용 노드다.
+# ============================================================
+
+kau_lane_detection_viewer:
+  ros__parameters:
+
+    # 웹 뷰어 포트 (http://localhost:<port>).
+    # 이미 쓰이는 포트면 뷰어만 뜨지 않고 인지 노드는 정상 동작한다.
+    port: 5000

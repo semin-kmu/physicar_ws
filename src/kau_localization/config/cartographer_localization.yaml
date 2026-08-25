@@ -1,0 +1,25 @@
+# Cartographer pure localization 경로의 **노드 파라미터**.
+# 매칭 알고리즘 값은 여기 없다 -- 그쪽은 config/physicar_2d_localization.lua 다.
+#
+# 이 값들은 원래 어디에도 파일로 없었고 cartographer_localization.launch.py 의
+# DeclareLaunchArgument 기본값에만 있었다. 다른 패키지와 같은 규칙 --
+# 노드 파라미터는 config/ 의 yaml 이 값의 주인이다 -- 을 맞추려고 뽑았다.
+# launch 인자는 그대로 살아 있고, 주면 이 파일을 덮는다.
+#
+# configuration_directory · configuration_basename 은 여기 없다. 설치
+# 트리마다 절대경로가 달라 정적 yaml 에 못 적어서 launch 가 채운다
+# (local_planner.yaml 의 track_yaml_path 와 같은 자리).
+
+initial_pose_relay:
+  ros__parameters:
+
+    # 시작 위치 "x,y,yaw" (m, m, rad). 기동 직후 릴레이가 스스로 재측위한다.
+    # 비우면 /initialpose (RViz "2D Pose Estimate") 를 기다린다.
+    # AMCL 경로의 같은 값은 amcl.yaml 의 initial_pose 다.
+    start_pose: ""
+
+cartographer_occupancy_grid_node:
+  ros__parameters:
+
+    resolution: 0.05            # /map 격자 해상도 [m]
+    publish_period_sec: 1.0     # /map 발행 주기 [s]

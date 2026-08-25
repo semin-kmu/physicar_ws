@@ -11,8 +11,10 @@
 `lane` 은 share 의 config/ 에서 파일을 고르는 이름표일 뿐이다 (4.7). `path` 를
 직접 주면 그쪽이 이긴다 — 생성기로 막 뽑은 파일을 rebuild 없이 시험할 때 쓴다.
 
-기본 경로는 `center_loop` 다 — 차로를 둘로 나눠 보지 않는다 (README 4.1.3).
-변형 파일들도 레이어 이름이 `center` 라 `route` 는 그대로 두면 된다.
+`route` 등 노드 파라미터의 값은 **config/global_path.yaml 에 있다**. 여기 인자는
+빈 값이 기본이고, 주면 그때만 yaml 을 덮는다. 기본 경로는 `center_loop` 다 —
+차로를 둘로 나눠 보지 않는다 (README 4.1.3). 변형 파일들도 레이어 이름이
+`center` 라 `route` 는 그대로 두면 된다.
 
 `use_sim_time` 은 다른 런치들(ekf / amcl / cartographer)과 같은 규칙이다 —
 Gazebo 는 true, 실기는 false. **대회장에서는 네 런치 모두 false 를 준다.**
@@ -69,35 +71,50 @@ def resolve_lane(lane, path):
     return str(yaml_path)
 
 
+# launch 인자 이름 -> 형변환. yaml 의 같은 키를 덮는 자리다.
+OVERRIDABLE = (
+    ('route', str),
+    ('topic', str),
+    ('viz_topic', str),
+    ('viz_spacing', float),
+    ('rate', float),
+    ('kappa_limit', float),
+)
+
+
 def launch_setup(context, *unused):
-    cfg = {k: LaunchConfiguration(k).perform(context)
-           for k in ('lane', 'path', 'route', 'topic', 'viz_topic',
-                     'viz_spacing', 'rate', 'kappa_limit')}
+    share = Path(get_package_share_directory('kau_global_path')) / 'config'
     use_sim_time = LaunchConfiguration('use_sim_time').perform(context).lower() == 'true'
+
+    # 값의 주인은 config/global_path.yaml 이다. launch 인자는 **명시적으로 준
+    # 것만** 덮는다 -- 기본값 ''(빈 값)은 "안 줬다"는 뜻이라 dict 에 안 넣는다.
+    # 예전에는 인자 기본값으로 dict 를 통째로 만들어 넘겨서, yaml 을 고쳐도
+    # launch 기동에는 반영되지 않았고 bringup 경로와 값이 갈렸다.
+    overrides = {'use_sim_time': use_sim_time}
+    for key, cast in OVERRIDABLE:
+        raw = LaunchConfiguration(key).perform(context)
+        if raw:
+            overrides[key] = cast(raw)
+
+    # path 만 예외다. 설치 트리마다 절대경로가 달라 정적 yaml 에 못 적는다
+    # (local_planner.yaml 의 track_yaml_path 와 같은 자리).
+    overrides['path'] = resolve_lane(
+        LaunchConfiguration('lane').perform(context),
+        LaunchConfiguration('path').perform(context))
 
     node = Node(
         package='kau_global_path',
         executable='global_path_publisher.py',
         name='global_path_publisher',
         output='screen',
-        parameters=[{
-            'route': cfg['route'],
-            'path': resolve_lane(cfg['lane'], cfg['path']),
-            'topic': cfg['topic'],
-            'viz_topic': cfg['viz_topic'],
-            'viz_spacing': float(cfg['viz_spacing']),
-            'rate': float(cfg['rate']),
-            'kappa_limit': float(cfg['kappa_limit']),
-            'use_sim_time': use_sim_time,
-        }],
+        parameters=[str(share / 'global_path.yaml'), overrides],
     )
     avoidance = Node(
         package='kau_global_path',
         executable='global_avoidance_publisher.py',
         name='global_avoidance_publisher',
         output='screen',
-        parameters=[str(Path(get_package_share_directory('kau_global_path')) /
-                        'config' / 'global_avoidance.yaml'),
+        parameters=[str(share / 'global_avoidance.yaml'),
                     {'use_sim_time': use_sim_time}],
         condition=IfCondition(LaunchConfiguration('avoidance')),
     )
@@ -109,18 +126,23 @@ def generate_launch_description():
         DeclareLaunchArgument('lane', default_value='',
                               description='빈 값(원본) · right_bias · left_bias · '
                                           'last_obstacle · every_obstacle (README 4.7)'),
-        DeclareLaunchArgument('route', default_value='center_loop',
-                              description='lane_graph.yaml 의 routes 이름'),
         DeclareLaunchArgument('path', default_value='',
                               description='yaml 을 직접 지정한다. 주면 lane 보다 우선한다'),
-        DeclareLaunchArgument('topic', default_value='/path/global'),
-        DeclareLaunchArgument('viz_topic', default_value='/viz/path/global'),
-        DeclareLaunchArgument('viz_spacing', default_value='0.05',
-                              description='m. 시각화 리샘플 간격'),
-        DeclareLaunchArgument('rate', default_value='1.0',
-                              description='Hz. 0 이면 1 회만 발행 (latched 라 그래도 받는다)'),
-        DeclareLaunchArgument('kappa_limit', default_value='1.8199',
-                              description='1/m. 넘으면 경고만 낸다 (README 6.4)'),
+
+        # 아래 다섯은 config/global_path.yaml 에 값이 있다. 빈 값이 기본이고,
+        # 주면 그때만 yaml 을 덮는다.
+        DeclareLaunchArgument('route', default_value='',
+                              description='lane_graph.yaml 의 routes 이름 (기본: yaml)'),
+        DeclareLaunchArgument('topic', default_value='',
+                              description='기본: yaml'),
+        DeclareLaunchArgument('viz_topic', default_value='',
+                              description='기본: yaml'),
+        DeclareLaunchArgument('viz_spacing', default_value='',
+                              description='m. 시각화 리샘플 간격 (기본: yaml)'),
+        DeclareLaunchArgument('rate', default_value='',
+                              description='Hz. 0 이면 1 회만 발행 (기본: yaml)'),
+        DeclareLaunchArgument('kappa_limit', default_value='',
+                              description='1/m. 넘으면 경고만 낸다 (기본: yaml)'),
         DeclareLaunchArgument('avoidance', default_value='true',
                               description='/path/global_avoidance 노드도 함께 실행'),
         DeclareLaunchArgument('use_sim_time', default_value='true',

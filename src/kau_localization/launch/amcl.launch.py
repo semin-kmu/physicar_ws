@@ -48,7 +48,7 @@ Cartographer 와 비교:
     maps_dir:=/다른/폴더            이름만 줬을 때 뒤질 폴더
     start_pose:="x,y,yaw"          시작 위치 (m, m, rad). 비우면 /initialpose 대기
     use_sim_time:=false            실기에서 실행할 때
-    scan_topic:=/scan              raw /scan 을 써야 한다 (config/amcl.yaml 참고)
+    scan_topic:=/scan              기본은 yaml. raw /scan 을 써야 한다 (config/amcl.yaml)
     params_file:=/path/to.yaml     기본은 config/amcl.yaml
     nomotion_update:=true          정지 중 강제 갱신을 켤 때 (기본 꺼짐, 권장 안 함)
     rviz:=true                     RViz 동시 실행
@@ -105,9 +105,12 @@ def launch_setup(context, *_args, **_kwargs):
 
     initial_pose = parse_start_pose(LaunchConfiguration('start_pose').perform(context))
 
-    # params_file 뒤에 오는 dict 가 같은 키를 덮어쓴다. 그래서 launch 인자가
-    # yaml 보다 항상 우선한다.
-    amcl_overrides = {'use_sim_time': use_sim_time, 'scan_topic': scan_topic}
+    # 값의 주인은 params_file(기본 config/amcl.yaml)이다. params_file 뒤에
+    # 오는 dict 가 같은 키를 덮으므로, **명시적으로 준 인자만** 여기 넣는다.
+    # 빈 값이 기본인 인자는 "안 줬다"는 뜻이라 yaml 값이 그대로 산다.
+    amcl_overrides = {'use_sim_time': use_sim_time}
+    if scan_topic:
+        amcl_overrides['scan_topic'] = scan_topic
     if initial_pose:
         amcl_overrides.update(initial_pose)
 
@@ -193,9 +196,9 @@ def generate_launch_description():
             'use_sim_time', default_value='true',
             description='Gazebo 는 true, 실기는 false.'),
         DeclareLaunchArgument(
-            'scan_topic', default_value='/scan',
-            description='raw /scan 을 쓴다. /scan_filtered 는 무효값을 0.0 으로 '
-                        '바꿔서 AMCL 가중치를 망가뜨린다.'),
+            'scan_topic', default_value='',
+            description='기본은 yaml (raw /scan). /scan_filtered 는 무효값을 '
+                        '0.0 으로 바꿔서 AMCL 가중치를 망가뜨리므로 쓰지 말 것.'),
         DeclareLaunchArgument(
             'start_pose', default_value='',
             description='시작 위치 "x,y,yaw" (m, m, rad). 비우면 /initialpose 대기.'),

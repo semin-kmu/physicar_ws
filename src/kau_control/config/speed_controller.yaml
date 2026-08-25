@@ -61,9 +61,15 @@ speed_controller:
       look_min_cm: 10.0                 # 곡률 탐색 window 하한
       look_max_cm: 50.0                 # v_max 에서의 window 상한 (= 1.0 s)
       min_span_cm: 20.0                 # window 최소 폭 (저속 퇴화 방지)
-      # v_min 이 나오는 곡률 = margin * kappa_max -> R 61.8 cm.
-      # 트랙 주 코너 R 63~65 cm 와 겹친다. 이 트랙에선 건드리지 말 것.
-      margin: 0.8
+      # v_min 이 나오는 곡률 = margin * kappa_max.
+      #   1.0 -> R 49.45 cm (= 차량 최소회전반경). 여기서만 최저속.
+      #   0.8 -> R 61.8 cm   0.6 -> R 82.4 cm
+      #
+      # **내릴수록 더 완만한 곡선에서 감속한다** (방향 헷갈리기 쉬움).
+      # 1.0 인 이유: 이 속도대의 a_lat 은 0.081 m/s^2 로 실제 마찰한계의
+      # 수% 라 안전여유가 무의미하고, 트랙 주 코너 R 63~65 cm 에서
+      # 불필요하게 v_min 까지 떨어지던 것을 0.23 m/s 로 올린다.
+      margin: 1.0
       use_sqrt_law: true                # true: 등횡가속도, false: 선형 보간
       # 속도 폭이 0.3 m/s 뿐이라 이 두 값은 현재 **한 번도 안 걸린다**
       # (ema_tau 가 더 느리다). 상한 안전망으로만 남겨 둔다.

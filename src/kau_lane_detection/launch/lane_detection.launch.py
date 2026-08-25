@@ -31,13 +31,16 @@ ROS 쪽에는 image_raw 만 bridge 되어 있어서 camera_info 가 비어 있�
     image_bridge:=true          image_raw 도 직접 bridge 해야 할 때
     viewer:=false               웹 뷰어(포트 5000) 없이 노드만
     params_file:=/path/to.yaml  다른 파라미터 파일로 교체
-    pan_search:=false           카메라 pan 탐색 끄기 (기본 켜짐)
-    pan_aim:=false              카메라 pan 조준 끄기 (기본 켜짐)
+    pan_search:=false           카메라 pan 탐색 끄기 (기본: yaml)
+    pan_aim:=false              카메라 pan 조준 끄기 (기본: yaml)
+
+pan_search / pan_aim 은 안 주면 yaml 값(pan_search_enable ·
+pan_aim_enable)이 그대로 산다. 줄 때만 덮는다.
 
 pan_search 는 노드가 생성자에서 한 번만 읽는 값이라
 ros2 param set 으로는 바꿀 수 없다. 기동 시점에 넣어야 한다.
 
-기본 켜짐이다. 탐색/유지/복귀 동안에는 카메라 자세가 BEV 의
+yaml 기본은 켜짐이다. 탐색/유지/복귀 동안에는 카메라 자세가 BEV 의
 전제(pan=0)와 어긋나므로 그 사이 /lane/center 를 새로 짓지 않고
 건너뛴다 — 하류는 직전 값을 그대로 들고 간다. 주행 중 한쪽 흰선을
 오래 놓치면 경로가 그만큼 낡는다는 뜻이므로, 그게 곤란하면
@@ -49,7 +52,7 @@ from pathlib import Path
 from ament_index_python.packages import get_package_share_directory
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 
@@ -74,6 +77,38 @@ IMAGE_BRIDGE = (
 )
 
 
+# 인자 이름 -> 노드 파라미터 이름. yaml 의 같은 키를 덮는 자리다.
+PAN_OVERRIDES = (
+    ('pan_search', 'pan_search_enable'),
+    ('pan_aim', 'pan_aim_enable'),
+)
+
+
+def lane_detection_node(context, *unused):
+    """인지 노드 하나를 만든다.
+
+    값의 주인은 params_file(기본 config/lane_detection.yaml)이다. pan 인자는
+    **명시적으로 준 것만** 덮는다 -- 기본값 ''(빈 값)은 "안 줬다"는 뜻이다.
+    예전에는 기본값이 true 라 yaml 의 pan_search_enable 을 항상 이겼다.
+    """
+    overrides = {
+        'use_sim_time': ParameterValue(
+            LaunchConfiguration('use_sim_time'), value_type=bool),
+    }
+    for arg, param in PAN_OVERRIDES:
+        raw = LaunchConfiguration(arg).perform(context)
+        if raw:
+            overrides[param] = raw.lower() == 'true'
+
+    return [Node(
+        package=PACKAGE,
+        executable='kau_lane_detection_node',
+        name='kau_lane_detection_node',
+        output='screen',
+        parameters=[LaunchConfiguration('params_file'), overrides],
+    )]
+
+
 def generate_launch_description():
     default_params = str(
         Path(get_package_share_directory(PACKAGE)) /
@@ -81,12 +116,9 @@ def generate_launch_description():
         'lane_detection.yaml'
     )
 
-    params_file = LaunchConfiguration('params_file')
     camera_info_bridge = LaunchConfiguration('camera_info_bridge')
     image_bridge = LaunchConfiguration('image_bridge')
     viewer = LaunchConfiguration('viewer')
-    pan_search = LaunchConfiguration('pan_search')
-    pan_aim = LaunchConfiguration('pan_aim')
     use_sim_time = ParameterValue(
         LaunchConfiguration('use_sim_time'), value_type=bool)
 
@@ -131,11 +163,13 @@ def generate_launch_description():
             description='Gazebo 는 true, 실기는 false.',
         ),
 
+        # 아래 둘은 yaml 에 값이 있다(pan_search_enable · pan_aim_enable).
+        # 빈 값이 기본이고, 주면 그때만 yaml 을 덮는다.
         DeclareLaunchArgument(
             'pan_search',
-            default_value='true',
+            default_value='',
             description=(
-                '차선 소실 시 카메라 pan 탐색 (기본 켜짐). '
+                '차선 소실 시 카메라 pan 탐색 (기본: yaml). '
                 '탐색/유지/복귀 동안 /lane/center 가 갱신되지 않고 '
                 '직전 값이 유지된다'
             ),
@@ -143,10 +177,10 @@ def generate_launch_description():
 
         DeclareLaunchArgument(
             'pan_aim',
-            default_value='true',
+            default_value='',
             description=(
                 '전역경로 룩어헤드로 카메라를 미리 돌리는 조준 '
-                '(기본 켜짐). 켜지면 pan_search 상태기계 대신 '
+                '(기본: yaml). 켜지면 pan_search 상태기계 대신 '
                 '동작하고, 측위/전역경로가 없으면 자동으로 '
                 '상태기계로 넘어간다'
             ),
@@ -181,38 +215,22 @@ def generate_launch_description():
         # Lane Detection
         # ------------------------------------------------------------
 
-        Node(
-            package=PACKAGE,
-            executable='kau_lane_detection_node',
-            name='kau_lane_detection_node',
-            output='screen',
-            parameters=[
-                params_file,
-                {
-                    # yaml 을 덮는다. 노드가 생성자에서 한 번만 읽으므로
-                    # 여기서 넣지 않으면 나중에 켤 방법이 없다.
-                    'pan_search_enable': ParameterValue(
-                        pan_search, value_type=bool),
-
-                    # 이쪽은 노드가 매 프레임 다시 읽으므로 기동 뒤
-                    # ros2 param set 으로도 바꿀 수 있다.
-                    'pan_aim_enable': ParameterValue(
-                        pan_aim, value_type=bool),
-                    'use_sim_time': use_sim_time,
-                },
-            ],
-        ),
+        OpaqueFunction(function=lane_detection_node),
 
         # ------------------------------------------------------------
         # Web Viewer
         # ------------------------------------------------------------
 
+        # 같은 yaml 의 kau_lane_detection_viewer 섹션을 읽는다 (port).
         Node(
             package=PACKAGE,
             executable='lane_viewer.py',
             name='kau_lane_detection_viewer',
             output='screen',
-            parameters=[{'use_sim_time': use_sim_time}],
+            parameters=[
+                LaunchConfiguration('params_file'),
+                {'use_sim_time': use_sim_time},
+            ],
             condition=IfCondition(viewer),
         ),
     ])

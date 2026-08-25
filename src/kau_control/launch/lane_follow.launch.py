@@ -32,6 +32,7 @@ pose_source:=identity 로 두면 차량은 그 프레임의 원점이므로 TF �
 주요 인자:
 
     speed:=0.4            상수 속도 [m/s]. v_min = v_max 로 덮는다.
+                          안 주면 yaml 값이 그대로 산다.
                           0.0 이면 조향만 (차는 정지)
     lane_detection:=true  차선 인지도 같이 띄울지
     viewer:=true          웹 뷰어(포트 5000). lane_detection:=true 일 때만
@@ -54,7 +55,11 @@ from pathlib import Path
 from ament_index_python.packages import get_package_share_directory
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import (
+    DeclareLaunchArgument,
+    IncludeLaunchDescription,
+    OpaqueFunction,
+)
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
@@ -66,6 +71,45 @@ from launch_ros.parameter_descriptions import ParameterValue
 PACKAGE = 'kau_control'
 
 DETECTION_PACKAGE = 'kau_lane_detection'
+
+
+def controller_nodes(context, *unused):
+    """speed / steer 컨트롤러 두 개를 만든다.
+
+    값의 주인은 params_file(기본 config/lane_follow.yaml)이다. speed 인자는
+    **명시적으로 줄 때만** v_min · v_max 를 덮는다 -- 기본값 ''(빈 값)은
+    "안 줬다"는 뜻이라 yaml 의 곡률 기반 가감속 설정이 그대로 산다.
+    예전에는 기본값이 0.4 라 yaml 을 항상 상수 속도로 눌러 버렸다.
+    """
+    params_file = LaunchConfiguration('params_file')
+    common = ['--ros-args', '--log-level', LaunchConfiguration('log_level')]
+    use_sim_time = ParameterValue(
+        LaunchConfiguration('use_sim_time'), value_type=bool)
+
+    speed_overrides = {'use_sim_time': use_sim_time}
+    raw_speed = LaunchConfiguration('speed').perform(context)
+    if raw_speed:
+        speed_overrides['speed.v_min'] = float(raw_speed)
+        speed_overrides['speed.v_max'] = float(raw_speed)
+
+    return [
+        Node(
+            package=PACKAGE,
+            executable='speed_controller_node',
+            name='speed_controller',
+            output='screen',
+            arguments=common,
+            parameters=[params_file, speed_overrides],
+        ),
+        Node(
+            package=PACKAGE,
+            executable='steer_controller_node',
+            name='steer_controller',
+            output='screen',
+            arguments=common,
+            parameters=[params_file, {'use_sim_time': use_sim_time}],
+        ),
+    ]
 
 
 def generate_launch_description():
@@ -81,14 +125,8 @@ def generate_launch_description():
         'lane_detection.launch.py'
     )
 
-    params_file = LaunchConfiguration('params_file')
-    use_sim_time = LaunchConfiguration('use_sim_time')
-    log_level = LaunchConfiguration('log_level')
-    speed = LaunchConfiguration('speed')
     lane_detection = LaunchConfiguration('lane_detection')
     viewer = LaunchConfiguration('viewer')
-
-    common = ['--ros-args', '--log-level', log_level]
 
     return LaunchDescription([
 
@@ -114,11 +152,13 @@ def generate_launch_description():
             description='debug 로 두면 s / cte / Ld / steer 가 2 Hz 로 찍힌다',
         ),
 
+        # yaml 에 speed.v_min · speed.v_max 가 있다. 빈 값이 기본이고,
+        # 주면 그때만 둘을 같은 값으로 덮어 상수 속도로 만든다.
         DeclareLaunchArgument(
             'speed',
-            default_value='0.4',
+            default_value='',
             description=(
-                '상수 속도 [m/s]. v_min = v_max 로 덮는다. '
+                '상수 속도 [m/s]. v_min = v_max 로 덮는다 (기본: yaml). '
                 '0.0 이면 조향만 관찰한다'
             ),
         ),
@@ -152,41 +192,9 @@ def generate_launch_description():
         # ------------------------------------------------------------
         # 제어
         #
-        # parameter 는 yaml 이 먼저, launch 인자가 나중이다.
-        # 뒤에 오는 dict 가 yaml 의 같은 이름을 덮는다.
+        # parameter 는 yaml 이 값의 주인이다. launch 인자는 명시적으로
+        # 준 것만 덮는다 (controller_nodes 주석 참고).
         # ------------------------------------------------------------
 
-        Node(
-            package=PACKAGE,
-            executable='speed_controller_node',
-            name='speed_controller',
-            output='screen',
-            arguments=common,
-            parameters=[
-                params_file,
-                {
-                    'use_sim_time': ParameterValue(
-                        use_sim_time, value_type=bool),
-
-                    'speed.v_min': ParameterValue(speed, value_type=float),
-
-                    'speed.v_max': ParameterValue(speed, value_type=float),
-                },
-            ],
-        ),
-
-        Node(
-            package=PACKAGE,
-            executable='steer_controller_node',
-            name='steer_controller',
-            output='screen',
-            arguments=common,
-            parameters=[
-                params_file,
-                {
-                    'use_sim_time': ParameterValue(
-                        use_sim_time, value_type=bool),
-                },
-            ],
-        ),
+        OpaqueFunction(function=controller_nodes),
     ])
