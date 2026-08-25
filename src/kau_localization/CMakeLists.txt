@@ -16,6 +16,7 @@ find_package(cartographer_ros_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(std_srvs REQUIRED)
+find_package(sensor_msgs REQUIRED)
 
 # SLAM/localization 본체는 cartographer_ros 가 제공한다.
 # 이 패키지가 직접 빌드하는 것은 초기 위치 릴레이 노드 하나뿐.
@@ -35,9 +36,22 @@ ament_target_dependencies(nomotion_updater
   std_srvs
 )
 
+# robot_localization 에는 센서별 신뢰도 파라미터가 없다 -- 신뢰도는 오직
+# 메시지의 covariance 에서 온다. 그런데 laser_odom 도 physicar_driver 도
+# 공분산을 안 채워서 전부 0 으로 나가고, 그러면 EKF 가 두 소스를 모두
+# "오차 0" 으로 무한신뢰한다. 이 노드가 공분산을 채워 신뢰도 손잡이를
+# 만든다 (자세한 근거는 소스 상단 주석).
+add_executable(odom_covariance_relay src/odom_covariance_relay.cpp)
+ament_target_dependencies(odom_covariance_relay
+  rclcpp
+  nav_msgs
+  sensor_msgs
+)
+
 install(TARGETS
   initial_pose_relay
   nomotion_updater
+  odom_covariance_relay
   DESTINATION lib/${PROJECT_NAME}
 )
 

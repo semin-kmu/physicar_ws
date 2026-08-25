@@ -48,7 +48,7 @@ amcl:
     # nav2 기본값의 laser_min_range 0.05 는 라이다 실제 하한보다 낮아서
     # 있으나 마나였다. 실제 값으로 맞춘다.
     laser_min_range: 0.1
-    laser_max_range: 16.0
+    laser_max_range: 12.0
 
     # 719 beam 중 몇 개를 쓸지. 기본 60 은 12 x 7 m 빈 직사각형에서 빈약하다 —
     # 특징이 벽 네 개뿐이라 beam 이 적으면 벽을 따라 미끄러지는 자유도가 남는다.
@@ -70,16 +70,16 @@ amcl:
     # sim 라이다는 잡음이 거의 없으므로 뾰족하게 간다. 실기에서는 잡음과
     # 지도에 없는 장애물(라바콘) 때문에 z_rand 를 조금 올려야 할 수 있다.
     laser_likelihood_max_dist: 2.0
-    sigma_hit: 0.08
-    z_hit: 0.9
-    z_rand: 0.1
+    sigma_hit: 0.15
+    z_hit: 0.6
+    z_rand: 0.35
     z_max: 0.05
     z_short: 0.05
     lambda_short: 0.1
 
     # beam skip 은 지도에 없는 동적 장애물이 많을 때 쓰는 것이다.
     # 라바콘은 지도에 없지만 수가 적어서 z_rand 로 흡수된다. 켜면 CPU 만 든다.
-    do_beamskip: false
+    do_beamskip: true
     beam_skip_distance: 0.5
     beam_skip_error_threshold: 0.9
     beam_skip_threshold: 0.3

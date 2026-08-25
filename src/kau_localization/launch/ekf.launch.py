@@ -157,6 +157,27 @@ def launch_setup(context, *_args, **_kwargs):
     # 뛰면 조용히 발행을 멈추는데, 프로세스는 살아 있어서 respawn 만으로는 안
     # 걸린다. 감시자가 그걸 감지해 SIGINT 를 보내고, 그때 respawn 이 새 시계로
     # 처음부터 시작하는 프로세스를 띄운다.
+    # 공분산 릴레이. EKF 보다 **먼저** 떠야 한다 -- EKF 가 구독하는
+    # /odom/laser_cov, /imu/cov 를 만드는 것이 이 노드다.
+    #
+    # robot_localization 에는 센서별 신뢰도 파라미터가 없고, 신뢰도는
+    # 오직 메시지의 covariance 에서 온다. 그런데 laser_odom 도
+    # physicar_driver 도 공분산을 안 채워 전부 0 이라 두 소스가 모두
+    # "오차 0" 으로 무한신뢰된다. 자세한 근거는 config/ekf.yaml 의
+    # "신뢰도 배분" 절과 src/odom_covariance_relay.cpp 상단 주석.
+    cov_relay = Node(
+        package='kau_localization',
+        executable='odom_covariance_relay',
+        name='odom_covariance_relay',
+        output='screen',
+        parameters=[
+            str(share / 'config' / 'odom_covariance.yaml'),
+            {'use_sim_time': use_sim_time},
+        ],
+        respawn=True,
+        respawn_delay=2.0,
+    )
+
     ekf = Node(
         package='robot_localization',
         executable='ekf_node',
@@ -170,7 +191,7 @@ def launch_setup(context, *_args, **_kwargs):
 
     # SIGSTOP 이 실제로 걸린 뒤에 우리 노드를 띄운다. 겹치는 순간에 두
     # 발행자가 같이 쏘는 것을 피하려는 것이다.
-    start = [pause, TimerAction(period=1.0, actions=[ekf])]
+    start = [pause, TimerAction(period=1.0, actions=[cov_relay, ekf])]
 
     if not (use_sim_time and wait_for_clock):
         return start

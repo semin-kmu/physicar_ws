@@ -55,11 +55,48 @@
 # 실측 드리프트 -0.10 deg/min 로 IMU 만큼 좋다. 대회 전에 두 환경 설정이
 # 갈라지지 않는 것이 무엇보다 중요하다.
 #
+# ── 신뢰도 배분 (2026-08-25 추가) ────────────────────────────────────
+# 위 실측에서 이상한 점이 하나 있다. 두 소스는 서로 잘 맞는데
+# (|/odom/laser - /imu| 평균 0.99 도) EKF 만 혼자 7.9 deg/min 로 틀어지고
+# 주행 중 19 도까지 벌어진다. 소스가 나빠서가 아니다.
+#
+# 원인: **두 소스 다 covariance 를 안 채운다.**
+#
+#   laser_odom_node.cpp        "covariance" 문자열 자체가 없음 -> 전부 0
+#   physicar_driver_node.cpp   orientation_covariance[0] = -1.0 만 찍고
+#                              angular_velocity_covariance 는 0
+#
+# robot_localization 은 공분산 대각이 1e-9 미만이면 1e-9 로 올려 쓴다.
+# 즉 라이다도 IMU도 "오차 0 인 완벽한 측정" 으로 들어가고, 칼만 이득이
+# 사실상 1 이라 필터가 갱신마다 마지막에 들어온 측정으로 스냅한다.
+# 두 소스 사이를 튀는 것이 저 19 도다.
+#
+# 그리고 robot_localization 에는 **센서별 신뢰도 파라미터가 없다.**
+# odom0_* 로 줄 수 있는 것은 _config / _differential / _relative /
+# _queue_size / _rejection_threshold 뿐이다. 신뢰도는 오직 메시지의
+# covariance 에서 온다. 그래서 이 파일만으로는 라이다를 덜 믿게 만들
+# 방법이 없다.
+#
+# 해결: odom_covariance_relay 노드가 두 토픽에 공분산을 채워서
+# /odom/laser_cov, /imu/cov 로 다시 낸다. 이 파일은 그 둘을 본다.
+# **신뢰도 손잡이는 config/odom_covariance.yaml 하나뿐이다.**
+#
+#   laser.sigma_xy_m      0.10   <- 라이다 위치를 느슨하게
+#   laser.sigma_yaw_rad   0.05
+#   imu.sigma_vyaw_rads   0.02   <- IMU 요레이트를 단단하게 (10배 차이)
+#
+# 실차 라이다가 나쁜 이유(사람 노이즈 / 펜스 미검출 / 먼 공간 2/3만
+# 인지)는 전부 "ICP 가 미끄러진다" 로 나타나므로 위치를 느슨하게 잡고,
+# 회전은 자이로에 맡긴다. **라이다를 버리지는 않는다** -- 절대 위치를
+# 주는 소스가 이것뿐이고 IMU 는 x/y 를 원리적으로 만들 수 없다.
+#
 # ── 플랫폼 설정과 다른 점 ────────────────────────────────────────────
 #   odom0_config 의 yaw    false -> true    (스캔 yaw 를 절대 관측으로)
 #   imu0_config  의 yaw    true  -> false   (실기에 없는 값이라 안 쓴다)
+#   imu0_config 의 ax, ay  false -> true    (관성 6축 중 2D 에서 살아 있는 것)
 #   imu0_differential      true  -> false   (yaw 를 안 쓰므로 무의미해짐)
 #   print_diagnostics      (기본 false) -> true   (관측용, 필터 동작엔 무관)
+#   odom0 / imu0 토픽      raw -> 공분산이 채워진 릴레이 토픽
 # 나머지는 플랫폼 값 또는 robot_localization 기본값 그대로다.
 #
 # 노드 이름에 상관없이 로드되도록 최상위 키는 /** 를 쓴다. 플랫폼 쪽은
@@ -87,7 +124,9 @@
     #
     # yaw(6 번째)를 켠 것이 이 파일의 핵심이다. 위치와 방위가 같은 소스에서
     # 오므로 둘 사이에 프레임 오프셋이 생기지 않는다는 부수 효과도 있다.
-    odom0: /odom/laser
+    # ★ raw /odom/laser 가 아니라 공분산이 채워진 릴레이 토픽이다.
+    #   raw 를 직접 물리면 공분산 0 = 무한신뢰로 되돌아간다.
+    odom0: /odom/laser_cov
     odom0_config: [true,  true,  false,
                    false, false, true,
                    true,  false, false,
@@ -97,25 +136,82 @@
     odom0_relative: false
     odom0_queue_size: 10
 
-    # odom0_pose_rejection_threshold 를 걸고 싶어지는데 **지금은 걸면 안 된다.**
-    # laser_odom_node.cpp 는 covariance 를 아예 안 채워서 전부 0 으로 나간다.
-    # 그 상태로 마할라노비스 문턱을 걸면 거리가 발산해서 거의 모든 측정이
-    # 기각된다. ICP 가 튀는 것을 막으려면 공분산부터 채워야 한다.
+    # 마할라노비스 문턱. **이제는 걸 수 있다.**
+    #
+    # 예전 주석: "laser_odom 이 covariance 를 안 채워 전부 0 이라 문턱을
+    # 걸면 거리가 발산해 거의 모든 측정이 기각된다. 공분산부터 채워야
+    # 한다." -- 그 전제가 odom_covariance_relay 로 해소됐다.
+    #
+    # 5.0 은 대략 5 시그마다. 위 sigma_xy 0.10 m 기준으로 예측 대비
+    # 50 cm 이상 튄 ICP 결과 하나가 통째로 기각된다. 사람이 라이다를
+    # 가려 스캔매칭이 한 프레임 크게 미끄러지는 경우가 정확히 이 모양
+    # 이라 지금 상황에 맞는 방어다.
+    #
+    # ★ 너무 조이면(예: 2.0) 진짜 기동 중에도 기각되어 절대 위치가
+    #   영영 안 들어오고 드리프트만 쌓인다. 기각률은 /diagnostics 로
+    #   확인할 것 (print_diagnostics: true).
+    odom0_pose_rejection_threshold: 5.0
+    odom0_twist_rejection_threshold: 5.0
 
     # ── Sensor 1: IMU (/imu) ──
-    # **vyaw(12 번째)만 쓴다.** yaw 는 실기에 존재하지 않는 값이라 끈다
-    # (위 "왜 IMU 가 아니라 스캔 yaw 인가" 참고). 가속도도 안 쓴다 -- 두 번
-    # 적분하면 위치 노이즈만 늘어난다.
+    # **관성 6축(자이로 3 + 가속도 3) 중 2D 에서 의미가 있는 것을 전부 쓴다.**
+    # 실제로 켜는 것은 vyaw(12 번째) 와 ax, ay(13, 14 번째) 세 개다.
     #
-    # 자이로 각속도는 sim/실기 모두 진짜 측정값이고 실측 바이어스가
-    # +0.01 deg/min 로 깨끗하다. 스캔 매칭이 순간적으로 흔들릴 때 회전을
-    # 매끄럽게 이어 주는 역할을 한다.
-    imu0: /imu
+    # ── 왜 6축을 다 못 켜나: two_d_mode 가 절반을 죽인다 ──────────────
+    # 위의 two_d_mode: true 는 robot_localization 에게
+    # z, roll, pitch, vz, vroll, vpitch, az **일곱 개 상태를 0 으로 고정**
+    # 하라는 뜻이다. 고정된 상태를 겨누는 측정은 읽히지 않는다. 그래서
+    #
+    #   자이로 x, y (vroll, vpitch)  -> 켜도 무시된다
+    #   가속도 z   (az)              -> 켜도 무시된다
+    #
+    # 이 셋은 false 로 남긴다. true 로 바꿔도 동작은 똑같지만, 그러면
+    # 설정 파일이 "이 축이 융합된다" 고 거짓말을 하게 된다. 진짜로
+    # 살리고 싶으면 two_d_mode 부터 꺼야 하는데, 라이다 오도메트리가
+    # z/roll/pitch 를 아예 안 주므로 그 축들은 IMU 적분에만 의존하게
+    # 되고 지상 주행 로봇에서는 보통 손해다.
+    #
+    # ── 자이로 z (vyaw) ────────────────────────────────────────────────
+    # sim/실기 모두 진짜 측정값이고 실측 바이어스가 +0.01 deg/min 로
+    # 깨끗하다. 스캔 매칭이 순간적으로 흔들릴 때 회전을 매끄럽게 이어
+    # 주는 역할을 한다. yaw(6 번째)는 여전히 끈다 -- 실기에 존재하지
+    # 않는 값이다 (위 "왜 IMU 가 아니라 스캔 yaw 인가" 참고).
+    #
+    # ── 가속도 x, y (ax, ay) — 2026-08-25 추가 ────────────────────────
+    # 이전에는 "두 번 적분하면 위치 노이즈만 늘어난다" 는 이유로 껐다.
+    # 그 걱정은 맞지만 조건부다. robot_localization 은 가속도를 위치에
+    # 직접 적분하지 않는다 -- 가속도 상태를 갱신하고, 그 상태가 프로세스
+    # 모델을 통해 속도로, 속도가 위치로 전파된다. 라이다가 절대 위치를
+    # 계속 물어 주는 한 이 경로는 **가속/감속 순간의 속도 추정을 앞당기는**
+    # 역할만 한다. ICP 가 한 프레임 미끄러졌을 때(사람이 라이다를 가리는
+    # 상황이 정확히 이 모양이다) 필터가 덜 따라가는 것이 실익이다.
+    #
+    # ★ 위험은 노이즈가 아니라 **바이어스**다. 상수 바이어스 b 는
+    #   t 초 뒤 0.5*b*t^2 의 위치 오차로 자란다 (b=0.05 m/s^2 -> 10 초에
+    #   2.5 m). 그리고 실기에서 바이어스가 생기는 주된 경로는 센서 자체가
+    #   아니라 **중력 제거**다:
+    #
+    #   imu0_remove_gravitational_acceleration 은 IMU 의 orientation 으로
+    #   중력 벡터를 회전시켜 뺀다. 그런데 실기 드라이버는 orientation 을
+    #   단위 쿼터니언(= 완전 수평)으로 둔다. 장착이 δ 도 기울어 있으면
+    #   g*sin(δ) 가 그대로 ax/ay 에 남는다 -- 1 도에 0.17 m/s^2 다.
+    #
+    #   sim 은 orientation 이 참값이라 이 문제가 없다 (실측: 정지 상태
+    #   ax +0.011, ay -0.010 m/s^2).
+    #
+    #   그래서 **실차에 올리기 전에 반드시 정지 바이어스를 재라.**
+    #     ros2 run 없이 바로:  scripts/imu_bias.py --secs 60
+    #   재고 나서 config/odom_covariance.yaml 의 sigma_accel_ms2 를
+    #   맞추거나, 그 스크립트가 시키는 대로 대응할 것.
+    #
+    # ★ 마찬가지로 공분산이 채워진 릴레이 토픽이다.
+    #   신뢰도는 config/odom_covariance.yaml 의 imu.sigma_accel_ms2.
+    imu0: /imu/cov
     imu0_config: [false, false, false,
                   false, false, false,
                   false, false, false,
                   false, false, true,
-                  false, false, false]
+                  true,  true,  false]
 
     # yaw 를 안 쓰므로 아래 둘은 사실상 무의미하지만, 나중에 imu0_config 의
     # yaw 를 다시 켜는 사람이 함정에 빠지지 않도록 명시해 둔다. differential

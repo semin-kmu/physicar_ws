@@ -13,6 +13,7 @@
   <depend>cartographer_ros_msgs</depend>
   <depend>geometry_msgs</depend>
   <depend>nav_msgs</depend>
+  <depend>sensor_msgs</depend>
   <depend>std_srvs</depend>
 
   <exec_depend>cartographer_ros</exec_depend>
