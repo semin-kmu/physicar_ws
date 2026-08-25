@@ -66,6 +66,7 @@ Hz 는 `status.watch` 에 적은 대표 토픽에서 잰다. 없는 노드는 �
 | TF | **ROS 표준 축** x 빨강 / y 초록 | `map` → `odom` → `base_link` |
 | 차체 | 빨강 외곽선 | TF `base_link` |
 | 배경 | 회색조 | `kau_localization` 의 `maps/<name>.yaml` + pgm |
+| 참값 트랙 | 회색 점선 `#8c8c8c` + 코너 `#111111` | `kau_lane_localization` 의 `config/track_amet2026.yaml` |
 
 TF 는 세 프레임의 축 마커 + 부모·자식 연결선(점선)으로 그린다. 2D 탑뷰라
 z 축(파랑)은 생략한다.

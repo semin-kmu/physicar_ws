@@ -1,0 +1,102 @@
+# backup_gui · 백업 스택 디버깅 GUI
+#
+# 관측 전용. publisher / service client 를 만들지 않는다.
+# 백업 스택에는 상태머신도 측위도 없다 -- kau_gui 에서 그 의존을 걷어낸 판이다.
+# 좌표는 전부 base_link 상대 m 다.
+
+/**:
+  ros__parameters:
+
+    # --- 렌더 ---
+    # ROS 수신 주기와 무관하다. 화면만 이 주기로 다시 그린다.
+    # 플롯 데이터는 콜백에서 전량 링버퍼에 쌓으므로 50 Hz 신호도 안 놓친다.
+    #
+    # 3 Hz 로 낮춘 이유: 노드 중 유일하게 Python + Qt 라 실제로 무겁다.
+    # 사람이 읽는 화면이라 정보율을 맞출 이유가 없다.
+    # ★ 구독까지 3 Hz 로 줄이면 안 된다. kappa_saturated 같은 짧은 이벤트가
+    #   화면에 안 뜬다 -- 그게 실주행에서 확인해야 할 바로 그 신호다.
+    #   짧은 플래그는 bridge 가 발생 시각·횟수를 따로 붙들어 둔다.
+    render_hz: 3.0
+    history_s: 15.0                 # 플롯 x 축 길이 = 롤링 버퍼 길이
+
+    # κ_max 패널의 통과 불가 경계선 [1/m].
+    # backup_common VehicleParams::kappaMax() 검증값 (규약 §4).
+    kappa_max_ref: 2.0221
+
+    # /steering 은 rad (kau_control/src/steer_controller_node.cpp:66 확인).
+    # ControlDebug.cmd_steer_deg 만 deg 다. 플롯은 deg 로 통일한다.
+    steering_rad: true
+
+    # --- 프레임 ---
+    # 백업 스택은 base_link 상대좌표 전용이라 map/odom TF 가 없다.
+    # 셋이 모두 같으면 TF listener 자체를 만들지 않는다 (축 마커 없음).
+    frames:
+      map: "base_link"
+      odom: "base_link"
+      base: "base_link"
+
+    tf_axis_m: 0.2
+
+    # --- LiDAR 점군 ---
+    # 색은 센서로부터의 거리. 고정 범위라 차가 움직여도 같은 거리가 같은 색이다.
+    scan:
+      near_m: 0.0
+      far_m: 3.0                    # 백업은 전방 2.5 m 까지만 본다
+      point_size: 3.0
+
+      # lidar_link -> 후륜축 정적 변환. TF 를 조회하지 않는다.
+      # backup_object_detection/config/obstacle_detector.yaml 과 같은 값이어야
+      # 점군과 장애물 원이 같은 자리에 겹친다.
+      #
+      # 라이다는 base_footprint 뒤 2.7 cm (실측). 후륜축은 그보다 9 cm 뒤.
+      lidar_x_m: -0.027
+      lidar_y_m: 0.0
+      lidar_yaw_rad: 0.0
+      rear_axle_offset_m: -0.090
+
+    # --- 맵 배경 ---
+    # 백업 스택은 맵을 쓰지 않는다. 빈 이름이면 배경 없이 뜬다.
+    map:
+      package: ""
+      name: ""
+      yaml_path: ""
+
+    # --- 참값 트랙 ---
+    # kau_lane_localization 생성물에 의존하므로 끈다.
+    track:
+      enabled: false
+      package: ""
+      name: ""
+      yaml_path: ""
+      s_tick_m: 5.0
+      labels: false
+
+    # --- 구독 토픽 ---
+    # 빈 문자열이면 그 구독을 만들지 않는다.
+    topics:
+      scan: "/scan_filtered"
+      obstacles: "/backup/perception/obstacles"
+      path_local: "/backup/path"
+      path_lane: "/backup/lane/geometry"
+      speed_cmd: "/speed"
+      odom: "/odom"                 # 실측 속도. 없으면 빈 플롯
+      steering: "/steering"
+      steer_debug: "/backup/debug/steer"
+
+    # --- 노드 상태 (최상단 띠) ---
+    # 감시 목록은 아래 watch 하나로 정한다. 백업 스택에는 supervisor 도
+    # bringup manifest 도 없다.
+    status:
+      enabled: true
+
+      stale_ratio: 3.0
+      min_stale_s: 0.3
+
+      # "<노드> | <topic> | <타입> | <기대 Hz>"
+      watch:
+        - "backup_obstacle_detector      | /backup/perception/obstacles | backup_msgs/msg/ObstacleCircleArray | 10"
+        - "backup_start_signal_detector  | /perception/start_permission | std_msgs/msg/Bool                   | 10"
+        - "backup_lane_detector          | /backup/lane/geometry        | backup_msgs/msg/LaneGeometry        | 12"
+        - "backup_path_planner           | /backup/path                 | backup_msgs/msg/BackupPath          | 12"
+        - "backup_steer_controller       | /steering                    | std_msgs/msg/Float64                | 50"
+        - "backup_speed_controller       | /speed                       | std_msgs/msg/Float64                | 50"

@@ -215,6 +215,15 @@ class Bridge(Node):
         self.map_name = d("map.name", "kau_v3").value
         self.map_yaml = self._resolve_map(d("map.yaml_path", "").value)
 
+        # 참값 트랙. kau_lane_localization 이 share 에 설치하는 생성물이다.
+        # 없어도 GUI 는 그대로 뜬다 (맵 배경과 같은 규약).
+        self.track_enabled = d("track.enabled", True).value
+        self.track_pkg = d("track.package", "kau_lane_localization").value
+        self.track_name = d("track.name", "track_amet2026").value
+        self.track_tick_m = d("track.s_tick_m", 5.0).value
+        self.track_labels = d("track.labels", True).value
+        self.track_yaml = self._resolve_track(d("track.yaml_path", "").value)
+
         self.topics = {
             k: d(f"topics.{k}", v).value for k, v in (
                 ("scan", "/scan_filtered"),
@@ -398,6 +407,24 @@ class Bridge(Node):
         if not path.is_file():
             self.get_logger().warn(
                 f"[kau_gui] 맵 yaml 없음: {path}. 맵 배경 없이 뜬다")
+            return ""
+        return str(path)
+
+    def _resolve_track(self, override: str) -> str:
+        if not self.track_enabled:
+            return ""
+        if override:
+            return override
+        try:
+            share = get_package_share_directory(self.track_pkg)
+        except PackageNotFoundError:
+            self.get_logger().warn(
+                f"[kau_gui] 패키지를 못 찾음: {self.track_pkg}. 참값 트랙 없이 뜬다")
+            return ""
+        path = pathlib.Path(share) / "config" / f"{self.track_name}.yaml"
+        if not path.is_file():
+            self.get_logger().warn(
+                f"[kau_gui] 트랙 yaml 없음: {path}. 참값 트랙 없이 뜬다")
             return ""
         return str(path)
 

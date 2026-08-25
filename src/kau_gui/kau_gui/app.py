@@ -101,6 +101,15 @@ def _run(bridge: Bridge, fps: float) -> None:
             # 배경이 없다고 GUI 를 죽이지 않는다. 나머지는 그대로 보인다.
             print(f"[kau_gui] 맵 배경 로드 실패 ({bridge.map_yaml}): {e}")
 
+    # 참값 트랙. 정적이라 여기서 한 번만 그린다 (update 에 안 들어간다).
+    if bridge.track_yaml:
+        try:
+            viz.draw_track(m, viz.load_track(bridge.track_yaml),
+                           s_tick_m=bridge.track_tick_m,
+                           labels=bridge.track_labels)
+        except Exception as e:
+            print(f"[kau_gui] 참값 트랙 로드 실패 ({bridge.track_yaml}): {e}")
+
     scan = viz.ScanCloud(m, size=bridge.scan_size,
                          near_m=bridge.scan_near_m, far_m=bridge.scan_far_m)
     global_line = m.plot([], [], pen=pg.mkPen(viz.COL_GLOBAL, width=W_PATH))

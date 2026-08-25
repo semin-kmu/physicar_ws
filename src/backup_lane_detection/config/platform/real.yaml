@@ -1,0 +1,10 @@
+# 실차 전용 덮어쓰기. lane_detector.yaml 기본값과 같으나
+# 플랫폼 분기를 명시적으로 남기기 위해 파일을 둔다.
+/**:
+  ros__parameters:
+    cx: 231.819776
+    cy: 169.603322
+    camera_tilt_deg: 10.0
+    # 지평선 행 122.1 -> 마진 18 행
+    roi_row_min: 140              # 후륜축 2.39 m
+    roi_row_max: 250              # 후륜축 0.48 m

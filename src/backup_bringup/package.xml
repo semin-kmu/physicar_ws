@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>backup_bringup</name>
+  <version>0.1.0</version>
+  <description>백업 스택 전체 기동. launch 와 공통 config 만 있고 코드는 없다.</description>
+  <maintainer email="eiffeltower1206@gmail.com">semin-kmu</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <exec_depend>backup_lane_detection</exec_depend>
+  <exec_depend>backup_object_detection</exec_depend>
+  <exec_depend>backup_path_planner</exec_depend>
+  <exec_depend>backup_speed_controller</exec_depend>
+  <exec_depend>backup_steer_controller</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

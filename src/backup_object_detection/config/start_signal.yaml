@@ -1,0 +1,56 @@
+# backup_start_signal_detector
+#
+# kau_object_detection/start_signal_detector_node 이식.
+# permission 이 true 로 latch 되면 구독을 해제한다 -- 레이스 내내
+# 도는 이미지 처리 하나가 사라진다.
+
+/**:
+  ros__parameters:
+
+    input_topic: "/camera/image_raw/compressed"
+    output_topic: "/perception/start_permission"
+
+    publish_hz: 10.0                  # 기존 계약 유지
+    unsubscribe_after_latch: true
+
+    # --- 판정 ---
+    # 슬라이딩 윈도우 확인: window 프레임 중 confirm 개 이상이면 true.
+    # kau_object_detection 실차 검증본(green_window_frames 8 / required 4) 승계.
+    # 카메라 약 15 Hz 기준 8 프레임이 0.53 s. 8 중 4 는 절반을 요구하므로
+    # 스쳐 지나간 green 하나로는 출발하지 않는다.
+    confirm_window: 8
+    confirm_count: 4
+    latch_once_true: true             # 한 번 true 면 되돌리지 않는다
+
+    # [s] 이 시간 동안 판정 가능한 프레임이 없으면 윈도우를 비운다.
+    # 정전 전후의 green 이 합산되어 출발하는 것을 막는다. latch 후엔 무효.
+    camera_timeout_s: 0.5
+
+    # --- 램프 검출 (kau_object_detection/green_lamp_detector 이식) ---
+    # 원본 config/start_signal_detector.yaml 실측값 그대로.
+    # 프레임 480x360, 출발 자세에서 신호등은 항상 같은 자리에 온다.
+    # 실측 램프 bbox (412, 217, 28x28) 을 여유 있게 덮는 창.
+    roi_x_min: 280
+    roi_x_max: 450
+    roi_y_min: 135
+    roi_y_max: 265
+
+    # OpenCV hue 는 0~179. 점등 램프 hue 59~61, 잔디는 44 이하라 겹치지 않는다.
+    hue_min: 45
+    hue_max: 85
+    saturation_min: 150
+    value_min: 150
+
+    # 실측 램프 성분 192 px, 잔디 파편 최대 29 px. 그 사이에 문턱을 둔다.
+    min_area_px: 60
+    max_area_px: 5000
+    # 램프는 원형이라 bbox 가 정사각에 가깝다.
+    min_aspect_ratio: 0.6
+    max_aspect_ratio: 1.6
+    # 성분 면적 / bbox 면적. 꽉 찬 원이 0.785, 실측 램프 0.75, 잔디는 훨씬 낮다.
+    min_fill_ratio: 0.6
+
+    # 프레임별 검출 상세. 게이트 튜닝할 때만 켠다.
+    log_detection_detail: false
+
+    log_period_s: 2.0

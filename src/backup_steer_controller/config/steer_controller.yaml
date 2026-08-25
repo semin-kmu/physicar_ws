@@ -1,0 +1,67 @@
+# backup_steer_controller
+#
+# Pure Pursuit 단일 모드. 기하 판단은 전부 플래너가 했다.
+# 거리는 후륜축 원점 기준 [m] -- Pure Pursuit 의 기준점이 후륜축이다.
+
+/**:
+  ros__parameters:
+
+    path_topic: "/backup/path"
+    speed_topic: "/speed"
+    output_topic: "/steering"
+    debug_topic: "/backup/debug/steer"
+    publish_debug: true
+
+    control_hz: 50.0                  # 플랫폼 계약 >= 50 Hz
+    path_timeout_s: 0.4
+
+    # ================================================================
+    # 차량
+    # ================================================================
+    wheelbase_m: 0.18
+    max_steer_deg: 20.0               # 하드웨어 한계
+    # 채터 방지용. 코너 진입 요구 각속도가 ~35 deg/s 라 제약이 아니다.
+    # 하드웨어는 600 deg/s.
+    max_steer_rate_deg_s: 300.0
+
+    # ================================================================
+    # Lookahead
+    # ================================================================
+    # 선형화하면 이상 Pure Pursuit 은 zeta = 1/sqrt(2) 로 Ld 와 무관하고
+    # wn = sqrt(2)*v/Ld 다. Ld 는 감쇠가 아니라 대역폭을 정한다.
+    #
+    # 액추에이터 1차 지연 tau 를 넣으면
+    #   s^3 + (1/tau)s^2 + (2v/(Ld*tau))s + 2v^2/(Ld^2*tau) = 0
+    # Routh 안정조건은 Ld > v*tau (v 1.43, tau 0.2 -> 0.286 m). 여유롭다.
+    # 갈리는 것은 위상여유다. v=1.43, t_lat 0.10 기준:
+    #   Ld 0.8 -> 24 deg / 1.0 -> 31 / 1.2 -> 37 / 1.5 -> 42
+    #
+    # Ld_max 를 d_sight(1.6) 에 붙이지 않는다. valid_length 클램프가
+    # 매 프레임 물려 루프 게인 2L/Ld^2 가 2~4 배 요동하기 때문이다.
+    lookahead_k_v: 0.85               # Ld = k_v * v
+    lookahead_min_m: 0.80             # 레이스라인 최대 오프셋에서 양선 가시 하한과 일치
+    lookahead_max_m: 1.20
+
+    # Ld 는 항상 valid_length 안에 둔다 (외삽 구간을 쫓지 않는다).
+    clamp_to_valid_length: true
+    valid_length_margin_m: 0.10
+
+    # ================================================================
+    # 모션 보상
+    # ================================================================
+    # 경로는 base_link 상대좌표인데 ~12 Hz 로 오고 제어는 50 Hz 다.
+    # 보상하지 않으면 v=1.43 에서 83 ms 동안 11.9 cm 어긋나 조향에
+    # 1.70 deg 톱니파가 실린다. 측정 잡음(0.5 cm -> 0.07 deg)의 24 배다.
+    use_dead_reckoning: true
+    max_dead_reckon_s: 0.30
+
+    # 호길이 LUT 는 경로 수신 시 1 회 만들고 50 Hz 에서는 보간만 한다.
+    arclength_lut_samples: 64
+
+    # ================================================================
+    # 포화 대응
+    # ================================================================
+    # delta 가 한계에 붙으면 조향으로 더 할 게 없다. 속도로 넘긴다.
+    saturation_report: true
+
+    log_period_s: 2.0

@@ -53,6 +53,24 @@
       name: "kau_v3"
       yaml_path: ""
 
+    # --- 참값 트랙 ---
+    # kau_lane_localization 이 share/config 에 설치하는 생성물을 읽는다
+    # (gen_track_table.py 가 amet2026_track.json 에서 뽑은 것).
+    # 정적이라 시작할 때 한 번만 그린다. 렌더 예산에 영향이 없다.
+    #
+    # centerline 은 global path 와 거의 겹친다 (실측 med 7.6 mm). 새로
+    # 보이는 것은 코너 번호와 s 눈금이다 -- 차선 기반 측위가 s 를 코너에서
+    # 리셋하므로 화면에서 코너를 세어 추정 s 를 대조할 수 있어야 한다.
+    #
+    # 패키지나 파일이 없으면 경고만 내고 트랙 없이 뜬다 (맵 배경과 같은 규약).
+    track:
+      enabled: true
+      package: "kau_lane_localization"
+      name: "track_amet2026"
+      yaml_path: ""                 # 주면 package/name 보다 우선
+      s_tick_m: 5.0                 # s 눈금 간격 [m]. 0 이면 눈금 없음
+      labels: true                  # 코너 번호·회전각·s 값 글자
+
     # --- 구독 토픽 ---
     topics:
       scan: "/scan_filtered"

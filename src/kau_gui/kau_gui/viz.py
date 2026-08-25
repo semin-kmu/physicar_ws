@@ -4,8 +4,10 @@ KAU_AMET_Test/src/sim_common/viz.py 의 화면 규약을 실차용으로 이식�
 시뮬과 실차 GUI 를 나란히 놓고 보는 일이 많으므로 **같은 색이 같은 것을
 가리켜야 한다.** 색 상수와 함수 이름을 원본 그대로 둔 이유다.
 
-빠진 것: 참값 세계(draw_track · 차선 경계 · 참 차선중앙) 는 시뮬 전용이라
-실차엔 없다. 대신 점유격자 맵과 TF 표시가 들어간다.
+참값 세계 중 draw_track 은 되살렸다 -- gen_track_table.py 가 트랙 기하를
+map 프레임 · 주행 방향으로 뽑아 주면서 실차에서도 그릴 수 있게 됐다.
+차선 경계 · 참 차선중앙은 여전히 시뮬 전용이라 없다.
+대신 점유격자 맵과 TF 표시가 들어간다.
 
 단위: ROS 는 m 로 주고 화면은 cm 로 그린다 (팀 규약 · 시뮬과 동일).
       변환은 이 module 의 경계에서만 한다.
@@ -287,6 +289,91 @@ class Obstacles:
             it.setVisible(True)
         for it in self._items[len(circles):]:
             it.setVisible(False)
+
+
+# --------------------------------------------------------------------------
+# 참값 트랙 (kau_lane_localization/config/track_amet2026.yaml)
+#
+# sim_common/viz.py 의 draw_track 을 되살린 것이다. 예전에는 참값 트랙이
+# 시뮬에만 있어서 실차 GUI 에서 뺐는데, gen_track_table.py 가 같은 기하를
+# map 프레임 · 주행 방향으로 뽑아 주면서 실차에서도 그릴 수 있게 됐다.
+#
+# 정적이라 시작할 때 한 번만 그린다. 렌더 예산에 영향이 없다.
+# --------------------------------------------------------------------------
+
+def load_track(yaml_path: str):
+    """track_amet2026.yaml -> dict. centerline / corners 는 ndarray 로 만든다."""
+    import yaml as _yaml
+
+    try:                                    # C 로더가 있으면 10 배쯤 빠르다
+        loader = _yaml.CSafeLoader
+    except AttributeError:
+        loader = _yaml.SafeLoader
+
+    doc = _yaml.load(pathlib.Path(yaml_path).expanduser().read_text(),
+                     Loader=loader)["track"]
+    doc["centerline"] = np.asarray(doc["centerline"], dtype=float)
+    doc["corners"] = np.asarray(doc["corners"], dtype=float)
+    return doc
+
+
+def draw_track(plot, track, s_tick_m: float = 5.0, labels: bool = True):
+    """참값 트랙을 표시물 뒤에 깐다.
+
+    centerline 은 global path 와 거의 겹치므로(실측 med 7.6 mm) 점선으로
+    옅게 깔기만 한다. 실제로 새로 보이는 것은 **코너 번호와 s 눈금**이다 --
+    차선 기반 측위가 s 를 코너에서 리셋하므로, 화면에서 코너를 세어
+    추정 s 가 맞는지 눈으로 대조할 수 있어야 한다.
+    """
+    cl, co = track["centerline"], track["corners"]
+    xs, ys = cl[:, 1] * CM_PER_M, cl[:, 2] * CM_PER_M
+
+    line = plot.plot(np.append(xs, xs[0]), np.append(ys, ys[0]),
+                     pen=pg.mkPen(COL_TRUTH, width=1,
+                                  style=QtCore.Qt.DashLine))
+    line.setZValue(-60)
+
+    # 글자는 진행 방향 법선으로 밀어 놓는다. 코너는 +n 쪽, s 눈금은 -n 쪽이라
+    # 두 무리가 절대 겹치지 않는다 (코너 15/16/0 이 우상단에 몰려 있다).
+    def normal(i):
+        th = cl[i, 3]
+        return -math.sin(th), math.cos(th)
+
+    def put(i, text, color, off_cm, size):
+        nx, ny = normal(i)
+        t = pg.TextItem(text, color=color, anchor=(0.5, 0.5))
+        t.setFont(QtGui.QFont("", size))
+        t.setPos(xs[i] + nx * off_cm, ys[i] + ny * off_cm)
+        t.setZValue(-55)
+        plot.addItem(t)
+
+    # s 눈금 -- 진행 방향 수직으로 짧게 긋는다
+    if s_tick_m > 0.0:
+        step = max(1, int(round(s_tick_m / float(track["ds_m"]))))
+        seg_x, seg_y = [], []
+        for i in range(0, len(cl), step):
+            nx, ny = normal(i)
+            seg_x += [xs[i], xs[i] - nx * 8.0, np.nan]
+            seg_y += [ys[i], ys[i] - ny * 8.0, np.nan]
+            if labels:
+                put(i, f"{cl[i, 0]:.0f}m", COL_TRUTH, -15.0, 6)
+        tick = plot.plot(seg_x, seg_y,
+                         pen=pg.mkPen(COL_TRUTH, width=1), connect="finite")
+        tick.setZValue(-58)
+
+    # 코너 -- 측위 시그니처의 실체. 번호와 회전각을 같이 적는다
+    idx = np.clip((co[:, 0] / float(track["ds_m"])).astype(int), 0, len(cl) - 1)
+    marks = pg.ScatterPlotItem(x=xs[idx], y=ys[idx], symbol="t1", size=9,
+                               pen=pg.mkPen(COL_KNOT, width=1),
+                               brush=pg.mkBrush(COL_KNOT))
+    marks.setZValue(-55)
+    plot.addItem(marks)
+
+    if labels:
+        for i, j in enumerate(idx):
+            put(j, f"{i} {co[i, 1]:+.0f}°", COL_KNOT, 16.0, 7)
+
+    return line
 
 
 # --------------------------------------------------------------------------

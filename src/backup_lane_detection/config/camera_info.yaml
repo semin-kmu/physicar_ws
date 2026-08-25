@@ -1,0 +1,38 @@
+# 실차 카메라 캘리브레이션 (480x360, 왜곡보정 완료 영상 기준).
+# kau_lane_detection/config/camera_info_real.yaml 복사본.
+#
+# D 가 전부 0 인 이유: 드라이버(physicar_bringup 의 undistort.*)가
+# 640x480 을 cv::remap 으로 편 뒤 480x360 을 낸다. 여기 오는 영상은
+# 이미 보정이 끝났으므로 한 번 더 remap 하면 기하가 통째로 틀어진다.
+
+image_width: 480
+image_height: 360
+camera_name: camera
+
+camera_matrix:
+  rows: 3
+  cols: 3
+  data: [261.558954,   0.000000, 231.819776,
+           0.000000, 261.558954, 169.603322,
+           0.000000,   0.000000,   1.000000]
+
+distortion_model: plumb_bob
+
+distortion_coefficients:
+  rows: 1
+  cols: 5
+  data: [0.0, 0.0, 0.0, 0.0, 0.0]
+
+rectification_matrix:
+  rows: 3
+  cols: 3
+  data: [1.0, 0.0, 0.0,
+         0.0, 1.0, 0.0,
+         0.0, 0.0, 1.0]
+
+projection_matrix:
+  rows: 3
+  cols: 4
+  data: [261.558954,   0.000000, 231.819776, 0.000000,
+           0.000000, 261.558954, 169.603322, 0.000000,
+           0.000000,   0.000000,   1.000000, 0.000000]

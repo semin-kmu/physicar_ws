@@ -1,0 +1,91 @@
+# backup_obstacle_detector
+#
+# scan 콜백 구동 (~9.8 Hz). 타이머 없음.
+# 좌표는 base_link 상대. TF 조회를 하지 않고 정적 상수로 변환한다.
+#
+# ★ 클러스터링/필터 값은 kau_object_detection/config/laser_scan_clusterer.yaml
+#   의 실차 검증본을 그대로 승계한다. 근거 없이 바꾸지 말 것.
+#   백업 스택이 기존 스택보다 검출 품질이 낮으면 존재 이유가 없다.
+
+/**:
+  ros__parameters:
+
+    input_topic: "/scan_filtered"
+    output_topic: "/backup/perception/obstacles"
+
+    # ================================================================
+    # 입력 검증
+    # ================================================================
+    expected_frame_id: "lidar_link"
+    minimum_sample_count: 2           # 구조적 최소. 실측 720
+    sample_count_tolerance: 1         # 각도 유도 개수와 실제 개수 허용차
+    require_intensities: false
+
+    # ================================================================
+    # 좌표 변환 (TF 조회 금지, 전부 상수)
+    # ================================================================
+    # ★ 라이다는 base_footprint 앞이 아니라 뒤 2.7 cm 다 (실측).
+    #   0 으로 두면 모든 장애물에 2.7 cm 계통오차가 실린다 --
+    #   회피 여유가 8.3 cm 뿐이라 무시할 수 없다.
+    lidar_x_m: -0.027
+    lidar_y_m: 0.0
+    lidar_yaw_rad: 0.0
+    # base_footprint 는 휠베이스 중앙. 후륜축은 그보다 9 cm 뒤.
+    rear_axle_offset_m: -0.090
+
+    # ================================================================
+    # 스페클 필터 (클러스터링 전)
+    # ================================================================
+    # 이웃 지지가 없는 단발 빔을 버린다. 끄면 잡음 빔 하나가
+    # 장애물로 잡혀 회피가 걸린다.
+    speckle_filter_enabled: true
+    outlier_distance_m: 0.2
+    minimum_support_neighbors: 1
+    neighbor_distance_scale: 1.0
+
+    # ================================================================
+    # 클러스터링 (Adaptive Adjacent Point)
+    # ================================================================
+    base_distance_threshold_m: 0.05
+    angular_resolution_scale: 1.5
+    minimum_cluster_points: 1
+    circular_scan_tolerance_rad: 0.05
+    collinear_tolerance_m: 0.001
+
+    # ================================================================
+    # 원 근사
+    # ================================================================
+    # 라이다는 콘의 앞면 일부만 본다. centroid 를 그대로 중심으로 쓰면
+    # 관측면 쪽으로 치우친다. 보이는 호(visible_slice)와 실제 콘 반경
+    # (nominal_cone_radius)으로 중심을 뒤로 복원한다.
+    nominal_cone_radius_m: 0.09       # 콘 18 cm 정사각 -> 반경 9 cm
+    visible_slice_radius_m: 0.043     # 실측: 보이는 호의 반경
+    maximum_observed_width_m: 0.3     # 이보다 넓으면 벽/경계로 보고 버린다
+
+    # 하류(플래너)가 쓰는 통일 반경. 콘 외접원 12.7 cm + 여유.
+    # 검출값이 아니라 이 값으로 고정한다 -- 회피 offset 계산의 전제다.
+    obstacle_radius_m: 0.142
+    use_fixed_radius: true
+
+    # ================================================================
+    # 시간 추적
+    # ================================================================
+    # 1 프레임 오검출이 그대로 회피를 유발하면 안 된다.
+    # 확인 프레임 수를 넘긴 트랙만 발행하고, 위치는 EMA 로 편다.
+    temporal_tracking_enabled: true
+    minimum_confirmation_frames: 2
+    association_distance_m: 0.3
+    track_timeout_s: 0.7
+    smoothing_alpha: 0.2
+
+    # ================================================================
+    # 관심 영역
+    # ================================================================
+    # 회피 트리거가 1.40 m 이므로 여유를 둔다.
+    range_min_m: 0.10
+    range_max_m: 2.50
+    fov_half_deg: 90.0                # 전방 +-90 deg
+
+    confidence: 1.0                   # 원 근사 신뢰도. 현재는 상수
+
+    log_period_s: 2.0

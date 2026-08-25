@@ -1,0 +1,32 @@
+# 백업 스택 공통 파라미터.
+#
+# 여러 노드가 같은 값을 봐야 하는 것만 여기 둔다.
+# 노드 고유 파라미터는 각 패키지 config/ 에 있다.
+#
+# ★ 여기 값과 패키지 config 값이 어긋나면 패키지 쪽이 이긴다
+#   (launch 가 패키지 yaml 을 나중에 얹는다). 차량 제원처럼
+#   반드시 일치해야 하는 값은 여기만 고치고 패키지 쪽을 지운다.
+
+/**:
+  ros__parameters:
+
+    # --- 차량 제원 (확정) ---
+    wheelbase_m: 0.18
+    vehicle_width_m: 0.205
+    vehicle_length_m: 0.280
+    rear_axle_to_front_bumper_m: 0.230
+    max_steer_deg: 20.0               # 하드웨어 한계
+    max_steer_rate_deg_s: 600.0       # 하드웨어
+
+    # --- 트랙 (world.json 실측) ---
+    track_width_m: 0.700
+    lane_margin_m: 0.05
+
+    # --- 장애물 (확정) ---
+    obstacle_radius_m: 0.142
+    avoid_clearance_m: 0.10
+
+    # --- 카메라 (확정) ---
+    camera_height_m: 0.1465
+    camera_to_rear_axle_m: 0.195
+    camera_tilt_deg: 10.0

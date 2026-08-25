@@ -1,0 +1,11 @@
+# Gazebo 전용 덮어쓰기. lane_detector.yaml 뒤에 얹는다.
+# 시뮬 카메라는 주점이 화면 중앙(cy=180)이라 같은 지면이 실차보다
+# 10.4 행 아래에 맺힌다. 틸트는 물리량이므로 그대로 두고 ROI 만 민다.
+/**:
+  ros__parameters:
+    cx: 240.0
+    cy: 180.0
+    camera_tilt_deg: 10.0
+    # 지평선 행 132.5 -> 마진 18 행
+    roi_row_min: 150              # 후륜축 2.44 m
+    roi_row_max: 260              # 후륜축 0.48 m
