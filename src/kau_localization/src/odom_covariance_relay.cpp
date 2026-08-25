@@ -50,6 +50,7 @@
 
 #include <nav_msgs/msg/odometry.hpp>
 #include <sensor_msgs/msg/imu.hpp>
+#include <geometry_msgs/msg/pose_with_covariance_stamped.hpp>
 
 #include <array>
 #include <cmath>
@@ -68,6 +69,11 @@ constexpr std::size_t kDiag6[6] = {0, 7, 14, 21, 28, 35};
 // 읽으므로 사실 무시되지만, 다른 도구(rviz, rosbag 분석)가 이 메시지를
 // 볼 때 "이 축은 근거 없음" 이 드러나도록 크게 박아 둔다.
 constexpr double kUnused = 1.0e6;
+
+
+// 이보다 긴 간격은 적분하지 않는다. IMU 는 50 Hz 이므로 0.5 초면
+// 스무 걸음을 놓친 것이고, 그 구멍을 하나의 각속도로 메우면 틀린다.
+constexpr double kMaxIntegrationDt = 0.5;
 
 
 double variance(double sigma)
@@ -108,6 +114,15 @@ public:
         laser_sigma_vyaw_ = declare_parameter<double>(
             "laser.sigma_vyaw_rads", 0.20);
 
+        // 횡속도. laser_odom_node.cpp 는 twist.linear.y 를 **한 번도
+        // 안 쓴다** (publish_odom 이 linear.x 와 angular.z 만 채운다).
+        // 그래서 이 축은 항상 정확히 0 이고, 그 0 을 EKF 에 넣으면
+        // "이 차는 옆으로 안 미끄러진다" 는 비홀로노믹 구속이 된다.
+        // 애커만 조향차에서 이건 참이고, ax/ay 바이어스가 vy 로
+        // 적분돼 쌓이는 것을 막는 유일한 장치다 (ekf.yaml 참고).
+        laser_sigma_vy_ = declare_parameter<double>(
+            "laser.sigma_vy_ms", 0.05);
+
 
         // ------------------------------------------------------------
         // IMU
@@ -128,6 +143,76 @@ public:
 
         imu_sigma_accel_ = declare_parameter<double>(
             "imu.sigma_accel_ms2", 0.30);
+
+        // ------------------------------------------------------------
+        // IMU 바이어스 (평균 오프셋) — sigma 와 완전히 다른 것이다
+        //
+        // sigma 는 "얼마나 흔들리나"(노이즈), bias 는 "얼마나 치우쳤나"
+        // (평균)다. **sigma 를 키워서 bias 를 가릴 수 없다.** 필터는
+        // 치우친 측정을 그냥 느리게 믿을 뿐 결국 따라간다.
+        //
+        // 가속도 바이어스의 주 원인은 센서가 아니라 **장착 기울기**다.
+        // 실기 드라이버가 orientation 을 단위 쿼터니언(완전 수평)으로
+        // 두기 때문에 robot_localization 의 중력 제거가 z 에서만 g 를
+        // 빼고, 장착이 δ 도 기울면 g*sin(δ) 가 ax/ay 에 그대로 남는다
+        // (1 도 = 0.171 m/s^2). 두 번 적분되므로 상수 바이어스 b 는
+        // t 초 뒤 0.5*b*t^2 의 위치 오차가 된다.
+        //
+        // 값은 scripts/imu_bias.py 가 정지 상태에서 재 준다:
+        //   ros2 run kau_localization imu_bias.py --secs 60
+        //
+        // ★ az 는 일부러 안 뺀다. two_d_mode 가 az 상태를 0 으로
+        //   고정해서 애초에 읽히지 않는다 (ekf.yaml 참고).
+        // ------------------------------------------------------------
+        imu_bias_ax_ = declare_parameter<double>(
+            "imu.bias_ax_ms2", 0.0);
+
+        imu_bias_ay_ = declare_parameter<double>(
+            "imu.bias_ay_ms2", 0.0);
+
+        imu_bias_vyaw_ = declare_parameter<double>(
+            "imu.bias_vyaw_rads", 0.0);
+
+
+        // ------------------------------------------------------------
+        // 자이로 적분 방위 (yaw_source)
+        //
+        // 실기 IMU 에는 orientation 이 없다 (드라이버가 단위 쿼터니언 +
+        // orientation_covariance[0] = -1.0 만 찍는다). 그래서 EKF 에
+        // **절대 yaw 측정이 하나도 없는 상태**가 되는데, 그러면 yaw
+        // 공분산이 무한정 커지고 (실측 4.4 rad^2 = sigma 121 도),
+        // 커진 yaw 공분산이 라이다 **위치** 갱신과 교차공분산을 만들어
+        // yaw 를 제멋대로 끌고 다닌다.
+        //
+        //   2026-08-26 실측 (정지 60 초, 절대 yaw 없이 rate 만 융합):
+        //     EKF vyaw    -0.553 deg/min   <- 자이로와 일치. 융합은 정상
+        //     EKF yaw 각  +6.671 deg/min   <- 자기 각속도와 부호도 반대
+        //     EKF yaw 공분산 4.445 rad^2 로 발산
+        //
+        // 즉 "절대 yaw 를 끄고 rate 로만 섞는다" 는 성립하지 않는다.
+        // 절대 yaw 측정은 반드시 하나 있어야 하고, 문제는 그것을
+        // **어디서 받느냐**다. 라이다 ICP yaw 는 장면에 따라
+        // -33 ~ +19 deg/min 로 흔들리고, 자이로 적분은 -0.02 deg/min 다.
+        //
+        // 그래서 여기서 자이로 z 를 적분해 orientation 을 만들어 낸다.
+        // ekf.yaml 의 imu0_config 가 그 yaw 를 절대 관측으로 읽는다.
+        //
+        //   auto        : orientation_covariance[0] < 0 ("값 없음" 규약)
+        //                 이면 적분해서 채우고, 아니면 원본을 살린다.
+        //                 -> 실차는 적분, sim 은 Gazebo 참값 그대로.
+        //   integrate   : 항상 적분해서 덮어쓴다
+        //   passthrough : 절대 안 건드린다 (예전 동작)
+        //
+        // ★ 적분값의 원점은 "이 노드가 시작한 순간의 방위" 다. EKF 도
+        //   같은 순간에 0 에서 시작하므로 둘이 맞는다. 주행 중에
+        //   /set_pose 로 EKF 를 되돌리면 이 적분값도 같이 되돌려야
+        //   해서 아래에서 /set_pose 를 구독한다.
+        // ------------------------------------------------------------
+        imu_yaw_source_ = declare_parameter<std::string>(
+            "imu.yaw_source", "auto");
+
+        imu_sigma_yaw_ = declare_parameter<double>(
+            "imu.sigma_yaw_rad", 0.02);
 
 
         // 원본이 이미 공분산을 채워 오면 덮지 않는 안전장치.
@@ -175,14 +260,42 @@ public:
                 onImu(msg);
             });
 
+        // /set_pose 로 EKF 를 되돌리면 적분 방위도 같이 되돌린다.
+        // 안 그러면 EKF 만 0 이 되고 IMU 는 옛 방위를 계속 주장해서
+        // 필터가 곧바로 되돌아간다 (launch/odom_reset.py 참고).
+        // /set_pose 는 노드 이름이 안 붙는 글로벌 이름이다.
+        set_pose_sub_ =
+            create_subscription<geometry_msgs::msg::PoseWithCovarianceStamped>(
+                "/set_pose",
+                10,
+                [this](
+                    const geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr
+                        msg)
+                {
+                    const auto & q = msg->pose.pose.orientation;
+                    imu_yaw_ = std::atan2(
+                        2.0 * (q.w * q.z + q.x * q.y),
+                        1.0 - 2.0 * (q.y * q.y + q.z * q.z));
+
+                    RCLCPP_INFO(
+                        get_logger(),
+                        "/set_pose 를 받아 적분 방위를 %.3f rad 로 맞췄다.",
+                        imu_yaw_);
+                });
+
 
         RCLCPP_INFO(
             get_logger(),
-            "공분산 릴레이 시작. %s -> %s (sigma xy %.3f m, yaw %.3f rad, "
-            "vx %.3f m/s) | %s -> %s (sigma vyaw %.3f rad/s)",
+            "공분산 릴레이 시작.\n"
+            "  %s -> %s  sigma: xy %.3f m, yaw %.3f rad, "
+            "vx %.3f m/s, vy %.3f m/s, vyaw %.3f rad/s\n"
+            "  %s -> %s  sigma: vyaw %.4f rad/s, accel %.3f m/s^2"
+            "  bias: ax %+.4f, ay %+.4f, vyaw %+.6f",
             laser_in_.c_str(), laser_out_.c_str(),
             laser_sigma_xy_, laser_sigma_yaw_, laser_sigma_vx_,
-            imu_in_.c_str(), imu_out_.c_str(), imu_sigma_vyaw_);
+            laser_sigma_vy_, laser_sigma_vyaw_,
+            imu_in_.c_str(), imu_out_.c_str(), imu_sigma_vyaw_,
+            imu_sigma_accel_, imu_bias_ax_, imu_bias_ay_, imu_bias_vyaw_);
     }
 
 
@@ -224,7 +337,9 @@ private:
             out.twist.covariance.fill(0.0);
 
             out.twist.covariance[kDiag6[0]] = variance(laser_sigma_vx_);
-            out.twist.covariance[kDiag6[1]] = kUnused;  // vy
+            // vy 는 kUnused 가 아니라 진짜 값을 채운다 — 위 선언부
+            // 설명대로 이 0 은 "값 없음" 이 아니라 비홀로노믹 구속이다.
+            out.twist.covariance[kDiag6[1]] = variance(laser_sigma_vy_);
             out.twist.covariance[kDiag6[2]] = kUnused;  // vz
             out.twist.covariance[kDiag6[3]] = kUnused;  // vroll
             out.twist.covariance[kDiag6[4]] = kUnused;  // vpitch
@@ -238,6 +353,12 @@ private:
     void onImu(const sensor_msgs::msg::Imu::SharedPtr msg)
     {
         sensor_msgs::msg::Imu out = *msg;
+
+        // 바이어스 제거. 공분산과 달리 이건 **측정값 자체를 고친다.**
+        // 0.0 이 기본이라 값을 안 넣으면 아무 일도 일어나지 않는다.
+        out.linear_acceleration.x -= imu_bias_ax_;
+        out.linear_acceleration.y -= imu_bias_ay_;
+        out.angular_velocity.z    -= imu_bias_vyaw_;
 
         // orientation_covariance 는 그대로 둔다. 실기의 -1.0 규약을
         // 지우면 나중에 누가 imu0_config 의 yaw 를 켤 때 "이 값 없음"
@@ -270,7 +391,68 @@ private:
             out.linear_acceleration_covariance[8] = kUnused;  // az
         }
 
+        // ── 자이로 z 적분 -> 절대 방위 ──
+        //
+        // 바이어스를 뺀 뒤의 값을 적분한다 (위에서 이미 뺐다).
+        // dt 는 메시지 타임스탬프에서 얻는다 -- sim/실기 모두 옳고,
+        // 노드가 잠깐 밀려도 적분이 틀어지지 않는다.
+        const rclcpp::Time stamp(out.header.stamp);
+
+        if (have_prev_imu_)
+        {
+            const double dt = (stamp - prev_imu_stamp_).seconds();
+
+            // dt 가 음수면 시간이 뒤로 갔다는 뜻이고 (bag 되감기,
+            // sim 리셋), 너무 크면 중간이 비었다는 뜻이다. 둘 다
+            // 적분하지 않고 건너뛴다 -- 적분은 틀린 한 걸음이
+            // 영원히 남는다.
+            if (dt > 0.0 && dt < kMaxIntegrationDt)
+            {
+                imu_yaw_ += out.angular_velocity.z * dt;
+                imu_yaw_ = std::remainder(imu_yaw_, 2.0 * M_PI);
+            }
+        }
+
+        prev_imu_stamp_ = stamp;
+        have_prev_imu_ = true;
+
+        if (integrateYaw(out))
+        {
+            // roll/pitch 는 0 으로 둔다. two_d_mode 가 어차피 0 으로
+            // 고정하고, 실기 IMU 로는 중력 기준 기울기를 안정적으로
+            // 낼 수 없다.
+            out.orientation.x = 0.0;
+            out.orientation.y = 0.0;
+            out.orientation.z = std::sin(imu_yaw_ * 0.5);
+            out.orientation.w = std::cos(imu_yaw_ * 0.5);
+
+            out.orientation_covariance.fill(0.0);
+            out.orientation_covariance[0] = kUnused;  // roll
+            out.orientation_covariance[4] = kUnused;  // pitch
+            out.orientation_covariance[8] = variance(imu_sigma_yaw_);
+        }
+
         imu_pub_->publish(out);
+    }
+
+
+    // 이 메시지의 orientation 을 우리가 만들어 넣을 것인가.
+    bool integrateYaw(const sensor_msgs::msg::Imu & msg) const
+    {
+        if (imu_yaw_source_ == "passthrough")
+        {
+            return false;
+        }
+
+        if (imu_yaw_source_ == "integrate")
+        {
+            return true;
+        }
+
+        // auto: "값 없음"(-1) 규약이 찍혀 있을 때만 우리가 만든다.
+        // 실기 드라이버는 -1 을 찍고, Gazebo 는 참값을 주므로
+        // 한 설정으로 두 환경이 각자 옳게 동작한다.
+        return msg.orientation_covariance[0] < 0.0;
     }
 
 
@@ -283,9 +465,21 @@ private:
     double laser_sigma_yaw_;
     double laser_sigma_vx_;
     double laser_sigma_vyaw_;
+    double laser_sigma_vy_;
 
     double imu_sigma_vyaw_;
     double imu_sigma_accel_;
+
+    double imu_bias_ax_;
+    double imu_bias_ay_;
+    double imu_bias_vyaw_;
+
+    std::string imu_yaw_source_;
+    double imu_sigma_yaw_;
+
+    double imu_yaw_ = 0.0;
+    rclcpp::Time prev_imu_stamp_;
+    bool have_prev_imu_ = false;
 
     bool overwrite_;
 
@@ -294,6 +488,9 @@ private:
 
     rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr laser_sub_;
     rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr imu_sub_;
+
+    rclcpp::Subscription<
+        geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr set_pose_sub_;
 };
 
 

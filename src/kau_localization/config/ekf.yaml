@@ -26,6 +26,12 @@
 # 19 도는 AMCL 모션 모델이 흡수할 수 있는 범위 밖이다. 측위 정확도 문제의
 # 상류 원인이 여기라서 AMCL / Cartographer 어느 쪽을 쓰든 먼저 고쳐야 한다.
 #
+# ★ 여기부터 아래 "신뢰도 배분" 까지는 **2026-08-24~25 의 기록**이다.
+#   결론은 2026-08-26 에 한 번 더 바뀌었다: 지금은 odom0 의 절대 yaw 도
+#   끄고 요레이트(vyaw) 수준에서만 섞는다. 최종 구성을 알고 싶으면
+#   아래 "yaw 를 왜 rate 로만 섞나" 절부터 읽어라. 이 앞부분은 왜
+#   그렇게 됐는지의 경위다.
+#
 # ── 왜 IMU 가 아니라 스캔 yaw 인가 ───────────────────────────────────
 # **실기 IMU 에는 orientation 이 아예 없다.**
 # physicar_bringup/src/physicar_driver_node.cpp 가 가속도와 각속도만 채우고
@@ -90,13 +96,159 @@
 # 회전은 자이로에 맡긴다. **라이다를 버리지는 않는다** -- 절대 위치를
 # 주는 소스가 이것뿐이고 IMU 는 x/y 를 원리적으로 만들 수 없다.
 #
+# ── yaw 를 왜 rate 로만 섞나 (2026-08-26, 이 파일의 현재 핵심) ──────
+# 위 배분에는 구멍이 하나 있었다. **절대 yaw 측정이 하나라도 켜져
+# 있으면, 그 센서를 아무리 덜 믿어도 장기 드리프트는 그 센서 것이
+# 그대로 된다.**
+#
+# 이유: 칼만 필터에 절대 측정이 하나 있으면 정상상태에서 그 측정에
+# 대한 DC 오차가 0 으로 수렴한다. sigma 를 키우면 따라가는 속도만
+# 느려질 뿐(시정수가 길어질 뿐) 최종적으로 도달하는 곳은 같다.
+# 실제로 확인했다 -- laser.sigma_yaw_rad 를 2.0 rad 까지 올려도
+# 드리프트율은 그대로였고 지연만 1.78 도 생겼다.
+#
+# 즉 "라이다 yaw 를 덜 믿기" 라는 손잡이는 애초에 존재하지 않았다.
+# 켜거나 끄거나 둘 중 하나다.
+#
+# 그리고 **odom 프레임에는 절대 방위라는 게 원래 없다.**
+# /odom/laser 의 yaw 는 ICP 델타를 누적한 값이라 그 자체가 추측항법
+# 이고, 자이로 적분도 추측항법이다. 둘 다 상대 소스다. 진짜 절대
+# 기준은 map->odom (Cartographer / AMCL) 이 준다. 그러니 odom 단계
+# 에서는 **덜 흘러가는 쪽**을 고르면 된다.
+#
+#   2026-08-26 정지 60 초 실측 (실차)
+#     IMU gyro-z 바이어스   -0.02 deg/min
+#     /odom/laser yaw       +2.15 deg/min      <- 100 배 나쁘다
+#   (2026-08-25 에는 장면에 따라 -33.85 / +19.5 / +12.4 deg/min 까지
+#    갔다. 크기도 부호도 장면 따라 변한다 = 신뢰할 수 없다.)
+#
+# 그래서 이렇게 바꿨다:
+#
+#   odom0_config 의 yaw   true -> **false**   (절대 방위를 안 받는다)
+#   odom0_config 의 vyaw  false -> **true**   (회전율로만 참여한다)
+#
+# 이제 라이다와 IMU 가 **같은 상태(vyaw)를 겨누는 두 측정**이 되어
+# 공분산 비율이 그대로 무게가 된다. 이것이 진짜 "몇 대 몇" 손잡이다.
+#
+#   laser.sigma_vyaw_rads 0.04  vs  imu.sigma_vyaw_rads 0.005
+#   -> 분산비 (0.04/0.005)^2 = 64  ->  IMU 98.5% : 라이다 1.5%
+#
+# ── 그런데 rate 만으로는 안 됐다 (2026-08-26 실측) ───────────────────
+# 위까지 해 놓고 실차에서 재 봤더니 **EKF 가 자기 각속도와 반대로
+# 돌았다.**
+#
+#   정지 60 초, 절대 yaw 측정 없이 rate 만 융합:
+#     /imu/cov       gz    -0.575 deg/min
+#     /odom/laser    vyaw  -4.514 deg/min
+#     /odom (EKF)    vyaw  -0.553 deg/min   <- 융합 자체는 완벽하다
+#     /odom (EKF)    yaw 각 +6.671 deg/min  <- 부호부터 반대다
+#     /odom (EKF)    yaw 공분산 4.445 rad^2 (= sigma 121 도)
+#
+# 융합 비율은 의도대로 IMU 98.5% 가 나왔는데, 정작 yaw **각도**가
+# 자기 각속도의 적분이 아니었다. 원인은 공분산 발산이다:
+#
+#   절대 yaw 측정이 하나도 없다 -> P[yaw,yaw] 가 무한정 커진다
+#   -> 예측 단계의 x' = x + (vx*cos(yaw) - vy*sin(yaw))*dt 에서
+#      d x'/d yaw 가 아무리 작아도 P[x,yaw] 교차항이 커진다
+#   -> 라이다 **위치** 갱신(sigma 0.15 로 훨씬 단단하다)이 그 교차항을
+#      타고 yaw 를 끌고 다닌다
+#
+# 즉 "절대 yaw 를 끄면 라이다에서 자유로워진다" 가 틀렸다. 위치를
+# 라이다에서 받는 한, yaw 공분산을 풀어 두면 위치를 통해 다시 끌려간다.
+#
+# ── 그래서: 절대 yaw 는 반드시 하나 있어야 한다 ─────────────────────
+# 문제는 "절대 yaw 를 쓰느냐" 가 아니라 **어디서 받느냐**였다.
+#
+#   라이다 ICP yaw   장면에 따라 -33.85 ~ +19.5 deg/min (부호도 변한다)
+#   자이로 적분      -0.02 deg/min
+#
+# 그래서 odom_covariance_relay 가 바이어스를 뺀 자이로 z 를 적분해서
+# **orientation 을 만들어 낸다** (imu.yaw_source: auto). 실기 드라이버가
+# orientation_covariance[0] = -1.0 로 "값 없음" 을 찍어 두므로 그것을
+# 신호로 삼는다 -- sim 에서는 Gazebo 참값이 그대로 살아서 한 설정으로
+# 두 환경이 각자 옳게 동작한다.
+#
+#   imu0_config 의 yaw   false -> **true**  (적분 방위를 절대 관측으로)
+#
+# 결과 (같은 조건, 정지 60 초):
+#     /odom (EKF)  yaw 각  -0.116 deg/min   (자이로 -0.118 과 일치)
+#     /odom/laser  yaw 각  -2.062 deg/min
+#     /odom (EKF)  yaw 공분산 2.920e-04 rad^2   <- 4.445 에서 15000 배 감소
+#
+#   재측정 (정지 60 초):
+#     /odom (EKF)  -0.27 deg/min
+#     /odom/laser  +2.43 deg/min      <- 라이다 대비 9 배 낫다
+#     IMU gyro-z   -0.26 deg/min      <- EKF 가 자이로를 따라간다
+#
+# ★ 대가: yaw 를 붙잡아 주는 절대 기준이 결국 자이로 적분이므로
+#   자이로 바이어스만큼은 계속 쌓인다. 지금 -0.02 deg/min 이면
+#   10 분 주행에 0.2 도라 무시할 수 있고, 그 위는 map->odom 이
+#   책임진다. 바이어스가 커지면 imu.bias_vyaw_rads 를 다시 재라.
+#
+# ★ 라이다 vyaw(1.5%) 는 그대로 남겨 둔다. 절대 yaw 가 자이로 하나에서
+#   오게 됐으므로 기여는 작지만, 자이로가 크게 튈 때 rate 수준에서
+#   눌러 주는 역할은 남아 있다.
+#
+# ★ /set_pose 로 EKF 를 되돌릴 때는 릴레이의 적분 방위도 같이 되돌려야
+#   한다. 안 그러면 EKF 만 0 이 되고 IMU 가 옛 방위를 주장해서 곧바로
+#   되돌아간다. 릴레이가 /set_pose 를 구독해서 알아서 맞춘다
+#   (launch/odom_reset.py 가 그 순서를 지킨다).
+#
+# ── 실기 IMU 축 매핑 확인 (2026-08-26) ──────────────────────────────
+# IMU 비중을 크게 올리기 전에 **부호가 맞는지** 확인했다. 틀리면
+# 신뢰도를 올릴수록 나빠지기 때문이다.
+#
+# physicar_driver_node.cpp publish_imu():
+#     x = -sdk_y,  y = -sdk_x,  z = sdk_z        <- 주석에 적힌 의도
+#     linear_acceleration.z =  imu.az            <- 부호 그대로
+#     angular_velocity.z    = -imu.gz            <- 부호 반전
+#
+# 두 줄이 서로 다르다. 어느 쪽이 맞나:
+#   행렬 [0,-1,0; -1,0,0; 0,0,+1] 은 행렬식 -1 = **거울상**이라
+#   오른손 좌표계를 오른손 좌표계로 못 보낸다. 성립 불가.
+#   행렬 [0,-1,0; -1,0,0; 0,0,-1] 은 행렬식 +1 = 진짜 회전이다.
+#
+# 실측이 뒷받침한다. 정지 상태 linear_acceleration.z = -9.90 m/s^2 다.
+# Z-up 본체 프레임이면 +9.807 이 나와야 한다. 즉 칩이 뒤집혀 있고
+# z 는 반전돼야 맞다.
+#
+# 결론: 올바른 매핑은 z 까지 반전한 쪽이고, **자이로는 이미 그렇게
+# 돼 있다** (-imu.gz). 그러므로
+#   angular_velocity.z (요레이트)  부호 정상 -> 믿고 써도 된다
+#   linear_acceleration.x, y       매핑 정상 -> 믿고 써도 된다
+#   linear_acceleration.z          벤더 버그(부호 반대) -> 우리는 안 쓴다
+#
+# az 는 two_d_mode 가 상태를 0 으로 고정하고 imu0_config 에서도 꺼져
+# 있어서 읽히지 않는다. imu0_remove_gravitational_acceleration 이
+# 이 값을 -19.7 로 만들지만 그 역시 버려진다. 해는 없다.
+#
+# ★ 그래도 주행이 가능해지면 부호를 한 번 실측으로 확인할 것.
+#   제자리에서 반시계로 돌리면서 gyro-z 와 /odom/laser 의 vyaw 가
+#   **같은 부호로** 움직이면 정상이다:
+#     ros2 topic echo /imu --field angular_velocity.z
+#     ros2 topic echo /odom/laser --field twist.twist.angular.z
+#
 # ── 플랫폼 설정과 다른 점 ────────────────────────────────────────────
-#   odom0_config 의 yaw    false -> true    (스캔 yaw 를 절대 관측으로)
-#   imu0_config  의 yaw    true  -> false   (실기에 없는 값이라 안 쓴다)
-#   imu0_config 의 ax, ay  false -> true    (관성 6축 중 2D 에서 살아 있는 것)
-#   imu0_differential      true  -> false   (yaw 를 안 쓰므로 무의미해짐)
+#   odom0_config 의 yaw    false -> false  (같지만 이유가 다르다: 위 참고)
+#   odom0_config 의 vy     false -> true   (비홀로노믹 구속. 항상 0 인 필드)
+#   odom0_config 의 vyaw   false -> true   (ICP 회전율을 자이로와 섞는다)
+#   imu0_config  의 yaw    true  -> true   (단, 릴레이의 자이로 적분값이다)
+#   imu0_config 의 ax, ay  false -> true   (관성 6축 중 2D 에서 살아 있는 것)
+#   imu0_differential      true  -> false  (★ 켜면 절대 방위가 사라진다)
+#   imu0_relative          (기본 false) 유지 (★ 아래 설명)
 #   print_diagnostics      (기본 false) -> true   (관측용, 필터 동작엔 무관)
 #   odom0 / imu0 토픽      raw -> 공분산이 채워진 릴레이 토픽
+#
+# ── "IMU 6축을 다 쓴다" 가 실제로 무엇인가 ───────────────────────────
+# IMU 의 관성 6축은 자이로 x/y/z + 가속도 x/y/z 다. two_d_mode: true 가
+# z, roll, pitch, vz, vroll, vpitch, az 일곱 상태를 0 으로 고정하므로
+# **2D 에서 살아 있는 축은 정확히 세 개다**: 자이로 z, 가속도 x, 가속도 y.
+# 지금 그 셋을 전부 켜고 있다 = 2D 에서 가능한 IMU 활용의 전부다.
+#
+# 나머지 셋(자이로 x/y, 가속도 z)을 살리려면 two_d_mode 를 꺼야 하는데,
+# 그러면 z/roll/pitch 를 measure 하는 소스가 하나도 없어서(라이다
+# 오도메트리는 2D 고, 실기 IMU 는 orientation 이 없다) 그 축들이
+# 순수 적분 드리프트가 된다. 지상 주행 로봇에서는 손해다.
 # 나머지는 플랫폼 값 또는 robot_localization 기본값 그대로다.
 #
 # 노드 이름에 상관없이 로드되도록 최상위 키는 /** 를 쓴다. 플랫폼 쪽은
@@ -122,15 +274,27 @@
     #              vx, vy, vz, vroll, vpitch, vyaw,
     #              ax, ay, az
     #
-    # yaw(6 번째)를 켠 것이 이 파일의 핵심이다. 위치와 방위가 같은 소스에서
-    # 오므로 둘 사이에 프레임 오프셋이 생기지 않는다는 부수 효과도 있다.
+    # 켜는 것: x, y (절대 위치) / vx (전진속도) / vy (비홀로노믹 구속)
+    #          / vyaw (ICP 회전율)
+    # 끄는 것: **yaw** — 절대 방위는 더 이상 ICP 에서 받지 않는다.
+    #          아래 "yaw 를 왜 rate 로만 섞나" 참고.
+    #
+    # ★ vy(8 번째)를 켠 것이 함정처럼 보이지만 의도한 것이다.
+    #   laser_odom_node.cpp 의 publish_odom() 은 twist.linear.y 를
+    #   **한 번도 안 쓴다** (linear.x 와 angular.z 만 채운다). 그래서
+    #   이 축은 항상 정확히 0 이고, 그 0 을 측정으로 넣는 것은
+    #   "이 차는 옆으로 안 미끄러진다" 는 비홀로노믹 구속이 된다.
+    #   애커만 조향차에서 참이고, ax/ay 를 켜는 전제 조건이다
+    #   (아래 "ay 를 켜도 되는 조건" 참고).
+    #   신뢰도는 config/odom_covariance.yaml 의 laser.sigma_vy_ms.
+    #
     # ★ raw /odom/laser 가 아니라 공분산이 채워진 릴레이 토픽이다.
     #   raw 를 직접 물리면 공분산 0 = 무한신뢰로 되돌아간다.
     odom0: /odom/laser_cov
     odom0_config: [true,  true,  false,
-                   false, false, true,
-                   true,  false, false,
                    false, false, false,
+                   true,  true,  false,
+                   false, false, true,
                    false, false, false]
     odom0_differential: false
     odom0_relative: false
@@ -171,13 +335,28 @@
     # z/roll/pitch 를 아예 안 주므로 그 축들은 IMU 적분에만 의존하게
     # 되고 지상 주행 로봇에서는 보통 손해다.
     #
-    # ── 자이로 z (vyaw) ────────────────────────────────────────────────
-    # sim/실기 모두 진짜 측정값이고 실측 바이어스가 +0.01 deg/min 로
-    # 깨끗하다. 스캔 매칭이 순간적으로 흔들릴 때 회전을 매끄럽게 이어
-    # 주는 역할을 한다. yaw(6 번째)는 여전히 끈다 -- 실기에 존재하지
-    # 않는 값이다 (위 "왜 IMU 가 아니라 스캔 yaw 인가" 참고).
+    # ── 자이로 z (vyaw) — **이제 이것이 yaw 를 끈다** ─────────────────
+    # sim/실기 모두 진짜 측정값이고 실측 바이어스가 -0.02 deg/min 로
+    # 깨끗하다 (라이다 yaw 는 +2.15 deg/min). odom0 의 절대 yaw 를 끄고
+    # vyaw 를 켜면서, 이 축이 EKF 요각의 사실상 유일한 공급원이 됐다
+    # (라이다 vyaw 가 1.5% 를 거든다). 위 "yaw 를 왜 rate 로만 섞나" 참고.
     #
-    # ── 가속도 x, y (ax, ay) — 2026-08-25 추가 ────────────────────────
+    # ── 방위 yaw (6 번째) — 2026-08-26 부터 켠다 ──────────────────────
+    # 예전에는 껐다. 실기 드라이버가 orientation 을 단위 쿼터니언으로
+    # 두기 때문에 켜면 "항상 yaw=0" 이라는 가짜 측정을 먹기 때문이다
+    # (위 "왜 IMU 가 아니라 스캔 yaw 인가" 참고). 그 사실은 지금도
+    # 그대로다 -- 달라진 것은 **우리가 그 자리를 채운다**는 것이다.
+    #
+    # odom_covariance_relay 가 바이어스를 뺀 자이로 z 를 적분해서
+    # orientation 을 만들어 /imu/cov 로 낸다. 그러니 여기서 읽는
+    # yaw 는 드라이버의 가짜 0 이 아니라 자이로 적분값이다.
+    # 신뢰도는 config/odom_covariance.yaml 의 imu.sigma_yaw_rad.
+    #
+    # ★ 이것이 EKF 의 **유일한 절대 yaw 측정**이다. 끄면 yaw 공분산이
+    #   발산하고 라이다 위치가 yaw 를 끌고 다닌다 (위 실측 참고).
+    #   끄려면 반드시 다른 절대 yaw 를 대신 넣어라.
+    #
+    # ── 가속도 x, y (ax, ay) ─────────────────────────────────────────
     # 이전에는 "두 번 적분하면 위치 노이즈만 늘어난다" 는 이유로 껐다.
     # 그 걱정은 맞지만 조건부다. robot_localization 은 가속도를 위치에
     # 직접 적분하지 않는다 -- 가속도 상태를 갱신하고, 그 상태가 프로세스
@@ -200,22 +379,59 @@
     #   ax +0.011, ay -0.010 m/s^2).
     #
     #   그래서 **실차에 올리기 전에 반드시 정지 바이어스를 재라.**
-    #     ros2 run 없이 바로:  scripts/imu_bias.py --secs 60
-    #   재고 나서 config/odom_covariance.yaml 의 sigma_accel_ms2 를
-    #   맞추거나, 그 스크립트가 시키는 대로 대응할 것.
+    #     ros2 run kau_localization imu_bias.py --secs 60
+    #   측정한 평균은 config/odom_covariance.yaml 의 imu.bias_* 로 넣고
+    #   (릴레이가 측정값에서 그대로 뺀다), 표준편차는 sigma_accel_ms2 로
+    #   넣는다. **바이어스를 sigma 로 가릴 수는 없다** -- 필터는 치우친
+    #   측정을 느리게 믿을 뿐 결국 따라간다.
+    #
+    #   2026-08-26 실차 실측: ax -0.0456, ay -0.0132 m/s^2
+    #   (수평 바이어스 0.0475 = 장착 기울기 0.28 도. 양호하다.)
+    #
+    # ── ay 를 켜도 되는 조건 (2026-08-26) ─────────────────────────────
+    # ay 를 켜면 바이어스가 **vy 로 적분돼 쌓인다.** 예전에 이것 때문에
+    # 정지 상태에서 vy = -0.089 m/s 라는 유령 횡속도가 나왔다. 원인이
+    # 두 개였다:
+    #
+    #   1. y 축에 속도 측정이 하나도 없었다 (odom0_config 의 vy = false).
+    #      x 축은 라이다 vx 가 잡아 주는데 y 축은 잡아 줄 게 없어서
+    #      바이어스 민감도가 4.2 배였다 (1.83 vs 0.44 (m/s)/(m/s^2)).
+    #   2. robot_localization 의 Ekf::predict 는 vy += ay*dt 를 그냥
+    #      적분한다. 회전 중 body frame 의 ay 는 구심가속도 vx*omega 인데
+    #      omega x v 항이 없어서 그 구심 성분이 통째로 vy 로 새어 든다.
+    #
+    # 이번에는 **odom0_config 의 vy 를 켜서 두 구멍을 같이 막는다.**
+    # laser_odom 이 절대 안 쓰는 twist.linear.y = 0 이 "옆으로 안
+    # 미끄러진다" 는 측정이 되어 vy 를 계속 0 쪽으로 당긴다. 그러면
+    # (1) 의 민감도가 x 축 수준으로 내려가고, (2) 로 새어 든 구심 성분도
+    # 같이 눌린다.
+    #
+    # ★ 그래서 ax/ay 와 odom0 의 vy 는 **한 세트다.** vy 를 끄면
+    #   ax/ay 도 같이 꺼라. 검증은 정지 40 초 vy 평균으로 한다
+    #   (|vy| < 0.01 m/s 면 정상).
     #
     # ★ 마찬가지로 공분산이 채워진 릴레이 토픽이다.
     #   신뢰도는 config/odom_covariance.yaml 의 imu.sigma_accel_ms2.
     imu0: /imu/cov
     imu0_config: [false, false, false,
-                  false, false, false,
+                  false, false, true,
                   false, false, false,
                   false, false, true,
                   true,  true,  false]
 
-    # yaw 를 안 쓰므로 아래 둘은 사실상 무의미하지만, 나중에 imu0_config 의
-    # yaw 를 다시 켜는 사람이 함정에 빠지지 않도록 명시해 둔다. differential
-    # 은 절대 방위를 각속도로 바꿔 버려서 켜는 순간 절대 기준이 사라진다.
+    # ★ 이제 yaw 를 쓰므로 아래 둘이 진짜로 중요하다.
+    #
+    #   differential: true 로 두면 절대 방위를 미분해서 각속도로 바꿔
+    #     버린다. 켜는 순간 절대 yaw 측정이 다시 0 개가 되고 위에서
+    #     실측한 공분산 발산이 되돌아온다. **절대 켜지 마라.**
+    #     (플랫폼 기본 설정이 true 였고, 그것이 원래 문제였다.)
+    #
+    #   relative: true 로 두면 EKF 가 시작할 때 받은 첫 방위를 0 으로
+    #     잡고 그 뒤를 상대값으로 쓴다. 얼핏 안전해 보이지만 여기서는
+    #     쓰면 안 된다 -- 릴레이의 적분 방위는 /set_pose 로 언제든
+    #     되돌려지는데, relative 가 잡아 둔 기준점은 EKF 시작 시점에
+    #     고정돼서 리셋 뒤에 어긋난다. false 로 두면 릴레이의 적분값과
+    #     EKF 의 yaw 가 항상 같은 0 을 공유한다.
     imu0_differential: false
     imu0_relative: false
 

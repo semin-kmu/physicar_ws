@@ -100,11 +100,15 @@ ros2 launch kau_localization cartographer_localization.launch.py \
 
 지도는 항상 같은 폴더에 있으므로 **이름만** 준다. `kau_v3` · `kau_v3.pbstream` ·
 `latest` 가 모두 되고, 다른 곳의 지도는 경로를 그대로 주면 된다.
-이름으로 부를 때 뒤지는 곳은 설치된 `share/kau_localization/maps` 다. 워크스페이스가
-`--symlink-install` 이라 거기 있는 지도는 소스 트리를 가리키는 심링크지만,
-`save_map.py` 로 **새로** 저장한 지도는 심링크가 아직 없다. `colcon build
---packages-select kau_localization` 을 한 번 하거나 (1초쯤)
-`maps_dir:=src/kau_localization/maps` 로 소스 폴더를 직접 가리키면 된다.
+이름으로 부를 때 뒤지는 곳은 설치된 `share/kau_localization/maps` 인데, 이 폴더
+**자체가 `src/kau_localization/maps` 를 가리키는 심링크다.** 그래서 `save_map.py`
+로 새로 저장한 지도가 **저장 즉시** 이름으로 불린다 — `colcon build` 불필요.
+
+> 예전에는 `--symlink-install` 이 폴더가 아니라 **파일 하나하나**에 심링크를
+> 걸어서(빌드 시점 GLOB), 나중에 저장한 지도는 install 트리에 아예 없었고
+> 빌드를 한 번 더 해야 했다. `CMakeLists.txt` 에서 `install(DIRECTORY maps)` 를
+> 폴더 심링크 하나로 바꿔 없앴다. 배포 설치(`AMENT_CMAKE_SYMLINK_INSTALL` 이
+> 꺼진 경우)에서는 예전처럼 진짜 복사가 된다.
 
 재부팅하면 `/odom` 이 0 에서 다시 시작하므로 Cartographer 는 로봇이 지도
 어디에 있는지 모른다. RViz 의 **2D Pose Estimate** 로 대략 위치를 찍으면
@@ -369,6 +373,167 @@ AMCL 은 `update_min_d` / `update_min_a` 를 넘게 움직여야 필터를 갱�
   하려면 launch 대상과 노드 확인을 갈라야 한다.
 - 주행 / 회전 중 정확도 비교. 정지 상태 지터만 측정했다.
 
+## 센서 융합 배분 (2026-08-26 실차 튜닝)
+
+`odom -> base_footprint` TF 를 내는 EKF 가 어느 센서를 얼마나 믿는지.
+**손잡이는 `config/odom_covariance.yaml` 하나뿐이다** — robot_localization
+에는 센서별 신뢰도 파라미터가 없고 신뢰도는 오직 메시지의 covariance 에서
+온다. `odom_covariance_relay` 가 그 covariance 를 채워서
+`/odom/laser_cov`, `/imu/cov` 로 다시 낸다.
+
+### 어느 축을 누가 담당하나
+
+| 상태 | 라이다 (`/odom/laser_cov`) | IMU (`/imu/cov`) |
+|---|---|---|
+| x, y (절대 위치) | ✅ 유일 소스 (σ 0.15 m) | ✗ (원리적으로 불가) |
+| yaw (절대 방위) | ✗ **껐다** | ✅ 자이로 적분 (σ 0.02 rad) |
+| vx | ✅ (σ 0.06 m/s) | ✗ |
+| vy | ✅ 비홀로노믹 구속 (σ 0.05 m/s) | ✗ |
+| vyaw | 1.5% (σ 0.04 rad/s) | **98.5%** (σ 0.005 rad/s) |
+| ax, ay | ✗ | ✅ (σ 0.10 m/s², 바이어스 제거) |
+
+`two_d_mode: true` 가 z / roll / pitch / vz / vroll / vpitch / az 를 0 으로
+고정하므로, **IMU 관성 6축 중 2D 에서 살아 있는 것은 자이로 z + 가속도 x, y
+세 개뿐**이고 지금 그 셋을 전부 쓴다.
+
+### 왜 절대 yaw 를 라이다에서 IMU 로 옮겼나
+
+라이다 ICP yaw 는 정지 상태에서도 장면에 따라 **-33.85 ~ +19.5 deg/min**
+으로 흔들린다(크기도 부호도 변한다). 자이로는 -0.02 deg/min 이다.
+
+먼저 "라이다 yaw 를 덜 믿게" 해 보려 했지만 **그런 손잡이는 없다.**
+절대 측정이 하나라도 켜져 있으면 σ 를 아무리 키워도 장기 드리프트는
+그 센서 것이 그대로 된다 (σ 2.0 rad 까지 올려도 드리프트율 그대로,
+지연만 1.78도 생겼다). 켜거나 끄거나 둘 중 하나다.
+
+그 다음 "절대 yaw 를 아예 끄고 회전율(vyaw)로만 섞기" 를 해 봤는데
+**이것도 실패했다** (2026-08-26 정지 60초 실측):
+
+| | vyaw 평균 | yaw 각 변화 | yaw 공분산 |
+|---|---|---|---|
+| `/imu/cov` | -0.575 deg/min | — | — |
+| `/odom/laser_cov` | -4.514 deg/min | -4.449 deg/min | — |
+| `/odom` (EKF) | **-0.553** deg/min | **+6.671** deg/min | **4.445 rad²** |
+
+융합 비율은 의도대로 IMU 98.5% 가 나왔는데 정작 yaw **각도**가 자기
+각속도의 적분이 아니었고 부호까지 반대였다. 원인은 공분산 발산이다 —
+절대 yaw 측정이 없으면 `P[yaw,yaw]` 가 무한정 커지고, 커진 교차항을 타고
+라이다 **위치** 갱신(σ 0.15 로 훨씬 단단하다)이 yaw 를 끌고 다닌다.
+
+**위치를 라이다에서 받는 한 yaw 공분산을 풀어 두면 안 된다.** 그래서
+문제를 "절대 yaw 를 쓰느냐" 가 아니라 "어디서 받느냐" 로 바꿨다.
+릴레이가 바이어스를 뺀 자이로 z 를 적분해 `orientation` 을 만들어 내고
+(`imu.yaw_source: auto`), EKF 는 그것을 절대 관측으로 읽는다.
+
+| 정지 60초 | 바꾸기 전 (rate 만) | 바꾼 뒤 |
+|---|---|---|
+| EKF yaw 드리프트 | +6.67 deg/min | **-0.12 deg/min** |
+| EKF yaw 공분산 | 4.445 rad² (σ 121°) | **2.92e-04 rad²** |
+| 같은 창의 라이다 yaw | -4.45 deg/min | -2.06 deg/min |
+
+재측정에서도 EKF -0.27 deg/min vs 라이다 +2.43 deg/min 로 **9배** 낫고,
+EKF 가 자이로(-0.26)를 정확히 따라갔다.
+
+`imu.yaw_source: auto` 는 `orientation_covariance[0] < 0` ("값 없음" 규약)
+일 때만 적분값을 넣는다. 실기 드라이버는 -1 을 찍고 Gazebo 는 참값을
+주므로 **한 설정으로 sim 과 실차가 각자 옳게** 동작한다.
+
+### ax / ay 를 켜면서 필요했던 것
+
+가속도를 켜면 바이어스가 `vy` 로 적분돼 쌓인다(예전에 정지 상태 유령
+횡속도 -0.089 m/s 가 이것 때문이었다). 구멍이 둘이었다:
+
+1. y 축에 속도 측정이 하나도 없어서 바이어스 민감도가 x 축의 4.2배였다
+2. `Ekf::predict` 가 `vy += ay*dt` 를 그냥 적분한다 — `ω × v` 항이 없어서
+   선회 중 구심가속도 `vx·ω` 가 통째로 `vy` 로 샌다
+
+`odom0_config` 의 `vy` 를 켜서 둘을 같이 막았다. `laser_odom_node.cpp` 는
+`twist.linear.y` 를 **한 번도 안 쓰므로** 그 필드는 항상 정확히 0 이고,
+그 0 은 애커만 조향차에서 참인 **비홀로노믹 구속**이 된다.
+
+> **`ax`/`ay` 와 `odom0` 의 `vy` 는 한 세트다.** `vy` 를 끄면 `ax`/`ay` 도 꺼라.
+
+검증(정지 60초): `vy` 평균 **+0.0006 m/s**, `vx` -0.0044 m/s.
+
+### IMU 바이어스 제거
+
+릴레이가 측정값에서 직접 뺀다. **σ 를 키워서 바이어스를 가릴 수는 없다** —
+필터는 치우친 측정을 느리게 믿을 뿐 결국 따라간다.
+
+```
+ros2 run kau_localization imu_bias.py --secs 60          # 측정 (차를 세워 두고)
+ros2 run kau_localization imu_bias.py --topic /imu/cov --secs 30   # 보정 확인
+```
+
+2026-08-26 실측 → 보정 후 `/imu/cov`:
+
+| | 측정 바이어스 | 보정 후 |
+|---|---|---|
+| accel x | -0.0456 m/s² | -0.0025 |
+| accel y | -0.0132 m/s² | +0.0040 |
+| gyro z | -0.0000070 rad/s | -0.00008 |
+
+수평 바이어스 0.0475 m/s² = 장착 기울기 0.28° 로 양호하다. 가속도
+바이어스의 주 원인은 센서가 아니라 **장착 기울기**이므로(1° = 0.171 m/s²)
+IMU 를 떼었다 붙이면 반드시 다시 재라.
+
+### 실기 IMU 축 부호 확인
+
+IMU 비중을 올리기 전에 부호를 확인했다. `physicar_driver_node.cpp` 가
+`angular_velocity.z = -imu.gz` 인데 `linear_acceleration.z = +imu.az` 로
+**두 줄의 부호 처리가 다르다.** 주석대로의 매핑 `[0,-1,0; -1,0,0; 0,0,+1]`
+은 행렬식이 -1 인 거울상이라 성립할 수 없고, z 까지 반전한
+`[0,-1,0; -1,0,0; 0,0,-1]` 이라야 행렬식 +1 인 진짜 회전이다. 실측
+`linear_acceleration.z = -9.90` (Z-up 이면 +9.807 이어야 한다)이 이를 뒷받침한다.
+
+즉 **요레이트와 가속도 x/y 의 부호는 정상이고**, `linear_acceleration.z` 만
+벤더 버그다. 그 축은 `two_d_mode` 가 0 으로 고정하고 `imu0_config` 에서도
+꺼져 있어 읽히지 않으므로 해는 없다.
+
+> 주행이 가능해지면 제자리 반시계 회전으로 `/imu` 의 `angular_velocity.z` 와
+> `/odom/laser` 의 `twist.twist.angular.z` 가 **같은 부호로** 움직이는지 한 번
+> 확인할 것.
+
+## odom 초기화 (누적 오차 되돌리기)
+
+```
+ros2 run kau_localization odom_reset.py            # 주행 중 손으로
+ros2 run kau_localization odom_reset.py --ekf skip # EKF 를 곧 새로 띄울 때
+```
+
+누적 오차는 EKF 가 아니라 **`physicar_laser_odom` 안에 있다.**
+`laser_odom_node.cpp:120` 의 `pose_ = pose_.compose(result.delta)` 가 ICP
+델타를 계속 더하는데, 이 노드에는 리셋 서비스도 `/set_pose` 구독도 초기화
+파라미터도 **하나도 없다.** 프로세스를 새로 띄우는 것 말고는 0 이 안 된다.
+
+| | 왜 그렇게 보였나 |
+|---|---|
+| sim 월드 리로드 시 오차가 사라졌다 | 리로드가 `sim.launch.py` 자식들을 다시 띄워 `laser_odom` 도 새로 시작 |
+| 실차는 재부팅해야만 사라졌다 | `physicar.service` 가 부팅 때 `real.launch.py` 를 **한 번만** 띄운다 |
+
+EKF 만 다시 켜는 것으로는 안 된다 — `odom0` 이 절대 pose 로 융합되므로
+새 EKF 가 이미 흘러간 `/odom/laser` 값에서 시작한다. `/set_pose` 만 쏘는
+것도 안 된다(실측: yaw 는 0 이 됐는데 x 가 곧바로 +0.142 로 되돌아왔다).
+
+**순서가 답이다**: `laser_odom` 을 먼저 새로 띄워 소스를 0 으로 만들고,
+그 다음 `/set_pose` 로 EKF 를 0 으로 민다. `respawn=True` 로 떠 있으므로
+스크립트는 SIGTERM 만 보내고 직접 띄우지 않는다(직접 띄우면 launch 가
+나중에 하나를 더 띄워 두 개가 된다).
+
+실측 (2026-08-26, 주행 중 리셋):
+
+```
+/odom/laser  x +0.120  y -0.252  yaw +13.17 deg   ->  x -0.001 y -0.001 yaw -0.06
+/odom (EKF)  x +0.118  y -0.243  yaw  -0.73 deg   ->  x +0.013 y -0.003 yaw +0.02
+```
+
+라이다가 13.17° 흘러간 동안 EKF 는 -0.73° 에 머물러 있었다 — 위의 yaw
+분리가 실제로 동작한 모습이다.
+
+> `/set_pose` 는 릴레이의 자이로 적분 방위도 같이 되돌린다(릴레이가
+> `/set_pose` 를 구독한다). 안 그러면 EKF 만 0 이 되고 IMU 가 옛 방위를
+> 주장해서 곧바로 되돌아간다.
+
 ## 파일
 
 | 경로 | 설명 |
@@ -385,6 +550,11 @@ AMCL 은 `update_min_d` / `update_min_a` 를 넘게 움직여야 필터를 갱�
 | `scripts/check_constraints.py` | 매핑 중 루프 클로저 constraint 길이 분포 확인 (아래 주의 참고) |
 | `scripts/view_map.py` | 저장된 지도 확인. ROS 불필요. 검사 + ASCII + 벽 정밀측정 + PNG |
 | `scripts/tf_rate.py` | TF 링크별 발행 주기 측정 (벽시계 Hz + sim stamp Hz) |
+| `config/ekf.yaml` | 우리 EKF 설정. 어느 축을 누가 담당하는지 + 그 근거 실측 |
+| `config/odom_covariance.yaml` | **센서 신뢰도의 유일한 손잡이** (sigma / bias) |
+| `src/odom_covariance_relay.cpp` | 두 소스에 covariance 를 채우고, IMU 바이어스 제거 + 자이로 적분 방위 생성 |
+| `scripts/imu_bias.py` | 정지 IMU 바이어스·노이즈 측정 -> 붙여넣을 YAML 을 그대로 출력 |
+| `launch/odom_reset.py` | 재부팅 없이 odom 누적 오차를 0 으로 (laser_odom 재시작 + /set_pose) |
 | `scripts/map_odom_jitter.py` | `map -> odom` 보정량이 얼마나 흔들리는지 측정 |
 | `scripts/reset_watcher.py` | 앱의 리셋/재시작 버튼 감지 -> localization 자동 유지 + 드리프트 기록 (사용법 4) |
 | `launch/map_arg.py` | launch 파일이 아니다. 지도 이름 -> 경로 해석 공용 헬퍼 |
@@ -393,6 +563,17 @@ AMCL 은 `update_min_d` / `update_min_a` 를 넘게 움직여야 필터를 갱�
 
 ## 주의
 
+- **실차 라이다 스캔매칭 yaw 는 믿을 게 못 된다.** 정지 상태에서도 장면에
+  따라 -33.85 ~ +19.5 deg/min 로 흔들리고 부호까지 변한다(사람이 많고,
+  맵 가장자리 펜스가 잘 안 찍히고, 가까운 2/3 만 인지된다). 그래서 절대
+  방위는 자이로 적분에서 받는다. 위 "센서 융합 배분" 참고.
+- **`imu0_differential` 을 켜지 마라.** 절대 방위를 각속도로 바꿔 버려서
+  켜는 순간 절대 yaw 측정이 0 개가 되고 yaw 공분산이 발산한다. 플랫폼
+  기본 설정이 `true` 였고 그것이 원래 문제였다.
+- `pgrep -f` / `pkill -f` 로 노드를 찾을 때 **패턴이 자기 명령줄에도 들어
+  있어서 자기 자신을 죽인다.** `odom_reset.py` 와 `platform_ekf_pause.py`
+  는 `/proc` 를 직접 읽어 자기 PID 를 걸러 낸다. 셸에서 급히 쓸 때는
+  `pgrep -f "odom_cov[a]riance_relay"` 처럼 대괄호를 넣어라.
 - `cartographer_node` 의 gflags 인자(`-configuration_directory` 등)는 반드시
   `--ros-args` **앞**에 와야 한다. 뒤에 두면 즉시 죽는다. launch 는 이미 맞춰뒀다.
 - `scan_topic` 기본값은 raw `/scan` 이다. `scan_filter` 는 무효값을 `0.0` 으로

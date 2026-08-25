@@ -46,6 +46,7 @@ ament_target_dependencies(odom_covariance_relay
   rclcpp
   nav_msgs
   sensor_msgs
+  geometry_msgs
 )
 
 install(TARGETS
@@ -68,19 +69,52 @@ install(DIRECTORY
 install(PROGRAMS
   launch/platform_ekf_pause.py
   launch/clock_gate.py
+  launch/odom_reset.py
+  scripts/imu_bias.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
 # 지도도 설치한다. launch 가 install 트리에서 도는데 pbstream:=kau_v3 처럼
 # 이름만 받으려면 지도가 share 안에 있어야 하기 때문이다.
-# 워크스페이스가 --symlink-install 이라 여기 설치되는 것은 소스를 가리키는
-# 심링크다. 다만 save_map.py 로 새로 저장한 지도는 심링크가 아직 없으므로
-# colcon build 를 한 번 해야 launch 가 본다 (이 패키지는 1초쯤 걸린다).
-# 급하면 maps_dir:=src/kau_localization/maps 로 소스 폴더를 직접 가리킨다.
-install(DIRECTORY
-  maps
-  DESTINATION share/${PROJECT_NAME}
-)
+#
+# ── 왜 install(DIRECTORY) 가 아닌가 (2026-08-26) ─────────────────────
+# --symlink-install 은 **폴더가 아니라 파일 하나하나에 심링크를 건다**
+# (ament_cmake_symlink_install_directory 가 GLOB 로 훑어서 건다).
+# 그래서 빌드 시점에 있던 지도만 심링크가 생기고, save_map.py 로
+# 나중에 저장한 kau_v5 는 install 트리에 아예 없다 -> launch 의 지도
+# 선택 옵션에 안 뜨고 colcon build 를 한 번 더 해야 했다.
+#
+# 그 대신 **폴더 자체를 소스 폴더로 가리키는 심링크 하나**로 만든다.
+# 그러면 새 지도가 저장되는 즉시 install 트리에 보인다. 빌드 불필요.
+#
+# ★ 심링크 설치일 때만 이렇게 한다. 진짜 배포 설치(AMENT_CMAKE_SYMLINK_
+#   INSTALL 이 꺼진 경우)에서 소스 트리를 가리키는 심링크를 남기면
+#   소스 없는 기기에서 지도가 통째로 사라진다.
+if(AMENT_CMAKE_SYMLINK_INSTALL)
+  install(CODE "
+    set(_maps_src \"${CMAKE_CURRENT_SOURCE_DIR}/maps\")
+    set(_maps_dst \"\${CMAKE_INSTALL_PREFIX}/share/${PROJECT_NAME}/maps\")
+
+    # 이전 빌드가 남긴 진짜 폴더(안에 파일별 심링크가 들어 있다)를
+    # 걷어낸다. file(REMOVE_RECURSE) 는 심링크를 따라가지 않으므로
+    # src/ 의 원본 지도는 안전하다 (2026-08-26 확인).
+    if(IS_SYMLINK \"\${_maps_dst}\")
+      file(REMOVE \"\${_maps_dst}\")
+    elseif(EXISTS \"\${_maps_dst}\")
+      file(REMOVE_RECURSE \"\${_maps_dst}\")
+    endif()
+
+    get_filename_component(_maps_parent \"\${_maps_dst}\" DIRECTORY)
+    file(MAKE_DIRECTORY \"\${_maps_parent}\")
+    file(CREATE_LINK \"\${_maps_src}\" \"\${_maps_dst}\" SYMBOLIC)
+    message(STATUS \"symlinking: \${_maps_dst} -> \${_maps_src}\")
+  ")
+else()
+  install(DIRECTORY
+    maps
+    DESTINATION share/${PROJECT_NAME}
+  )
+endif()
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)

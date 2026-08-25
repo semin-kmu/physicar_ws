@@ -21,11 +21,12 @@
     pbstream:=latest              가장 번호가 큰 kau_vN
     pbstream:=/어디/다른.pbstream   경로를 주면 그대로 쓴다
 
-기본 폴더는 설치된 share/kau_localization/maps 다. 이 워크스페이스는
---symlink-install 로 빌드하므로 거기 있는 지도는 소스 트리를 가리키는 심링크다.
-다만 save_map.py 로 **새로** 저장한 지도는 심링크가 아직 없으므로 `colcon build`
-를 한 번 해야 이름으로 불린다 (이 패키지는 1초쯤 걸린다). 급하면
-maps_dir:=src/kau_localization/maps 로 소스 폴더를 직접 가리키면 된다.
+기본 폴더는 설치된 share/kau_localization/maps 인데, 이 폴더 **자체가**
+src/kau_localization/maps 를 가리키는 심링크다 (CMakeLists.txt 참고).
+그래서 save_map.py 로 새로 저장한 지도가 저장 즉시 이름으로 불린다 --
+colcon build 를 다시 할 필요가 없다.
+
+다른 폴더를 뒤지고 싶으면 maps_dir:= 로 지정한다.
 """
 
 import re
@@ -83,5 +84,6 @@ def _hint(maps_dir: Path, suffix: str, arg_name: str) -> str:
     names = sorted(p.stem for p in maps_dir.glob(f'kau_v*{suffix}'))
     if names:
         return f'{arg_name}:= 로 고를 수 있는 것: {", ".join(names)}, latest'
-    return (f'{maps_dir} 가 비어 있다. save_map.py 로 지도를 만들고 '
-            'colcon build 를 한 번 하거나 maps_dir:= 로 소스 폴더를 가리킬 것.')
+    return (f'{maps_dir} 가 비어 있다. save_map.py 로 지도를 만들면 '
+            '저장 즉시 여기 보인다 (이 폴더는 소스 폴더를 가리키는 심링크다). '
+            '안 보이면 maps_dir:= 로 소스 폴더를 직접 가리킬 것.')
