@@ -45,6 +45,24 @@ GATE_TIMEOUT_SEC = 240.0
 WATCH_PERIOD_SEC = 1.0
 
 
+def _parse_skip(raw, specs) -> frozenset:
+    """`skip` 파라미터(쉼표 구분)를 노드 이름 집합으로. run.sh 의 표가 주인이다.
+
+    manifest 에 없는 이름이 하나라도 있으면 **기동 자체를 세운다.** 오타를
+    조용히 흘리면 끈 줄 알았던 노드가 그대로 떠 있게 되는데, 그게 가장 나쁘다
+    -- 표를 믿고 CPU 나 토픽을 계산한 쪽이 전부 틀어진다.
+    """
+    names = [part.strip() for part in str(raw or '').split(',')]
+    names = [name for name in names if name]
+    unknown = sorted({name for name in names if name not in specs})
+    if unknown:
+        raise ValueError(
+            f'skip 에 manifest 에 없는 노드 이름이 있다: {unknown} · '
+            f'run.sh 의 KAU_NODES 표를 확인할 것 · '
+            f'manifest 가 아는 이름: {sorted(specs)}')
+    return frozenset(names)
+
+
 class SystemSupervisor(Node):
     """자신을 제외한 전 노드를 자식 프로세스로 소유한다."""
 
@@ -55,6 +73,9 @@ class SystemSupervisor(Node):
             get_package_share_directory(PACKAGE), 'config', 'bringup.yaml')
         self.declare_parameter('bringup_yaml', default_yaml)
         self.declare_parameter('run_id', '')
+        # 이번 기동에서 뺄 노드 이름. 쉼표 구분. run.sh 의 KAU_NODES 표에서
+        # false 인 줄이 그대로 여기로 온다. 비면 지금까지와 똑같이 전부 뜬다.
+        self.declare_parameter('skip', '')
 
         manifest_path = self.get_parameter('bringup_yaml').value
         self._manifest = load_manifest(manifest_path)
@@ -78,6 +99,10 @@ class SystemSupervisor(Node):
         # 감시가 죽은 자식의 spec 을 다시 봐야 한다 (respawn·critical).
         self._specs = {spec.name: spec
                        for stage in self._manifest.stages for spec in stage.nodes}
+
+        # 표에서 뺀 노드. _bringup 스레드는 아래에서 시작하므로 여기서 확정하면
+        # _wanted 가 보기 전에 반드시 채워져 있다.
+        self._skip = _parse_skip(self.get_parameter('skip').value, self._specs)
         self._pending = {}      # 이름 -> 재시작 예정 monotonic 시각
         self._ready = False     # 기동이 끝나야 감시를 시작한다
         self._stopping = False  # 종료 중. spawn 과 겹치면 고아가 생긴다
@@ -85,6 +110,14 @@ class SystemSupervisor(Node):
         log('supervisor', f'manifest={manifest_path}')
         log('supervisor', f'log_dir={self._log_dir}')
         log('supervisor', f'use_sim_time={self._use_sim_time}')
+
+        # 옵션(option.*)과 달리 skip 은 주행 필수 노드도 뺄 수 있다.
+        # 그래서 조용히 넘어가지 않고 stderr 로 크게 남긴다.
+        if self._skip:
+            err('supervisor', f'경고 · 이번 기동에서 뺀 노드 {len(self._skip)} 개: '
+                              f'{", ".join(sorted(self._skip))}')
+            err('supervisor', '경고 · run.sh 의 KAU_NODES 표에서 false 로 둔 것이다. '
+                              '주행 필수 노드가 섞여 있으면 차는 서거나 이상하게 간다')
 
         # spawn 은 블로킹이므로 spin 과 분리한다 (01 section 7-2).
         self._thread = threading.Thread(target=self._bringup, daemon=True)
@@ -156,7 +189,13 @@ class SystemSupervisor(Node):
         log('watch', f'상시 감시 시작 · {WATCH_PERIOD_SEC:.0f} 초 주기')
 
     def _wanted(self, spec) -> bool:
-        """이번 기동에 띄울 노드인가. when(시계 소스) · option(스위치) 둘 다 본다."""
+        """이번 기동에 띄울 노드인가. skip(표) · option(스위치) · when(시계) 셋을 본다.
+
+        skip 이 가장 세다. 표에서 false 로 둔 것은 option 이 켜져 있어도 뺀다 --
+        표가 이번 기동의 최종 결정이다.
+        """
+        if spec.name in self._skip:
+            return False
         if spec.option and not self._options.get(spec.option, True):
             return False
         if spec.when == 'sim':
@@ -166,6 +205,8 @@ class SystemSupervisor(Node):
         return True
 
     def _skip_reason(self, spec) -> str:
+        if spec.name in self._skip:
+            return 'run.sh 의 KAU_NODES 표에서 false'
         if spec.option and not self._options.get(spec.option, True):
             return f'option.{spec.option}=false'
         return f'when={spec.when}'

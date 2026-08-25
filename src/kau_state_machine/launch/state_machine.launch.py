@@ -22,8 +22,16 @@ def generate_launch_description() -> LaunchDescription:
         DeclareLaunchArgument('use_sim_time', default_value='true',
                               description='전 노드 공통. /clock 을 쓰면 true, 실기는 false'),
         # bringup.yaml 의 option 스위치. 노드의 `option: lane_viewer` 와 짝이다.
+        # run.sh 는 이걸 안 쓴다 -- 거기서는 KAU_NODES 표가 뷰어까지 다룬다.
+        # launch 를 직접 부르는 쪽을 위해 남겨 둔다.
         DeclareLaunchArgument('lane_viewer', default_value='true',
                               description='차선 인지 BEV 웹 뷰어(포트 5000) 실행 여부'),
+        # 이번 기동에서 뺄 노드 이름(bringup.yaml 의 name)을 쉼표로 잇는다.
+        # option 과 달리 주행 필수 노드도 뺄 수 있다 -- supervisor 가 stderr 로
+        # 경고를 남기고, 없는 이름을 주면 기동을 세운다.
+        #   ros2 launch ... skip:=kau_lane_detection_node,kau_lane_detection_viewer
+        DeclareLaunchArgument('skip', default_value='',
+                              description='기동에서 뺄 노드 이름. 쉼표 구분'),
     ]
 
     supervisor = Node(
@@ -39,6 +47,7 @@ def generate_launch_description() -> LaunchDescription:
                 LaunchConfiguration('use_sim_time'), value_type=bool),
             'option.lane_viewer': ParameterValue(
                 LaunchConfiguration('lane_viewer'), value_type=bool),
+            'skip': ParameterValue(LaunchConfiguration('skip'), value_type=str),
         }],
     )
 

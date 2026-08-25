@@ -28,6 +28,7 @@
 KAU_NODES="
     clock_gate                    true
     platform_ekf_pause            true
+    odom_covariance_relay         true
     kau_ekf                       true
     map_server                    true
     amcl                          true

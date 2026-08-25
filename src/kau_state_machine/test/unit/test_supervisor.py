@@ -201,3 +201,67 @@ def test_watch_plain_child_reported_once(monkeypatch):
 
     assert node._reported == {'x'}
     assert node._stopping is False
+
+
+# ------------------------------------------------------------------
+# skip — run.sh 의 KAU_NODES 표
+# ------------------------------------------------------------------
+
+def _specs(*names):
+    return {name: NodeSpec(name=name, package='pkg', executable='exe')
+            for name in names}
+
+
+@pytest.mark.parametrize('raw, expected', [
+    ('', set()),
+    (None, set()),
+    ('a', {'a'}),
+    ('a,b', {'a', 'b'}),
+    (' a , b ', {'a', 'b'}),      # 표에서 온 값이라 공백이 붙는다
+    ('a,,b,', {'a', 'b'}),        # 빈 칸은 없는 것으로 본다
+])
+def test_parse_skip(raw, expected):
+    assert sup._parse_skip(raw, _specs('a', 'b')) == expected
+
+
+def test_parse_skip_모르는_이름이면_기동을_세운다():
+    """오타를 켠 것으로 넘기면 끈 줄 알았던 노드가 조용히 뜬다."""
+    with pytest.raises(ValueError) as caught:
+        sup._parse_skip('a,kau_lane_detecton_node', _specs('a', 'b'))
+    assert 'kau_lane_detecton_node' in str(caught.value)
+
+
+def _switches(skip=(), options=None, use_sim_time=True):
+    """_wanted / _skip_reason 이 실제로 보는 속성만 채운 대역."""
+    return types.SimpleNamespace(
+        _skip=frozenset(skip),
+        _options=dict(options or {}),
+        _use_sim_time=use_sim_time)
+
+
+def test_wanted_표에서_뺀_노드는_안_뜬다():
+    fake = _switches(skip={'kau_lane_detection_node'})
+    spec = NodeSpec(name='kau_lane_detection_node', package='pkg', executable='exe')
+    assert sup.SystemSupervisor._wanted(fake, spec) is False
+    assert '표' in sup.SystemSupervisor._skip_reason(fake, spec)
+
+
+def test_wanted_표가_option_보다_세다():
+    """option 이 켜져 있어도 표에서 false 면 뺀다. 표가 최종 결정이다."""
+    fake = _switches(skip={'viewer'}, options={'lane_viewer': True})
+    spec = NodeSpec(name='viewer', package='pkg', executable='exe',
+                    option='lane_viewer')
+    assert sup.SystemSupervisor._wanted(fake, spec) is False
+
+
+def test_wanted_표가_비면_지금까지와_같다():
+    fake = _switches(options={'lane_viewer': False})
+    plain = NodeSpec(name='amcl', package='pkg', executable='exe')
+    viewer = NodeSpec(name='viewer', package='pkg', executable='exe',
+                      option='lane_viewer')
+    sim_only = NodeSpec(name='bridge', package='pkg', executable='exe', when='sim')
+    real_only = NodeSpec(name='driver', package='pkg', executable='exe', when='real')
+    assert sup.SystemSupervisor._wanted(fake, plain) is True
+    assert sup.SystemSupervisor._wanted(fake, viewer) is False
+    assert sup.SystemSupervisor._wanted(fake, sim_only) is True
+    assert sup.SystemSupervisor._wanted(fake, real_only) is False

@@ -84,7 +84,7 @@
       # bringup.yaml 의 option.<이름> 스위치. supervisor 파라미터라 관측 전용인
       # GUI 가 물어볼 수 없다 (docs/09 section 2). run.sh 설정과 맞출 것.
       options:
-        lane_viewer: true           # run.sh 의 KAU_LANE_VIEWER
+        lane_viewer: true           # run.sh 의 KAU_NODES 표와 맞출 것
 
       # 주기를 잴 대표 토픽. "<노드> | <topic> | <타입> | <기대 Hz>"
       # topics 에 이미 있는 토픽(/odom · /speed · /steering)은 표시용 구독에서
@@ -106,6 +106,8 @@
         # ★ global_path_publisher 를 rate>0 (기본 1 Hz) 으로 띄울 것.
         #   rate:=0 (1 회 발행) 이면 정상인데도 빨간불이 켜진다
         - "global_path_publisher   | /path/global          | kau_msgs/msg/KauPath             | 1"
-        - "local_planner_node      | /path/local           | kau_msgs/msg/KauPath             | 10"
+        # ★ kau_local_path_planner/config/local_planner.yaml 의 plan_hz 와
+        #   같은 값을 유지할 것 (2026-08-25: 10 -> 5).
+        - "local_planner_node      | /path/local           | kau_msgs/msg/KauPath             | 5"
         - "steer_controller        | /steering             | std_msgs/msg/Float64             | 50"
         - "speed_controller        | /speed                | std_msgs/msg/Float64             | 50"

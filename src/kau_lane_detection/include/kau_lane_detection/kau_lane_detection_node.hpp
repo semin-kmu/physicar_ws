@@ -171,6 +171,73 @@
         void refreshBevParameters();
 
 
+        // ------------------------------------------------------------
+        // 콜백 예외 가드
+        //
+        // 콜백에서 새어 나간 예외는 rclcpp::spin() 을 그대로 뚫고
+        // 나가 **노드 프로세스를 죽인다**. 그 순간 /lane/center 가
+        // 끊기고 차선 추종이 통째로 멈춘다.
+        //
+        // imageCallback 안쪽에는 cv_bridge / cv::Exception 처리가
+        // 이미 있었지만 나머지 네 콜백(cameraInfo / jointState /
+        // globalPath / obstacles)에는 아무 방어가 없었다. 그쪽도
+        // 예외를 던질 수 있다 — 예를 들어 cameraInfoCallback 은
+        // 손상된 CameraInfo 로 cv::Mat 를 만들다 cv::Exception 을,
+        // jointStateCallback 은 rclcpp::Time 연산에서
+        // std::runtime_error 를 낼 수 있다.
+        //
+        // 그래서 **구독 지점에서** 전부 이 가드로 감싼다. 함수 본문을
+        // 건드리지 않으므로 기존 코드/주석이 그대로 남고, "모든 콜백이
+        // 감싸져 있다"는 것을 생성자 한 곳만 보면 확인할 수 있다.
+        //
+        // 한 프레임을 버리는 것이지 상태를 복구하지는 않는다. 같은
+        // 예외가 계속 나면 로그가 THROTTLE 로 남으므로, 조용히 죽는
+        // 대신 원인을 남기고 계속 도는 쪽을 택한 것이다.
+        // ------------------------------------------------------------
+        template <typename Fn>
+        void guardCallback(
+            const char * where,
+            Fn && fn)
+        {
+            try
+            {
+                fn();
+            }
+            catch (const cv::Exception & e)
+            {
+                RCLCPP_ERROR_THROTTLE(
+                    this->get_logger(),
+                    *this->get_clock(),
+                    2000,
+                    "%s: OpenCV 예외로 이번 메시지를 버립니다: %s",
+                    where,
+                    e.what()
+                );
+            }
+            catch (const std::exception & e)
+            {
+                RCLCPP_ERROR_THROTTLE(
+                    this->get_logger(),
+                    *this->get_clock(),
+                    2000,
+                    "%s: 예외로 이번 메시지를 버립니다: %s",
+                    where,
+                    e.what()
+                );
+            }
+            catch (...)
+            {
+                RCLCPP_ERROR_THROTTLE(
+                    this->get_logger(),
+                    *this->get_clock(),
+                    2000,
+                    "%s: 알 수 없는 예외로 이번 메시지를 버립니다.",
+                    where
+                );
+            }
+        }
+
+
         // CameraInfo 수신 -> K, D.
         void cameraInfoCallback(
             const sensor_msgs::msg::CameraInfo::SharedPtr msg);

@@ -38,22 +38,26 @@ KauLaneDetectionNode::KauLaneDetectionNode()
         this->create_subscription<sensor_msgs::msg::Image>(
             "/camera/image_raw",
             10,
-            std::bind(
-                &KauLaneDetectionNode::imageCallback,
-                this,
-                std::placeholders::_1
-            )
+            [this](const sensor_msgs::msg::Image::SharedPtr msg)
+            {
+                guardCallback(
+                    "imageCallback",
+                    [&] { imageCallback(msg); }
+                );
+            }
         );
 
     camera_info_subscriber_ =
         this->create_subscription<sensor_msgs::msg::CameraInfo>(
             "/camera/camera_info",
             10,
-            std::bind(
-                &KauLaneDetectionNode::cameraInfoCallback,
-                this,
-                std::placeholders::_1
-            )
+            [this](const sensor_msgs::msg::CameraInfo::SharedPtr msg)
+            {
+                guardCallback(
+                    "cameraInfoCallback",
+                    [&] { cameraInfoCallback(msg); }
+                );
+            }
         );
 
     // 전역 경로. kau_global_path 가 latched(RELIABLE + TRANSIENT_LOCAL)
@@ -62,11 +66,13 @@ KauLaneDetectionNode::KauLaneDetectionNode()
         this->create_subscription<kau_msgs::msg::KauPath>(
             "/path/global",
             rclcpp::QoS(1).reliable().transient_local(),
-            std::bind(
-                &KauLaneDetectionNode::globalPathCallback,
-                this,
-                std::placeholders::_1
-            )
+            [this](const kau_msgs::msg::KauPath::SharedPtr msg)
+            {
+                guardCallback(
+                    "globalPathCallback",
+                    [&] { globalPathCallback(msg); }
+                );
+            }
         );
 
     // 장애물 가림 판정용. kau_object_detection 발행측과 QoS 를 맞춘다
@@ -75,11 +81,13 @@ KauLaneDetectionNode::KauLaneDetectionNode()
         this->create_subscription<kau_msgs::msg::ObstacleCircleArray>(
             "/perception/obstacles",
             rclcpp::QoS(1).best_effort(),
-            std::bind(
-                &KauLaneDetectionNode::obstaclesCallback,
-                this,
-                std::placeholders::_1
-            )
+            [this](const kau_msgs::msg::ObstacleCircleArray::SharedPtr msg)
+            {
+                guardCallback(
+                    "obstaclesCallback",
+                    [&] { obstaclesCallback(msg); }
+                );
+            }
         );
 
     // camera_pan_joint 실측 각도 (Pan 탐색 정착 판정용, 50Hz)
@@ -87,11 +95,13 @@ KauLaneDetectionNode::KauLaneDetectionNode()
         this->create_subscription<sensor_msgs::msg::JointState>(
             "/joint_states",
             10,
-            std::bind(
-                &KauLaneDetectionNode::jointStateCallback,
-                this,
-                std::placeholders::_1
-            )
+            [this](const sensor_msgs::msg::JointState::SharedPtr msg)
+            {
+                guardCallback(
+                    "jointStateCallback",
+                    [&] { jointStateCallback(msg); }
+                );
+            }
         );
 
 
