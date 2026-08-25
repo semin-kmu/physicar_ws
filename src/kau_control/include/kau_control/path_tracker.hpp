@@ -3,20 +3,28 @@
 //
 // speed_controller / steer_controller 가 공유하는 "경로 추종 상태".
 //
-//     KauPath 구독 (3 순위: local -> global -> lane)  ->  Curve
+//     KauPath 구독 (프리셋 순서대로)  ->  Curve
 //     차량 pose (TF map->base, 또는 경로가 이미 차량 프레임이면 원점)
 //     최근접점 추적 (8.3 전역 -> 8.4 국소 window) + cross track error
 //
 // 두 노드가 이걸 각자 하나씩 들고 돈다. 서로를 구독하지 않는다.
 //
-// 경로 우선순위 (매 tick 위에서부터 훑어 첫 번째로 "쓸 수 있는" 것을 고른다)
-//     1. path_topic          기본 /path/local   map 프레임, TF 필요
-//     2. fallback_path_topic 기본 /path/global  map 프레임, TF 필요
-//     3. lane_path_topic     기본 /lane/center  lane_frame, TF 불필요
+// 경로 소스는 셋이고 이름이 곧 yaml 의 path.sources.<이름> 키다.
+//     local   기본 /path/local
+//     global  기본 /path/global
+//     lane    기본 /lane/center
+//
+// 쓸 소스와 그 순서는 path.mode 프리셋이 정한다 (modes() 참고).
+//     normal      local -> global -> lane   평상시 주행
+//     steer_test  global 만                 조향 제어기 시험
+//     lane_only   lane 만                   차선 추종 단독
+//
+// 프리셋에 없는 소스는 구독조차 하지 않는다. 매 tick 프리셋 순서대로 훑어
+// 첫 번째로 "쓸 수 있는" 것을 고른다.
 //
 // "쓸 수 있다" = 경로를 받아뒀고 + timeout 안에 갱신됐고 + pose 를 얻을 수
-// 있다. 1·2 는 map 프레임이라 측위(map->base TF)가 끊기면 경로가 아무리
-// 신선해도 못 쓴다. 그때 3 번(lane, identity pose)으로 내려간다.
+// 있다. pose_source=tf 인 소스는 측위(map->base TF)가 끊기면 경로가 아무리
+// 신선해도 못 쓴다. identity 인 소스는 TF 를 보지 않으므로 살아남는다.
 //
 // 단위 규약: 내부는 cm / rad. ROS 경계에서만 m 로 바꾼다.
 // TF 는 발행하지 않는다 (map->odom 은 Cartographer, odom->base 는 EKF).
@@ -27,9 +35,12 @@
 
 #include <cmath>
 #include <cstdio>
+#include <map>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include <rclcpp/rclcpp.hpp>
 
@@ -86,50 +97,28 @@ public:
     explicit PathTracker(rclcpp::Node * node)
     : node_(node)
     {
-        // --- 1 순위: local path ---
-        node_->declare_parameter<std::string>("path_topic", "/path/local");
-        node_->declare_parameter<bool>("path_latched", false);
-        node_->declare_parameter<double>("path_timeout", 1.0);
+        // 경로 소스 프리셋. 쓸 소스와 그 순서를 정한다 (modes()).
+        node_->declare_parameter<std::string>("path.mode", "normal");
 
-        // --- 2 순위: global path ---
-        node_->declare_parameter<std::string>(
-            "fallback_path_topic", "/path/global");
-        node_->declare_parameter<bool>("fallback_path_latched", true);
-
-        // latched 1 회 발행이면 age 가 계속 자라므로 기본은 만료 없음(0).
-        // global_path 를 rate>0 으로 띄우고 "발행자가 죽으면 lane 으로" 를
-        // 원하면 여기에 초 단위 값을 준다.
-        node_->declare_parameter<double>("fallback_path_timeout", 0.0);
-
-        // --- 3 순위: lane detection ---
-        // 빈 문자열이면 이 순위를 아예 쓰지 않는다.
-        node_->declare_parameter<std::string>(
-            "lane_path_topic", "/lane/center");
-        node_->declare_parameter<bool>("lane_path_latched", false);
-        node_->declare_parameter<double>("lane_path_timeout", 0.5);
-
-        // lane 경로가 실려 오는 프레임. kau_lane_detection 의 path_frame_id 와
-        // 반드시 같아야 한다. base_frame 과 별개인 이유는 TF 조회용 프레임
-        // (base_footprint) 과 lane 발행 프레임 (base_link) 이 다를 수 있기
-        // 때문이다. 둘은 z 만 다르므로 평면 추종 결과는 같다.
-        node_->declare_parameter<std::string>("lane_frame", "base_link");
+        // 소스별 설정. 이름이 곧 yaml 의 path.sources.<이름> 키다.
+        //            소스     topic            latched timeout pose      frame
+        declareSource(LOCAL,  "/path/local",  false,  1.0,   "tf", "");
+        declareSource(GLOBAL, "/path/global", true,   3.0,   "tf", "");
+        declareSource(LANE,   "/lane/center", false,  0.5,   "tf", "base_link");
 
         node_->declare_parameter<std::string>("map_frame", "map");
         node_->declare_parameter<std::string>("base_frame", "base_footprint");
-
-        // "tf"       : map -> base_frame TF 로 pose 를 얻는다 (전역 경로용)
-        // "identity" : 경로가 이미 차량 프레임에 있다. TF 를 보지 않는다.
-        //
-        // 1·2 순위는 pose_source 를 따르고, 3 순위(lane)만 따로 둔다.
-        // lane 경로는 차량 프레임으로 오는 것이 존재 이유이기 때문이다.
-        node_->declare_parameter<std::string>("pose_source", "tf");
-        node_->declare_parameter<std::string>(
-            "lane_pose_source", "identity");
 
         node_->declare_parameter<double>("tf_timeout", 0.2);
         node_->declare_parameter<double>("cte_abort_cm", 200.0);
         node_->declare_parameter<double>("goal_tol_cm", 10.0);
         node_->declare_parameter<double>("vehicle.rear_axle_offset_cm", -9.0);
+
+
+        for (int i = 0; i < NSRC; ++i)
+        {
+            slots_[i] = loadSource(i);
+        }
 
         load();
 
@@ -140,34 +129,23 @@ public:
             std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
 
 
-        const bool identity =
-            (node_->get_parameter("pose_source").as_string() == "identity");
+        // --- 프리셋 해석 ---
+        //
+        // 모르는 이름을 조용히 넘기면 "왜 경로를 안 따라가지" 로 시간을
+        // 날린다. 기동을 접는 편이 낫다.
+        const std::string mode = node_->get_parameter("path.mode").as_string();
 
-        const bool lane_identity =
-            (node_->get_parameter("lane_pose_source").as_string() ==
-             "identity");
+        const auto it = modes().find(mode);
 
-        slots_[PRIMARY] = {
-            "primary",
-            node_->get_parameter("path_topic").as_string(),
-            node_->get_parameter("path_latched").as_bool(),
-            node_->get_parameter("path_timeout").as_double(),
-            identity};
+        if (it == modes().end())
+        {
+            RCLCPP_FATAL(
+                node_->get_logger(),
+                "path.mode '%s' 를 모른다. 있는 것: %s",
+                mode.c_str(), modeList().c_str());
 
-        slots_[FALLBACK] = {
-            "fallback",
-            node_->get_parameter("fallback_path_topic").as_string(),
-            node_->get_parameter("fallback_path_latched").as_bool(),
-            node_->get_parameter("fallback_path_timeout").as_double(),
-            identity};
-
-        slots_[LANE] = {
-            "lane",
-            node_->get_parameter("lane_path_topic").as_string(),
-            node_->get_parameter("lane_path_latched").as_bool(),
-            node_->get_parameter("lane_path_timeout").as_double(),
-            lane_identity,
-            true};
+            throw std::runtime_error("path.mode 를 모른다: " + mode);
+        }
 
 
         // QoS 는 topic 마다 다르다 (kau_msgs/README.md).
@@ -180,26 +158,38 @@ public:
                 return latched ? q.transient_local() : q.durability_volatile();
             };
 
-        for (int i = 0; i < NSLOT; ++i)
+
+        // --- 프리셋에 든 소스만 구독한다 ---
+        for (int i : it->second)
         {
             Slot & s = slots_[i];
 
             if (s.topic.empty())
             {
-                continue;
+                RCLCPP_FATAL(
+                    node_->get_logger(),
+                    "path.mode '%s' 가 %s 소스를 쓰는데 "
+                    "path.sources.%s.topic 이 비어 있다.",
+                    mode.c_str(), s.name, s.name);
+
+                throw std::runtime_error(
+                    std::string("path.sources.") + s.name + ".topic 이 비었다");
             }
 
             // 같은 topic 을 두 순위에 걸면 위쪽만 남긴다.
             bool dup = false;
 
-            for (int j = 0; j < i; ++j)
+            for (int j : order_)
             {
-                dup = dup || (slots_[j].sub && slots_[j].topic == s.topic);
+                dup = dup || (slots_[j].topic == s.topic);
             }
 
             if (dup)
             {
-                s.topic.clear();
+                RCLCPP_WARN(
+                    node_->get_logger(),
+                    "%s 소스가 상위 순위와 같은 topic(%s) 이라 건너뛴다.",
+                    s.name, s.topic.c_str());
 
                 continue;
             }
@@ -210,21 +200,23 @@ public:
                 {
                     onPath(std::move(m), i);
                 });
+
+            order_.push_back(i);
         }
 
         RCLCPP_INFO(
             node_->get_logger(),
-            "경로 우선순위: 1) %s  2) %s  3) %s",
-            slotDesc(PRIMARY).c_str(), slotDesc(FALLBACK).c_str(),
-            slotDesc(LANE).c_str());
+            "경로 소스 (path.mode=%s):%s",
+            mode.c_str(), orderDesc().c_str());
     }
 
-    // 튜닝값만 다시 읽는다. topic / QoS / pose_source 는 구독 생성 시점에 굳는다.
+
+    // 튜닝값만 다시 읽는다.
+    // path.mode / topic / QoS / pose_source 는 구독 생성 시점에 굳는다.
     void load()
     {
         map_frame_    = node_->get_parameter("map_frame").as_string();
         base_frame_   = node_->get_parameter("base_frame").as_string();
-        lane_frame_   = node_->get_parameter("lane_frame").as_string();
 
         tf_timeout_   = node_->get_parameter("tf_timeout").as_double();
         cte_abort_    = node_->get_parameter("cte_abort_cm").as_double();
@@ -233,12 +225,11 @@ public:
             node_->get_parameter("vehicle.rear_axle_offset_cm").as_double();
 
         // timeout 은 주행 중에도 바꿀 수 있게 열어 둔다 (topic 과 달리 굳지 않음).
-        slots_[PRIMARY].timeout =
-            node_->get_parameter("path_timeout").as_double();
-        slots_[FALLBACK].timeout =
-            node_->get_parameter("fallback_path_timeout").as_double();
-        slots_[LANE].timeout =
-            node_->get_parameter("lane_path_timeout").as_double();
+        for (int i = 0; i < NSRC; ++i)
+        {
+            slots_[i].timeout =
+                node_->get_parameter(key(i, "timeout")).as_double();
+        }
     }
 
 
@@ -258,7 +249,7 @@ public:
         std::string why;      // 가장 높은 순위가 못 쓰인 이유
         bool        quiet = false;
 
-        for (int i = 0; i < NSLOT; ++i)
+        for (int i : order_)
         {
             Slot & s = slots_[i];
 
@@ -404,35 +395,71 @@ public:
     }
 
     // 지금 따라가는 경로의 기준 프레임 (시각화용).
+    // 아직 아무것도 못 고른 동안은 프리셋 1 순위의 프레임을 쓴다.
     const std::string & frame() const
     {
-        return frameOf(active_ < 0 ? slots_[PRIMARY] : slots_[active_]);
+        const int i = active_ >= 0 ? active_
+                    : order_.empty() ? LOCAL : order_.front();
+
+        return frameOf(slots_[i]);
     }
 
-    // 지금 따라가는 순위 이름 ("primary" / "fallback" / "lane" / "-").
+    // 지금 따라가는 소스 이름 ("local" / "global" / "lane" / "-").
     const char * activeName() const
     {
         return active_ < 0 ? "-" : slots_[active_].name;
     }
 
     // 지금 따라가는 경로의 KauPath.source (SRC_GLOBAL / SRC_LOCAL / SRC_LANE).
-    // 순위(primary/fallback/lane)와 별개다. 설정에 따라 primary 순위로
-    // global 경로가 올 수도 있으므로 발행측이 붙인 값을 그대로 쓴다.
+    // 소스 이름과 대개 일치하지만 발행측이 붙인 값을 그대로 쓴다 -- 예컨대
+    // global 소스에 local 경로를 물려 시험하는 경우까지 정직하게 나간다.
     uint8_t source() const
     {
         return active_ < 0 ? 0 : slots_[active_].source;
     }
 
 private:
+    // 경로 소스. 이름이 곧 yaml 의 path.sources.<이름> 키다.
     enum : int
     {
-        PRIMARY  = 0,
-        FALLBACK = 1,
-        LANE     = 2,
-        NSLOT    = 3
+        LOCAL  = 0,
+        GLOBAL = 1,
+        LANE   = 2,
+        NSRC   = 3
     };
 
-    // 경로 한 순위. topic 이 비면 그 순위는 없는 것으로 친다.
+    static constexpr const char * SRC_NAME[NSRC] = {"local", "global", "lane"};
+
+
+    // 프리셋 -> 소스 순서. 목록에 없는 소스는 구독조차 하지 않는다.
+    //
+    // 새 조합이 필요하면 여기에 한 줄 추가한다. yaml 은 이름만 고르므로
+    // 오타는 기동 시 FATAL 로 걸린다.
+    static const std::map<std::string, std::vector<int>> & modes()
+    {
+        static const std::map<std::string, std::vector<int>> M = {
+            {"normal",     {LOCAL, GLOBAL, LANE}},   // 평상시 주행
+            {"steer_test", {GLOBAL}},                // 조향 제어기 시험
+            {"lane_only",  {LANE}},                  // 차선 추종 단독
+        };
+
+        return M;
+    }
+
+    static std::string modeList()
+    {
+        std::string out;
+
+        for (const auto & kv : modes())
+        {
+            out += (out.empty() ? "" : " | ") + kv.first;
+        }
+
+        return out;
+    }
+
+
+    // 경로 소스 하나.
     struct Slot
     {
         const char * name = "";
@@ -445,7 +472,8 @@ private:
 
         bool   identity = false;  // true 면 TF 대신 차량 원점
 
-        bool   lane     = false;  // true 면 프레임 기준이 lane_frame
+        // identity 일 때 경로가 실려 오는 프레임. 비우면 base_frame.
+        std::string frame;
 
         std::shared_ptr<Curve> curve;
 
@@ -459,7 +487,48 @@ private:
     };
 
 
-    // 이 순위가 기대하는 경로 프레임.
+    static std::string key(int i, const char * field)
+    {
+        return std::string("path.sources.") + SRC_NAME[i] + "." + field;
+    }
+
+
+    void declareSource(
+        int i,
+        const char * topic,
+        bool latched,
+        double timeout,
+        const char * pose_source,
+        const char * frame)
+    {
+        node_->declare_parameter<std::string>(key(i, "topic"), topic);
+        node_->declare_parameter<bool>(key(i, "latched"), latched);
+        node_->declare_parameter<double>(key(i, "timeout"), timeout);
+        node_->declare_parameter<std::string>(
+            key(i, "pose_source"), pose_source);
+        node_->declare_parameter<std::string>(key(i, "frame"), frame);
+    }
+
+
+    Slot loadSource(int i) const
+    {
+        Slot s;
+
+        s.name    = SRC_NAME[i];
+        s.topic   = node_->get_parameter(key(i, "topic")).as_string();
+        s.latched = node_->get_parameter(key(i, "latched")).as_bool();
+        s.timeout = node_->get_parameter(key(i, "timeout")).as_double();
+        s.frame   = node_->get_parameter(key(i, "frame")).as_string();
+
+        s.identity =
+            node_->get_parameter(key(i, "pose_source")).as_string() ==
+            "identity";
+
+        return s;
+    }
+
+
+    // 이 소스가 기대하는 경로 프레임.
     const std::string & frameOf(const Slot & s) const
     {
         if (!s.identity)
@@ -467,20 +536,27 @@ private:
             return map_frame_;
         }
 
-        return s.lane ? lane_frame_ : base_frame_;
+        // frame 은 경로 발행측 프레임이 TF 조회용 base_frame 과 다를 때만
+        // 채운다 (예: lane 은 base_link, base_frame 은 base_footprint --
+        // 둘은 z 만 달라 평면 추종 결과가 같다).
+        return s.frame.empty() ? base_frame_ : s.frame;
     }
 
 
-    std::string slotDesc(int i) const
+    // " 1) local /path/local [tf]  2) global /path/global [tf]" 꼴.
+    std::string orderDesc() const
     {
-        const Slot & s = slots_[i];
+        std::string out;
 
-        if (s.topic.empty())
+        for (size_t k = 0; k < order_.size(); ++k)
         {
-            return "(없음)";
+            const Slot & s = slots_[order_[k]];
+
+            out += "  " + std::to_string(k + 1) + ") " + s.name + " " +
+                   s.topic + (s.identity ? " [identity]" : " [tf]");
         }
 
-        return s.topic + (s.identity ? " [identity]" : " [tf]");
+        return out.empty() ? "  (없음)" : out;
     }
 
 
@@ -623,16 +699,18 @@ private:
 
     std::string map_frame_;
     std::string base_frame_;
-    std::string lane_frame_;
 
     double tf_timeout_   = 0.2;
     double cte_abort_    = 200.0;
     double goal_tol_     = 10.0;
     double rear_offset_  = -9.0;
 
-    Slot slots_[NSLOT];
+    Slot slots_[NSRC];
 
-    int  active_ = -1;          // 지금 따라가는 순위. -1 = 없음
+    // path.mode 가 정한 소스 순서. 여기 없는 소스는 구독조차 하지 않는다.
+    std::vector<int> order_;
+
+    int  active_ = -1;          // 지금 따라가는 소스. -1 = 없음
 
     std::shared_ptr<Curve> curve_;
     TrackState             track_;

@@ -16,9 +16,9 @@ KAU AMET PhysiCar 용 **주행 제어** 패키지. `KauPath` 를 받아 `/speed`
 ## 1. 무엇인가
 
 ```text
- /path/local  (kau_msgs/KauPath, 2~10 Hz)   1 순위
- /path/global (map 프레임, TF 필요)         2 순위
- /lane/center (base_link, TF 불필요)        3 순위
+ /path/local  (kau_msgs/KauPath, 2~10 Hz)   local
+ /path/global (map 프레임, TF 필요)         global
+ /lane/center (map 프레임 · 설정에 따라 base_link)  lane
         │
         ├──────────────────────────┬───────────────────────────┐
         ▼                          ▼                           │
@@ -90,14 +90,41 @@ ros2 run kau_control steer_controller_node --ros-args \
     --params-file src/kau_control/config/steer_controller.yaml
 ```
 
+### 경로 소스 고르기 — `path.mode`
+
+경로 소스는 셋이고 (`local` / `global` / `lane`), 쓸 소스와 그 순서는
+**yaml 의 `path.mode` 프리셋 하나**가 정한다. 프리셋에 없는 소스는 구독조차
+하지 않는다. 매 tick 프리셋 순서대로 훑어 첫 번째로 "쓸 수 있는" 것을 고른다
+— 받아뒀고 + `timeout` 안에 갱신됐고 + pose 를 얻을 수 있는 소스다.
+
+| `path.mode` | 순서 | 쓰는 곳 |
+|---|---|---|
+| `normal` | local → global → lane | 평상시 주행 (`steer_controller.yaml`, `speed_controller.yaml`) |
+| `steer_test` | global 만 | 조향 제어기 시험 |
+| `lane_only` | lane 만 | 차선 추종 단독 (`lane_follow.yaml`) |
+
+```bash
+# 조향 제어기 시험 — global 만 따라간다
+ros2 run kau_control steer_controller_node --ros-args \
+    --params-file src/kau_control/config/steer_controller.yaml \
+    -p path.mode:=steer_test
+```
+
+topic · latched · timeout · pose_source 는 소스별로 yaml 에 있다
+(`path.sources.<이름>.*`). 모르는 `mode` 이름이나 빈 `topic` 은 기동 시
+FATAL 로 걸린다 — 조용히 돌면 "왜 경로를 안 따라가지" 로 시간을 날린다.
+
+새 조합이 필요하면 `path_tracker.hpp` 의 `modes()` 에 한 줄 추가한다.
+
 ### Lane Detection 으로 제어기만 검증하기 (권장 · 측위 불필요)
 
 `kau_lane_detection` 이 `/lane/center` 를 **`base_link` 프레임**으로,
 `s_offset = 0` 으로 발행한다 (localization 비의존). 즉 Cartographer 없이
 제어기만 따로 검증할 수 있고, 측위 오차가 결과에 섞이지 않는다.
 
-`pose_source:=identity` 로 두면 TF 를 보지 않고 차량을 경로 프레임의 원점으로
-잡는다 (후륜축만 `rear_axle_offset` 만큼 뒤).
+`lane_follow.yaml` 은 `path.mode: lane_only` + `path.sources.lane.pose_source:
+identity` 라 TF 를 보지 않고 차량을 경로 프레임의 원점으로 잡는다 (후륜축만
+`rear_axle_offset` 만큼 뒤).
 
 ```bash
 # 조향만 관찰 (차는 안 움직인다). 인지까지 같이 띄운다
@@ -143,9 +170,9 @@ ros2 run kau_control fake_path.py --shape straight --origin "250,360" --yaw 82
 
 | | topic | 타입 | 비고 |
 |---|---|---|---|
-| 입력 | `/path/local` | `kau_msgs/KauPath` | 1 순위. RELIABLE, depth 1 |
-| 입력 | `/path/global` | `kau_msgs/KauPath` | 2 순위. 1 순위를 못 쓰면 여기로 |
-| 입력 | `/lane/center` | `kau_msgs/KauPath` | 3 순위. `base_link` 프레임이라 TF 없이 돈다 |
+| 입력 | `/path/local` | `kau_msgs/KauPath` | `local` 소스. RELIABLE, depth 1 |
+| 입력 | `/path/global` | `kau_msgs/KauPath` | `global` 소스. `local` 을 못 쓰면 여기로 |
+| 입력 | `/lane/center` | `kau_msgs/KauPath` | `lane` 소스. `pose_source: identity` 로 두면 TF 없이 돈다 |
 | 입력 | TF `map -> base_footprint` | | 두 노드 모두 TF 를 **발행하지 않는다** |
 | 입력 | `/odometry/filtered` | `nav_msgs/Odometry` | `speed` 만. PID 피드백. **아직 발행자 없음** |
 | 입력 | `/speed` | `std_msgs/Float64` | `steer` 가 `Ld` 계산에 쓴다 |

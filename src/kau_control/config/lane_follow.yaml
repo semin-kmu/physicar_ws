@@ -17,41 +17,39 @@
 steer_controller:
   ros__parameters:
 
-    path_topic: "/lane/center"
+    # --- 경로 입력 ---
+    path:
+      # lane 하나만 쓴다. global 이 끼어들 자리 자체를 없앤다 --
+      # 측위 없이 도는 실험 중에 전역 경로가 섞이면 원인을 못 가린다.
+      mode: "lane_only"
 
-    # fallback 은 사실상 비활성이다. pose_source=identity 이면 노드가
-    # frame_id == base_frame 인 경로만 받으므로, map 프레임으로 오는
-    # /path/global 은 자동으로 거부된다. 측위 없이 도는 실험 중에
-    # 전역 경로가 끼어드는 사고를 막아준다.
-    fallback_path_topic: "/path/global"
+      sources:
+        lane:
+          topic: "/lane/center"
+          latched: false
 
-    # 3 순위(lane)는 주 경로와 같은 topic 이라 자동으로 비활성이다.
-    # 여기서는 lane 이 이미 1 순위이므로 명시적으로 비운다.
-    lane_path_topic: ""
+          # identity 모드에서는 TF 를 안 보므로 tf_timeout 이 놀고,
+          # 경로 갱신이 유일한 생존 신호가 된다.
+          #
+          # lane detection 은 14 Hz 로 돌지만 게이트에 걸린 프레임은
+          # 발행하지 않는다. 점선 공백 한두 프레임은 넘기고, 그보다
+          # 오래 끊기면 세운다. 0.5 s = 최대 7 프레임 연속 실패.
+          timeout: 0.5
 
+          # ★ TF 를 보지 않고 차량을 경로 프레임의 원점으로 둔다.
+          pose_source: "identity"
+
+          # ★ lane detection 이 발행하는 프레임과 반드시 같아야 한다
+          #   (kau_lane_detection 의 path_frame_id).
+          frame: "base_link"
+
+    # --- 인터페이스 (소스 공통) ---
     map_frame: "map"
-
-    # ★ lane detection 이 발행하는 프레임과 반드시 같아야 한다
-    #   (kau_lane_detection 의 path_frame_id, 기본값 base_link)
     base_frame: "base_link"
-
-    # ★ TF 를 보지 않고 차량을 경로 프레임의 원점으로 둔다.
-    pose_source: "identity"
-
-    path_latched: false
-    fallback_path_latched: true
     speed_topic: "/speed"
 
     control_hz: 50.0
-
-    # identity 모드에서는 TF 를 안 보므로 tf_timeout 이 놀고,
-    # 경로 갱신이 유일한 생존 신호가 된다.
-    #
-    # lane detection 은 14 Hz 로 돌지만 게이트에 걸린 프레임은
-    # 발행하지 않는다. 점선 공백 한두 프레임은 넘기고, 그보다
-    # 오래 끊기면 세운다. 0.5 s = 최대 7 프레임 연속 실패.
-    tf_timeout: 0.2
-    path_timeout: 0.5
+    tf_timeout: 0.2                     # identity 라 쓰이지 않는다
 
     # 경로가 차량 기준이므로 cte 는 곧 "중앙선에서 얼마나 벗어났나" 다.
     # 도로 반폭이 31.25 cm 이니 40 cm 를 넘었으면 도로 밖 무언가를
@@ -88,22 +86,40 @@ steer_controller:
 speed_controller:
   ros__parameters:
 
-    # 인터페이스는 steer 쪽과 같아야 한다. 두 노드가 같은 경로를 본다.
-    path_topic: "/lane/center"
-    fallback_path_topic: "/path/global"
+    # ★ 위 steer_controller 의 path 절과 같은 값이어야 한다.
+    #   두 노드가 서로 다른 경로를 따라가면 조향과 속도가 어긋난다.
+    # --- 경로 입력 ---
+    path:
+      # lane 하나만 쓴다. global 이 끼어들 자리 자체를 없앤다 --
+      # 측위 없이 도는 실험 중에 전역 경로가 섞이면 원인을 못 가린다.
+      mode: "lane_only"
 
-    # 3 순위(lane)는 주 경로와 같은 topic 이라 자동으로 비활성이다.
-    # 여기서는 lane 이 이미 1 순위이므로 명시적으로 비운다.
-    lane_path_topic: ""
+      sources:
+        lane:
+          topic: "/lane/center"
+          latched: false
+
+          # identity 모드에서는 TF 를 안 보므로 tf_timeout 이 놀고,
+          # 경로 갱신이 유일한 생존 신호가 된다.
+          #
+          # lane detection 은 14 Hz 로 돌지만 게이트에 걸린 프레임은
+          # 발행하지 않는다. 점선 공백 한두 프레임은 넘기고, 그보다
+          # 오래 끊기면 세운다. 0.5 s = 최대 7 프레임 연속 실패.
+          timeout: 0.5
+
+          # ★ TF 를 보지 않고 차량을 경로 프레임의 원점으로 둔다.
+          pose_source: "identity"
+
+          # ★ lane detection 이 발행하는 프레임과 반드시 같아야 한다
+          #   (kau_lane_detection 의 path_frame_id).
+          frame: "base_link"
+
+    # --- 인터페이스 (소스 공통) ---
     map_frame: "map"
     base_frame: "base_link"
-    pose_source: "identity"
-    path_latched: false
-    fallback_path_latched: true
 
     control_hz: 50.0
-    tf_timeout: 0.2
-    path_timeout: 0.5
+    tf_timeout: 0.2                     # identity 라 쓰이지 않는다
     cte_abort_cm: 40.0
     goal_tol_cm: 10.0
 

@@ -24,7 +24,7 @@ global_path_publisher:
     topic: "/path/global"
 
     # ★ 0 으로 두지 말 것. latched 라 1 회 발행으로도 구독자는 받지만,
-    #   kau_control 의 fallback_path_timeout 이 3 초라 정상 상태에서도
+    #   kau_control 의 path.sources.global.timeout 이 3 초라 정상 상태에서도
     #   그 뒤로는 만료된 것으로 본다. kau_gui 의 감시등도 STALE 로 뜬다.
     rate: 1.0
 

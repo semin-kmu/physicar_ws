@@ -7,9 +7,10 @@
                                                        /speed, /steering
 
 측위(Cartographer / map -> odom TF)가 **필요 없다.** lane detection 이
-경로를 차량 프레임(base_link)으로 발행하고, 두 제어 노드를
-pose_source:=identity 로 두면 차량은 그 프레임의 원점이므로 TF 를 볼
-일이 없다. 측위 오차가 결과에 섞이지 않는 것이 이 조합의 장점이다.
+경로를 차량 프레임(base_link)으로 발행하고, lane_follow.yaml 이 두 제어
+노드를 path.mode: lane_only + sources.lane.pose_source: identity 로 두면
+차량은 그 프레임의 원점이므로 TF 를 볼 일이 없다. 측위 오차가 결과에
+섞이지 않는 것이 이 조합의 장점이다.
 
 사용 전에 physicar 쪽이 떠 있어야 한다 (/speed, /steering 소비자):
 

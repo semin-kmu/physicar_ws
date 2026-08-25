@@ -11,36 +11,55 @@
 steer_controller:
   ros__parameters:
 
-    # --- 인터페이스 ---
-    # 경로 우선순위. 매 tick 위에서부터 훑어 "쓸 수 있는" 첫 번째를 따라간다.
-    #   1) local   map 프레임. TF 필요
-    #   2) global  map 프레임. TF 필요
-    #   3) lane    base 프레임. TF 없이 돈다 -> 측위가 끊겨도 살아남는다. 아님 map프레임으로 바뀜.
-    path_topic: "/path/local"           # 1 순위 (kau_msgs/KauPath)
-    fallback_path_topic: "/path/global" # 2 순위
-    lane_path_topic: "/lane/center"     # 3 순위. "" 로 두면 안 쓴다
+    # --- 경로 입력 ---
+    path:
+      # 경로 소스 선택. 매 tick 프리셋 순서대로 훑어 "쓸 수 있는" 첫 번째를
+      # 따라간다. 프리셋에 없는 소스는 구독조차 하지 않는다.
+      #
+      #   normal      local -> global -> lane   평상시 주행
+      #   steer_test  global 만                 조향 제어기 시험
+      #   lane_only   lane 만                   차선 추종 단독 (lane_follow)
+      #
+      # "쓸 수 있다" = 받아뒀고 + timeout 안에 갱신됐고 + pose 를 얻을 수 있다.
+      # 모르는 이름을 주면 기동을 접는다 (조용히 돌면 원인을 못 찾는다).
+      mode: "normal"
+
+      sources:
+        local:
+          topic: "/path/local"          # kau_msgs/KauPath
+          latched: false                # 발행측 durability 와 맞출 것
+          timeout: 1.0                  # s, 넘으면 다음 소스로
+          pose_source: "tf"             # tf | identity
+          frame: ""                     # identity 일 때만. 비우면 base_frame
+
+        global:
+          topic: "/path/global"
+          latched: true
+          # global 발행자가 죽으면 이 시간 뒤 다음 소스로 내려간다.
+          # ★ global_path.launch.py 를 반드시 rate>0 (기본 1 Hz) 로 띄울 것.
+          #   rate:=0 (1 회 발행) 이면 정상 상태에서도 이 시간 뒤 만료된다.
+          timeout: 3.0                  # s, 0 이면 만료 없음
+          pose_source: "tf"
+          frame: ""
+
+        lane:
+          topic: "/lane/center"
+          latched: false
+          timeout: 0.5                  # s, lane 은 14 Hz 라 짧게
+          # lane 도 map 프레임으로 받는다. kau_lane_detection 이
+          # path_frame_id=map 으로 발행하고 있어 그쪽 설정을 그대로 쓴다.
+          # 대신 lane 도 TF 를 타므로 측위가 끊기면 세 소스가 함께 정지한다
+          # (의도된 선택).
+          pose_source: "tf"
+          frame: "base_link"            # pose_source=identity 일 때만 쓰임
+
+    # --- 인터페이스 (소스 공통) ---
     map_frame: "map"
     base_frame: "base_footprint"
-    pose_source: "tf"                   # 1·2 순위용. tf | identity
-    # 3 순위도 map 프레임으로 받는다. kau_lane_detection 이 path_frame_id=map
-    # 으로 발행하고 있어 그쪽 설정을 그대로 쓰기 위해서다. 대신 lane 순위도
-    # TF 를 타므로, 측위가 끊기면 세 순위가 함께 정지한다 (의도된 선택).
-    lane_pose_source: "tf"
-    # lane_frame 은 lane_pose_source=identity 일 때만 쓰인다 (지금은 무시됨).
-    lane_frame: "base_link"
-    path_latched: false                 # 발행측 durability 와 맞출 것
-    fallback_path_latched: true
-    lane_path_latched: false
     speed_topic: "/speed"               # Ld 계산에 쓸 현재 속도 명령
 
     control_hz: 50.0
-    tf_timeout: 0.2                     # s, TF 가 이보다 오래되면 그 순위는 못 씀
-    path_timeout: 1.0                   # s, 1 순위가 이보다 오래되면 아래로
-    # global 발행자가 죽으면 이 시간 뒤 3 순위로 내려간다.
-    # ★ global_path.launch.py 를 반드시 rate>0 (기본 1 Hz) 로 띄울 것.
-    #   rate:=0 (1 회 발행) 이면 정상 상태에서도 이 시간 뒤 만료된다.
-    fallback_path_timeout: 3.0          # s, 0 이면 만료 없음
-    lane_path_timeout: 0.5              # s, lane 은 14 Hz 라 짧게
+    tf_timeout: 0.2                     # s, TF 가 이보다 오래되면 그 소스는 못 씀
     cte_abort_cm: 200.0                 # cm, 발산 판정 -> 조향 0
     goal_tol_cm: 10.0                   # cm, 개곡선 종점 도달 판정
 

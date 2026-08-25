@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <cmath>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -308,7 +309,23 @@ int main(int argc, char ** argv)
 {
     rclcpp::init(argc, argv);
 
-    rclcpp::spin(std::make_shared<kau::control::SpeedController>());
+    // 설정 오류(path.mode 등)는 노드 생성자가 던진다. 그대로 두면 terminate
+    // 로 죽어 종료 코드가 134 가 되고, supervisor 의 사망 판정이 오염된다
+    // (kau_state_machine 의 state_machine.py main() 과 같은 취지).
+    // 이유를 남기고 1 로 끝낸다.
+    try
+    {
+        rclcpp::spin(std::make_shared<kau::control::SpeedController>());
+    }
+    catch (const std::exception & e)
+    {
+        RCLCPP_FATAL(
+            rclcpp::get_logger("speed_controller"), "기동 실패: %s", e.what());
+
+        rclcpp::shutdown();
+
+        return 1;
+    }
 
     rclcpp::shutdown();
 
