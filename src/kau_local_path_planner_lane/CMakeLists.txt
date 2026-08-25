@@ -25,14 +25,15 @@ endif()
 
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
-find_package(std_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(tf2 REQUIRED)
-find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(kau_msgs REQUIRED)
 find_package(kau_control REQUIRED)
+# ★ 이 패키지 소스에는 Eigen 이 한 번도 안 나오지만 지우면 빌드가 깨진다 --
+#   kau_control/bezier.hpp 가 <Eigen/Dense> 를 include 하는데 kau_control 이
+#   그 의존성을 export 하지 않아 소비자가 직접 걸어야 한다 (2026-08-26 확인).
 find_package(Eigen3 REQUIRED)
 
 # 알고리즘 구현 (ROS 의존성 없음) 을 실제 라이브러리로 묶는다 -- node 와
@@ -64,11 +65,9 @@ target_link_libraries(local_planner_node
 )
 ament_target_dependencies(local_planner_node
   rclcpp
-  std_msgs
   geometry_msgs
   nav_msgs
   tf2
-  tf2_ros
   tf2_geometry_msgs
   kau_msgs
   kau_control
@@ -90,11 +89,19 @@ install(PROGRAMS scripts/fake_upstream.py scripts/rejection_logger.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
-# 2026-08-25 (kau_local_path_planner 에서 분기, lane-only 변형): 복사해 온
-# gtest 들은 옛 global+lane fusion/map 기반 boundary 를 검증하던 테스트라
-# 이번 재설계(backbone/road boundary 전면 교체)와 안 맞아 전부 비활성화한다
-# -- 지금 상태로 빌드하면 컴파일도 안 된다(옛 API 호출). 실차 검증 우선
-# 순위상 이번엔 새로 안 짬 -- 다음 세션에서 새 API 기준으로 재작성할 것.
+# 2026-08-26: kau_local_path_planner 에서 복사해 온 gtest 5개
+# (test_boundary_checker / test_candidate_generator / test_collision_checker /
+# test_local_planner_scenarios / test_path_evaluator, 합계 42 TEST) 를 삭제했다.
+# 옛 global+lane fusion / map 폴리곤 boundary 를 검증하던 것이라 lane-only
+# 재설계 후로는 **컴파일조차 안 됐고**, 그 상태로 1년 가까이 꺼져 있으면서
+# "테스트가 있다" 는 착시만 만들었다.
+#
+# 새로 짤 때 되살릴 가치가 있는 시나리오 (전부 현재 무커버리지):
+#   - leastViolationRect 가 obstacle_violation 최소 후보군으로 먼저 좁히는지
+#     (정규화-합산으로 되돌아가면 obs_margin 을 키울수록 collision 이 늘던
+#      2026-08-24 안전 버그가 재발한다)
+#   - committed/prediction horizon 분리가 stage-1 에서 실제로 걸리는지
+#   - corridorOffsets 가 한쪽 edge 만 있을 때 kLaneWidthCm 로 폴백하는지
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
 
@@ -103,8 +110,6 @@ if(BUILD_TESTING)
   set(ament_cmake_uncrustify_FOUND TRUE)
   ament_lint_auto_find_test_dependencies()
 
-  # 2026-08-25: 위 주석대로 복사해 온 옛 gtest 들은 아직 꺼둔 채로 두고,
-  # 새 API(좌/우 edge Curve) 기준으로 다시 쓴 것부터 하나씩 켠다.
   # test_boundary_checker_lane 은 "도로 이탈 판정이 통째로 무력했던" 회귀
   # (marginAlongNormal 의 하한 clamp) 를 잡아 두려고 만든 것이다.
   find_package(ament_cmake_gtest REQUIRED)

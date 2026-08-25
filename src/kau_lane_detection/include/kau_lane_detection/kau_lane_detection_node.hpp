@@ -40,6 +40,8 @@
     #include <opencv2/opencv.hpp>
 
     #include "kau_lane_detection/bezier.hpp"
+    #include "kau_lane_detection/lane_geometry.hpp"
+    #include "kau_lane_detection/lane_types.hpp"
 
     // 이 맵의 차선 정보 (전역 선언). 차로 수, 도로 단면의 선 목록,
     // 각 선의 중앙선 대비 횡거리와 색. 관측 하나를 단면의 한 자리에
@@ -62,25 +64,7 @@
         // Lane Detection Result
         // ================================================================
 
-        struct LaneDetectionResult
-        {
-            // 방향성 창 추적이 잡은 차선 중심점.
-            // 차량에 가까운 쪽부터 전방으로 순서대로. [BEV px]
-            //
-            // 예전에는 창 y 격자에 묶인 x 배열이었다. 그 표현은
-            // x = f(y) 를 전제하므로 90도 코너처럼 차선이 가로로
-            // 누우면 표현 자체가 불가능하다. 순서 있는 점열은
-            // 방향에 무관하다.
-            std::vector<cv::Point2d> track_px;
-
-            // 실제로 픽셀을 잡은 스텝 수 (= track_px.size()).
-            int found_count = 0;
-
-            bool detected = false;
-
-            // track_px 를 중심선 합성에 쓸 수 있는 상태
-            bool valid = false;
-        };
+        using LaneDetectionResult = kau_lane::LaneDetectionResult;
 
 
         // 생성자. 파라미터 선언 + publisher/subscriber 생성.
@@ -101,67 +85,6 @@
         static constexpr int NUM_WINDOWS = 9;
 
         static constexpr int MIN_VALID_WINDOWS = 3;
-
-
-        // 가중 최소제곱 다항식 적합 v = f(t). Vandermonde + DECOMP_QR.
-        // weights 가 비어 있으면 균등 가중.
-        static bool polyFitW(
-            const std::vector<double> & ts,
-            const std::vector<double> & vs,
-            const std::vector<double> & weights,
-            int order,
-            std::vector<double> & coeffs);
-
-
-        // 폴리라인 위로 투영. 호길이 s 와 거리 d 를 돌려준다.
-        // 양 끝 구간에서는 바깥으로 외삽을 허용한다 (s < 0 가능).
-        static void projectOnPolyline(
-            const std::vector<cv::Point2d> & poly,
-            const std::vector<double> & cum,
-            const cv::Point2d & p,
-            double & s_out,
-            double & d_out);
-
-
-        // pts 각 점의 ref 기준 부호 있는 횡거리 [px]. 차량 오른쪽이 +.
-        static std::vector<double> lateralOffsets(
-            const std::vector<cv::Point2d> & ref,
-            const std::vector<cv::Point2d> & pts);
-
-
-        // 위 값의 중앙값. 차선이 통째로 어느 쪽에 있는지 판정용.
-        static double medianLateralOffset(
-            const std::vector<cv::Point2d> & ref,
-            const std::vector<cv::Point2d> & pts);
-
-
-        // ref 기준 회랑 [lo, hi] * lane_width 를 벗어나는 순간 잘라낸다.
-        // 추적이 체커보드 연석이나 다른 구간 차선으로 갈아탄 지점에서
-        // 끊는다. 통째로 버리지 않고 정상이던 앞부분은 남긴다.
-        static std::vector<cv::Point2d> truncateAtCorridor(
-            const std::vector<cv::Point2d> & track,
-            const std::vector<cv::Point2d> & ref,
-            double want_sign,
-            double lo_px,
-            double hi_px);
-
-
-        // 순서 있는 점열을 국소 법선(차량 오른쪽) 방향으로 평행이동.
-        // 90도 코너에서는 x 방향 offset 이 틀리므로 반드시 법선이어야 한다.
-        static std::vector<cv::Point2d> offsetTrack(
-            const std::vector<cv::Point2d> & pts,
-            double offset_px);
-
-
-        // 파라미터(int 배열) -> cv::Scalar.
-        static cv::Scalar toScalar(
-            const std::vector<int64_t> & v);
-
-
-        // Horner 평가.
-        static double polyEval(
-            const std::vector<double> & coeffs,
-            double y);
 
 
         // src 사다리꼴 -> dst 사각형 변환행렬 생성.
@@ -294,39 +217,7 @@
         // ================================================================
 
 
-        struct LanePath
-        {
-            // 제어점 6개 [cm]. 이것이 발행 대상의 전부다.
-            kau::bezier::Ctrl ctrl;
-
-            bool valid = false;
-
-            // 아래는 전부 진단용 (발행하지 않음)
-            double length_cm = 0.0;
-
-            double kappa_max = 0.0;
-
-            // 실관측 구간 [cm]. 근거 점이 끊기지 않고 이어지는
-            // 시점부터의 호길이. 그 뒤는 외삽이다. KauPath 로 발행한다.
-            double valid_length_cm = 0.0;
-
-            // 0.0 ~ 1.0. 근거량 x 관측 비율.
-            double confidence = 0.0;
-
-            double cte_cm = 0.0;
-
-            double heading_err = 0.0;
-
-            int source_windows = 0;
-
-            // 제어점 생성까지는 끝난 상태. 게이트 통과 여부와 무관하다.
-            // 기각된 경로도 debug 화면에는 그려서 무엇이 막혔는지 보인다.
-            bool built = false;
-
-            // 게이트 기각 사유. 0 = 통과
-            //   1 근거부족  2 조향한계  3 시야이탈
-            int reject = 0;
-        };
+        using LanePath = kau_lane::LanePath;
 
 
         // ================================================================
@@ -387,32 +278,7 @@
         // 판정은 없앴다. 남은 건 순수하게 "중앙선에서 자차가 얼마나
         // 떨어져 있는가" 라는 진단값과, identifyLine 이 흰선 하나를
         // 왼쪽/오른쪽 경계 중 어디에 앉힐지 고를 때 쓰는 기준점뿐이다.
-        struct CenterFix
-        {
-            bool valid = false;
-
-            // 중앙선 -> 자차 부호 있는 횡거리 [cm]. 차량 오른쪽이 +.
-            double offset_cm = 0.0;
-
-            // 판정 근거
-            //   0 없음
-            //   1 노란 중앙선 실측
-            //   2 흰선 두 개 사이를 반으로 갈라 역산
-            //   3 흰선 하나 + 맵 단면으로 역산
-            //   4 직전 프레임 유지 (이번 프레임 근거 없음)
-            int source = 0;
-        };
-
-
-        // 기준선 대비 부호 있는 횡거리 하나. 차량 오른쪽이 +.
-        //
-        // lateralOffsets 는 투영 t 를 [0,1] 로 자르지만, 자차 위치는
-        // 추적 시작점보다 뒤(BEV 아래쪽)에 있어서 그대로 쓰면 첫 점
-        // 까지의 직선거리가 나와 값이 부풀려진다. 양 끝 구간에서는
-        // 외삽을 허용한다.
-        static double lateralOffsetAt(
-            const std::vector<cv::Point2d> & ref,
-            const cv::Point2d & p);
+        using CenterFix = kau_lane::CenterFix;
 
 
         // 중앙선 대비 자차 횡거리를 갱신한다.
@@ -463,6 +329,18 @@
             double sx,
             int bev_height) const;
 
+        // 단면 선 i 의 중앙선 대비 횡거리 [cm].
+        //
+        // road_map.hpp 의 LINES 는 "선이 단면의 어디에 있는가" 라는
+        // 형태만 준다. 크기의 최상위는 yaml 의 lane_width_cm 이므로
+        // 여기서 그 비로 환산한다. 두 값이 어긋나도 좌/우 판정과
+        // 축척이 서로 다른 도로를 가정하는 일이 생기지 않는다.
+        double lineOffsetCm(std::size_t i) const;
+
+
+        // 중앙선에서 한쪽 흰선까지 [cm]. lineOffsetCm 과 같은 기준.
+        double roadHalfWidthCm() const;
+
 
         // identifyLine 에 넣을 "자차가 중앙선에서 몇 cm 에 있는가".
         //
@@ -505,26 +383,7 @@
         //   끊겨 하류에서 "경로가 생겼다 말았다" 로 보였다.
         // ================================================================
 
-        enum class PanSearchState
-        {
-            Idle,       // pan = 0. 소실 감시만 한다
-            Searching,  // 소실된 쪽으로 전진하며 재검출을 노린다
-            Holding,    // 재검출됨. 직선 구간이 나올 때까지 그 각도를 유지
-            Returning   // 0 으로 복귀 중
-        };
-
-
-        // 순서 있는 점열이 얼마나 휘었는가 [deg]. 판정 불가면 음수.
-        //
-        // 앞 절반의 현(chord)과 뒤 절반의 현이 이루는 각이다.
-        //
-        // BEV 좌표로 재도 된다. 호모그래피는 직선을 직선으로 보내므로
-        // "휘었나 안 휘었나" 는 카메라가 돌아가 BEV 가정이 깨진
-        // 상태에서도 그대로 읽힌다. 다만 각도의 크기는 보존되지
-        // 않으므로(원근에 따라 늘거나 준다) 이 값은 세상의 도(度)가
-        // 아니라 BEV 영상 위의 도다. 임계값은 실측으로 잡을 것.
-        static double trackBendDeg(
-            const std::vector<cv::Point2d> & pts);
+        using PanSearchState = kau_lane::PanSearchState;
 
 
         // pan 을 0 으로 되돌렸을 때 이 점들 중 몇 개가 여전히
@@ -584,16 +443,7 @@
         // 있어야 한다. 하나의 TF 조회로 세 용도를 전부 충당한다.
         // ================================================================
 
-        struct VehiclePose
-        {
-            bool valid = false;
-
-            double x_m = 0.0;
-
-            double y_m = 0.0;
-
-            double yaw_rad = 0.0;
-        };
+        using VehiclePose = kau_lane::VehiclePose;
 
 
         // map <- base_link 를 frame_stamp(지금 처리 중인 영상의 시각)에서
@@ -644,13 +494,7 @@
         // 것과 같은 이유).
         // ------------------------------------------------------------
 
-        struct KappaTrack
-        {
-            std::size_t seg   = 0;      // 직전 해가 있던 조각
-            double      u     = 0.0;    // 그 조각 안의 매개변수
-            bool        valid = false;  // false 면 전역 탐색
-            int         fails = 0;      // GATE 연속 이탈 횟수
-        };
+        using KappaTrack = kau_lane::KappaTrack;
 
         static constexpr double kTrackFwdCm   = 100.0;  // 전방 window
         static constexpr double kTrackBackCm  = 50.0;   // 후방 window
@@ -765,6 +609,13 @@
         // 30도 로 **지금 광학에서는 걸리지 않는다.** pan_max_deg 를
         // 올리거나 렌즈를 바꿀 때 살아나는 쪽이다. intrinsic 이 없으면
         // pan_max_deg 를 그대로 반환한다.
+        // 두 조준 소스의 공통 후미. 방위각[rad] 을 +-pi 로 접고,
+        // 유효 표시를 세우고, pan_aim_gain 을 곱해 deg 로 낸다.
+        // 소스가 달라도 이 세 가지는 같아야 한다.
+        double panAimResultDeg(
+            double bearing_rel,
+            bool * out_valid) const;
+
         double panAimLimitDeg() const;
 
 
@@ -881,11 +732,16 @@
             double sx,
             double camera_yaw_deg) const;
 
-        static const char * gateName(int code);
+        // 기각 코드의 사람용 이름. 두 표기를 한 표에서 낸다 —
+        // 콘솔 로그는 한글, debug 오버레이는 ASCII 다
+        // (cv::putText 에 CJK 글리프가 없어 물음표로 나온다).
+        struct GateLabel
+        {
+            const char * ko;
+            const char * ascii;
+        };
 
-        // cv::putText 는 CJK 글리프가 없어 물음표로 나온다.
-        // debug 화면용 ASCII 이름.
-        static const char * gateNameAscii(int code);
+        static GateLabel gateLabel(int code);
 
         // lane_width_cm + 카메라 기하 -> lane_width_px_ 재계산.
         // CameraInfo 수신 시와 BEV 기하 변경 시 호출한다.
@@ -956,6 +812,50 @@
 
 
         // 메인 파이프라인.
+        using FrameContext = kau_lane::FrameContext;
+
+        // 프레임 파이프라인 단계. 호출 순서는 imageCallback 이 정하고,
+        // 단계끼리는 FrameContext 로만 이어진다 (전역/멤버 경유 없음).
+        // stagePrepareFrame 이 false 를 내면 그 프레임은 버린다.
+        bool stagePrepareFrame(
+            const sensor_msgs::msg::Image::SharedPtr & msg,
+            FrameContext & ctx);
+
+        void stageBuildBev(
+            const sensor_msgs::msg::Image::SharedPtr & msg,
+            FrameContext & ctx);
+
+        void stageBuildMasks(
+            FrameContext & ctx);
+
+        void stagePrepareDebugCanvas(
+            FrameContext & ctx);
+
+        void stageDetectLanes(
+            FrameContext & ctx);
+
+        void stageValidateSides(
+            FrameContext & ctx);
+
+        void stageResolveCenter(
+            FrameContext & ctx);
+
+        void stageRestoreMissing(
+            FrameContext & ctx);
+
+        void stageBuildPath(
+            const sensor_msgs::msg::Image::SharedPtr & msg,
+            FrameContext & ctx);
+
+        void stagePublishPath(
+            const sensor_msgs::msg::Image::SharedPtr & msg,
+            FrameContext & ctx);
+
+        void stageRender(
+            const sensor_msgs::msg::Image::SharedPtr & msg,
+            FrameContext & ctx);
+
+
         void imageCallback(
             const sensor_msgs::msg::Image::SharedPtr msg);
 
@@ -1224,6 +1124,12 @@
         double wheelbase_cm_;
 
         double max_steer_deg_;
+
+        // 최소 회전반경보다 급한 경로를 기각할지.
+        // false 면 곡률만 status 의 rad 로 알리고 경로는 그대로 낸다 —
+        // "이 곡률로 돌 수 있는가" 는 하류 제어가 감속/조향으로
+        // 판단할 일이지 인지가 경로를 끊을 일이 아니다.
+        bool path_gate_steer_enable_;
 
         double max_lateral_cm_;
 
@@ -1586,12 +1492,7 @@
         // 그건 인코더 없이는 관측 불가다.
         // ------------------------------------------------------------
 
-        struct PanSample
-        {
-            rclcpp::Time stamp;
-
-            double deg;
-        };
+        using PanSample = kau_lane::PanSample;
 
         std::deque<PanSample> pan_history_;
 
@@ -1630,6 +1531,26 @@
         // 이라 node clock(ROS_TIME) 과 빼면 예외가 난다. 명시한다.
         rclcpp::Time pan_hold_start_{0, 0, RCL_ROS_TIME};
 
+
+        // BEV 유효영역 마스크.
+        //
+        // BEV 캔버스는 사각형인데 카메라가 실제로 보는 지면은
+        // 사다리꼴이다 — 가까울수록 횡폭이 좁아서, 하단 좌우
+        // 모서리에는 원본 화소가 아예 없다 (warpPerspective 가
+        // 검정으로 채운다). 실측: 캔버스의 10.3%, 히스토그램
+        // 밴드(하단 10%) 안에서는 43.5%.
+        //
+        // 그 화소를 검출에서 뺀다. 없앨 수 있는 영역이 아니므로
+        // "없는 데이터" 로 명시하는 것이 유일하게 맞는 처리다.
+        cv::Mat bev_valid_mask_;
+
+        cv::Size bev_valid_src_size_;
+
+        bool bev_valid_dirty_ = true;
+
+        // 원본 크기가 정해진 뒤(CameraInfo 수신) 한 번, 그리고 BEV
+        // 기하가 바뀔 때마다 다시 만든다.
+        void refreshBevValidMask(const cv::Size & src_size);
 
         std::vector<cv::Point2f> bev_src_points_;
 

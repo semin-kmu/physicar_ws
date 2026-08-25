@@ -3,9 +3,13 @@
 //
 // 도로 물리 경계를 map 폴리곤이 아니라 /lane/left, /lane/right(KauPath,
 // base_link) 곡선 자체로 판정한다 (map/global path/localization 배제).
-// 공개 API(marginAlongNormal/roadClearance*/roadReportWheels/roadOk*)는
-// 옛 버전과 최대한 같게 유지해 candidate_generator/local_planner/
-// path_evaluator 를 거의 안 건드리게 했다.
+//
+// 공개 API 는 두 개뿐이다:
+//   marginAlongNormal  코리도 폭 질의 ("이 방향으로 얼마나 더 갈 수 있나").
+//                      비음수 -- 이미 밖이면 0 이다.
+//   roadReportWheels   이탈 판정 (바퀴 4점). 부호를 살린다 -- 밖이면 음수.
+// 둘을 섞어 쓰지 말 것. 폭 질의의 0 clamp 를 판정에 쓰면 "여유가 절대
+// 음수가 될 수 없어" 이탈 판정이 통째로 무력해진다 (2026-08-25 실측 사고).
 // ====================================================================
 
 #ifndef KAU_LOCAL_PATH_PLANNER_LANE__BOUNDARY_CHECKER_HPP_
@@ -42,34 +46,6 @@ inline constexpr double kLaneWidthCm = 70.0;   // cm, 한쪽 edge 만 있을 때
 double marginAlongNormal(
     const RoadBoundary & boundary, const Point2 & origin, const Point2 & normal,
     double sign, double footprint_cm, double max_search_cm = 200.0);
-
-// 곡선 전체에서 안전 여유의 최솟값 [cm]. 음수면 침범. 후보 자신의 접선을
-// 법선 기준으로 써서 좌/우 edge 까지 거리를 잰다(3분할 원 근사, 옛 API 유지).
-double roadClearance(
-    const RoadBoundary & boundary, const Curve & cv, double footprint_cm,
-    double sample_interval_cm);
-
-inline bool roadOk(
-    const RoadBoundary & boundary, const Curve & cv, double footprint_cm,
-    double sample_interval_cm)
-{
-    return roadClearance(boundary, cv, footprint_cm, sample_interval_cm) >= 0.0;
-}
-
-// 회전 사각형 차체(후륜축 기준) 버전.
-double roadClearanceRect(
-    const RoadBoundary & boundary, const Curve & cv,
-    const VehicleFootprint & body, double road_safety_margin_cm,
-    double sample_interval_cm);
-
-inline bool roadOkRect(
-    const RoadBoundary & boundary, const Curve & cv,
-    const VehicleFootprint & body, double road_safety_margin_cm,
-    double sample_interval_cm)
-{
-    return roadClearanceRect(boundary, cv, body, road_safety_margin_cm,
-                             sample_interval_cm) >= 0.0;
-}
 
 struct RoadReport
 {

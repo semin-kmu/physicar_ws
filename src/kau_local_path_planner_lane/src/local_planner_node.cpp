@@ -241,7 +241,6 @@ private:
         declare_parameter<int>("bound_depth", 2);
         declare_parameter<double>("cusp_guard", 0.6);
         declare_parameter<double>("obs_margin", 4.0);
-        declare_parameter<double>("preview", 450.0);
         declare_parameter<double>("w_obstacle", 4.0);
         declare_parameter<double>("w_ref", 1.0);
         declare_parameter<double>("w_kappa", 2.0);
@@ -267,7 +266,6 @@ private:
         p.bound_depth = static_cast<int>(get_parameter("bound_depth").as_int());
         p.cusp_guard = get_parameter("cusp_guard").as_double();
         p.obs_margin = get_parameter("obs_margin").as_double();
-        p.preview = get_parameter("preview").as_double();
         p.w_obstacle = get_parameter("w_obstacle").as_double();
         p.w_ref = get_parameter("w_ref").as_double();
         p.w_kappa = get_parameter("w_kappa").as_double();

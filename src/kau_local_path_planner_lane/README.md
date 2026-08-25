@@ -1,8 +1,13 @@
 # kau_local_path_planner_lane
 
-Local Path Planner. reference(global path + lane detection) 융합 → 후보
+Local Path Planner (lane-only). `/lane/center` 로 backbone 생성 → 후보
 quintic Bezier 생성 → 장애물/도로/곡률 제약 필터링 → 비용 최소 선택 →
 `/path/local` 발행.
+
+**map / global path / localization 을 쓰지 않는다** (2026-08-25 재설계).
+경로 형상의 유일한 출처는 `/lane/center` 이고, `/lane/left`,`/lane/right`
+는 도로 경계 판정에만 쓴다. 따라서 이 패키지의 어떤 튜닝도 lane detection
+품질보다 나은 결과를 못 만든다.
 
 원본은 `KAU_AMET_Test` 리포의 Python 시뮬레이션
 (`src/kau_local_path_planner_lane/test/planner.py`, `config.py`)이며, 이 패키지는
@@ -17,14 +22,15 @@ include/kau_local_path_planner_lane/
 ├── types.hpp               PlannerParams, Candidate, PlanResult
 ├── bezier_ext.hpp           hermite_to_bezier / kappa_bound / Frame 평가
 │                            (kau_control 에 없는, 생산자 전용 연산)
-├── reference_fusion.hpp     투영 + lane 종점 상태 융합
-├── boundary_checker.hpp     도로 inner/outer 경계 hard constraint
+├── lane_backbone.hpp        /lane/center 로 backbone 생성 + 등곡률 외삽
+│                            (옛 reference_fusion.hpp 를 대체)
+├── boundary_checker.hpp     /lane/left,/lane/right 로 도로 경계 hard constraint
 ├── collision_checker.hpp    장애물 충돌/여유 계산
 ├── candidate_generator.hpp  후보 quintic 생성 (corridor 7개 + fallback)
 ├── path_evaluator.hpp       비용함수 + degraded 최후수단
 └── local_planner.hpp        전체 오케스트레이션 (plan())
 
-src/local_planner_node.cpp   ROS2 wiring (구독/발행/TF/파라미터) 만 담당
+src/local_planner_node.cpp   ROS2 wiring (구독/발행/파라미터) 만 담당. TF 안 씀
 ```
 
 `local_planner.hpp`/`LocalPlanner` 는 ROS 의존성이 전혀 없어 노드 없이도
@@ -34,7 +40,7 @@ src/local_planner_node.cpp   ROS2 wiring (구독/발행/TF/파라미터) 만 담
 
 | Python (`planner.py`) | C++ |
 |---|---|
-| `LocalPlanner._project` / `_ref_frame` | `ReferenceFusion` |
+| `LocalPlanner._build_backbone` / `_extend_curve` | `lane_backbone.hpp` |
 | `_candidate` / `_corridor_offsets` / `_obstacle_offset_candidates`(Smart K1) / `_obstacle_primitives` / `_direct_family` | `CandidateGenerator` |
 | `_cost` / `_continuity_cost` / `_path_preview_cost` / `_least_violation` | `path_evaluator.hpp` |
 | `_clearance` / `_near` / `_preview_clear` | `collision_checker.hpp` |
@@ -44,17 +50,17 @@ src/local_planner_node.cpp   ROS2 wiring (구독/발행/TF/파라미터) 만 담
 ### 원본과 의도적으로 다른 점
 
 - **도로 경계**: Python 은 `track.py` 의 divider-relative 사전계산
-  corridor 를 썼다. ROS2 쪽엔 그 divider 정렬 데이터가 없어서,
-  `kau_object_detection` 이 이미 쓰는 point-in-polygon + 거리 방식으로
-  재설계했다 (`kau_object_detection/config/amet_2026_track.yaml` 그대로
-  재사용, 복제하지 않음). corridor 폭은 기준점에서 법선 방향 이분탐색
-  (`marginAlongNormal`)으로 구한다.
+  corridor 를 썼다. 이 패키지는 map 폴리곤도 divider 정렬 데이터도 쓰지
+  않고, 검출된 `/lane/left`,`/lane/right` **곡선 자체**로 판정한다
+  (`boundary_checker.hpp`). corridor 폭은 기준점에서 법선 방향으로 edge
+  곡선에 최근접 투영해 구한다 (`marginAlongNormal`, 반복 없이 정확).
+  한쪽 edge 만 관측되면 반대쪽은 `kLaneWidthCm`(70cm) 로 근사한다.
 - **장애물이 매 사이클 바뀐다**: Python 시뮬은 장애물이 ground-truth로
   고정이었지만, 실제 `/perception/obstacles` 는 매 사이클 바뀌는 라이브
   토픽이다. `LocalPlanner::updateObstacles()` 로 매 사이클 갱신한다.
 - `_direct_target_indices` 의 "장애물이 어느 쪽에 있는가" 판정은 원래
   divider 기준 절대좌표를 다시 구했는데, 이미 station 계산 시점에 구해둔
-  global-path 기준 lateral (`ObstacleStation.lateral`, 원본 `_station()`과
+  backbone 기준 lateral (`ObstacleStation.lateral`, 원본 `_station()`과
   동일 정의)을 재사용한다 (부호만 필요하므로 실질적으로 동등).
 
 ### 2026-08-24 KAU_AMET_Test 알고리즘 반영 (이번 포팅 세션)
@@ -102,9 +108,8 @@ src/local_planner_node.cpp   ROS2 wiring (구독/발행/TF/파라미터) 만 담
   min_clearance +7.989→+7.138cm, steer-rate 오히려 개선(mean/p95/max
   18.51/57.57/222.38→17.01/52.36/222.38 deg/s).
 - **회전 사각형 차체 (3분할 원 근사 대체, 2026-08-25)**: road/obstacle
-  hard-gate 두 곳(`roadClearance`/`roadOk` → `roadClearanceRect`/
-  `roadOkRect`, `clearance` → `clearanceRect`, `leastViolation` →
-  `leastViolationRect`)에서, 상수 반경(`body_radius_cm`, 3분할 원 근사 -
+  hard-gate 두 곳(도로 판정 → `roadReportWheels`, 장애물 판정 →
+  `clearanceRect`, 최후수단 → `leastViolationRect`)에서, 상수 반경(`body_radius_cm`, 3분할 원 근사 -
   candidate 생성의 offset 목표값 계산에는 그대로 남아있음)을 실제 차체
   치수(28x20cm, 후륜축 기준, `VehicleFootprint{body_front_cm=23,
   rear_overhang_cm=5, half_width_cm=10}`, 새 파라미터 `body_front_cm`/
@@ -123,9 +128,9 @@ src/local_planner_node.cpp   ROS2 wiring (구독/발행/TF/파라미터) 만 담
   nearest-point 재탐색을 전혀 거치지 않으므로, 사각형 4 꼭짓점을
   그대로(정확한 heading 회전으로 계산) 각 `pointClearance` 에 넣으면
   된다 — Python 이 겪은 근사 왜곡 없이 더 정확하고 더 단순하게 구현
-  가능. gtest 2개 추가(`test_boundary_checker.cpp`/
-  `test_collision_checker.cpp`, 원 근사로는 놓치는 위반을 사각형이
-  잡아내는지 확인). 61→63 tests, 0 errors, 0 failures.
+  가능.
+  (당시 추가한 gtest 2개는 옛 폴리곤 API 를 쓰던 파일에 들어 있어
+  2026-08-26 에 파일째 삭제됐다 — 아래 "테스트 현황" 참고.)
 ### 2026-08-25 곡선 구간 미추종 수정
 
 합성 원호 폐루프(제어기가 발행 경로를 100% 따라간다고 가정, 40틱 x 10cm)로
@@ -172,25 +177,28 @@ src/local_planner_node.cpp   ROS2 wiring (구독/발행/TF/파라미터) 만 담
 범위 밖이다. 트랙 경계 폴리곤 실측 코너 반경이 0.5~0.9m 라 R=60 은 실제로
 나오는 값이다.
 
-- **토픽 예외처리**: KAU_AMET_Test 의 "Lane/Global/Object 두절" 3가지
-  대응(`plan()` docstring)이 이미 이 포트에 구조적으로 반영돼 있음을
-  이번에 확인했다 (추가 수정 불필요) — Lane 은 `lane_curve_` 가
-  `std::optional` 이라 두절 시 자연히 `nullptr` 로 전파(fuse 로직이 이미
-  global-only 로 폴백); Global Path 는 `TRANSIENT_LOCAL` QoS 로 latched
-  라 ROS 구조상 "이번 사이클만 두절"이라는 개념 자체가 성립하지 않음
-  (`planner_` 가 최초 1회 생성된 뒤로는 항상 유효); Object 는
-  `latest_obstacles_` 캐시가 새 메시지 없으면 마지막 관측을 그대로
-  유지해 `updateObstacles()` 가 매 사이클 그 캐시를 재사용한다.
+- **토픽 두절 대응** (lane-only 기준으로 갱신, 2026-08-26):
+  `/lane/center` 가 끊기면 노드가 마지막 메시지를 계속 들고 있다가
+  (`lane_center_` 캐시) 그것도 무효면 `buildBackbone` 이 `nullopt` 를
+  내고, `plan()` 은 직전 committed path 를 그대로 재발행하며 `kDegraded`
+  로 표시한다. `/perception/obstacles` 는 `latest_obstacles_` 캐시가 마지막
+  관측을 유지한다. `/odom` 이 끊기면 `odom_delta` 가 `nullopt` 라 무보정
+  으로 돌지만 **곡선에서 횡오차가 발산하므로** 노드가 5초마다 WARN 을
+  찍는다. Global Path 두절 항목은 그 입력 자체가 없어져 삭제했다.
 
 ## 인터페이스
 
-| 방향 | 토픽 | 타입 | QoS |
-|---|---|---|---|
-| 구독 | `/path/global` | `kau_msgs/KauPath` | TRANSIENT_LOCAL, RELIABLE, depth 1 |
-| 구독 | `/lane/center` | `kau_msgs/KauPath` | RELIABLE, depth 1 |
-| 구독 | `/perception/obstacles` | `kau_msgs/ObstacleCircleArray` | BEST_EFFORT, depth 1, volatile |
-| 구독 | TF `map -> base_footprint` | tf2 | — |
-| 발행 | `/path/local` | `kau_msgs/KauPath` (`source=SRC_LOCAL`) | RELIABLE, depth 1 |
+| 방향 | 토픽 | 타입 | QoS | 쓰임 |
+|---|---|---|---|---|
+| 구독 | `/lane/center` | `kau_msgs/KauPath` (base_link) | RELIABLE, depth 1 | **경로 형상의 유일한 출처.** 없으면 계획 불가 |
+| 구독 | `/lane/left` | `kau_msgs/KauPath` (base_link) | RELIABLE, depth 1 | 도로 좌 경계 (형상엔 기여 안 함) |
+| 구독 | `/lane/right` | `kau_msgs/KauPath` (base_link) | RELIABLE, depth 1 | 도로 우 경계 |
+| 구독 | `/perception/obstacles` | `kau_msgs/ObstacleCircleArray` | BEST_EFFORT, depth 1, volatile | 회피 대상 (m -> cm 변환은 노드가) |
+| 구독 | `/odom` | `nav_msgs/Odometry` | BEST_EFFORT, depth 1 | **절대 위치가 아니라** 두 틱 사이 상대 변위만 |
+| 발행 | `/path/local` | `kau_msgs/KauPath` (`source=SRC_LOCAL`) | RELIABLE, depth 1 | base_footprint, plan_hz |
+| 발행 | `/viz/path/local` | `nav_msgs/Path` | RELIABLE, depth 1 | RViz 용 폴리라인 (cm -> m) |
+
+TF 를 전혀 안 본다. map / global path / localization 없이 돈다.
 
 파라미터는 `config/local_planner.yaml` 하나로 관리한다. 비용 가중치
 (`w_*`)는 이 파일만 바꾸면 재빌드 없이 바로 반영된다.
@@ -204,14 +212,18 @@ src/local_planner_node.cpp   ROS2 wiring (구독/발행/TF/파라미터) 만 담
 
 ## 알려진 제약 (후속 확인 필요)
 
-- `/path/global`, `/lane/center` 가 항상 `map` frame 으로 온다고 가정한다.
-  Lane Detection 이 localization 상실로 `base_link` 로 강등하는 경우의
-  frame 변환(§7.1, 제어점에 강체변환)은 아직 구현하지 않았다.
-- `/steering` 의 부호 규약(좌회전 +)이 `kau_control`/`pure_pursuit` 과
-  일치하는지 실측 확인 필요.
-- `amet_2026_track.yaml` 좌표는 Gazebo world 프레임(m)이라 `map` 으로
-  변환한다 (`sim_to_map_*` 파라미터, `kau_global_path` 확인값 재사용).
-  회전(`rot_deg != 0`)은 아직 미구현.
+- **`/lane/*` 가 `base_link` 로 온다고 가정한다** (frame 검사를 안 한다).
+  `kau_lane_detection` 의 `path_frame_id` 기본값이 `"map"` 이므로 그쪽이
+  잘못 설정되면 절대좌표를 자차 상대좌표로 읽는다. 하류의
+  `kau_path_arbiter` 는 이 경우를 거부하지만 이 노드는 아직 안 막는다.
+- **`/steering` 의 부호 규약**(좌회전 +)이 `kau_control`/`pure_pursuit` 과
+  일치하는지 실측 확인 필요. 실차 전 필수 확인 항목.
+- **R=60cm 코너를 못 넘는다** (위 표 참고). corridor knot 3 개로는 172°
+  회전 형상을 표현하지 못한다. 트랙 경계 실측 코너가 0.5~0.9m 라 실제로
+  나오는 값이다.
+- **`kCommittedHorizonCm`(52.422, stage-1) 과 `validated_horizon_cm`
+  (yaml, stage-2) 이 같은 개념을 다른 값으로 쓴다.** 통합하면 동작이
+  바뀌므로 계측 후에 손댈 것.
 
 ## KAU_AMET_Test 세션에서 확정한 튜닝값 (config/local_planner.yaml 참고)
 
@@ -223,10 +235,11 @@ src/local_planner_node.cpp   ROS2 wiring (구독/발행/TF/파라미터) 만 담
   놓였다. 합성 원호 폐루프 실측에서 180 이 전 R 구간 유일한 40/40 이다.
   190 이상은 R=70cm 코너에서 40/40 → 14/40 으로 절벽처럼 무너진다.
   자세한 표는 `config/local_planner.yaml` 의 `l_plan` 주석 참고.
-- `preview=450`: `l_plan+preview=750cm` 총 예고거리. 스윕 결과 이 근방이
-  최적, 600 이상은 오히려 진짜 물리적 min_clear 가 나빠짐.
-- `w_lane=1.0`: heading jitter 원인으로 의심했으나 0~1.0 스윕해도 결과
-  불변 확인 (원인 아님).
+- `preview` (450): **2026-08-26 삭제.** backbone 이 정확히 `l_plan` 에서
+  끝나므로 "종점 너머 preview 구간" 에 드는 장애물이 구조적으로 존재할 수
+  없어, `previewClear` 가 항상 상한값만 돌려주고 있었다 (열린 곡선의
+  `deltaS(s0+l_plan, station_s) <= 0`). global path(임의 길이)를 참조로
+  쓰던 시절의 값이다.
 - `w_continuity=10.0`: switching 감소와 안전이 동시에 최적인 지점. 20
   이상부터 회피 반응이 지연되어 안전이 악화된다 (실측).
 - `_least_violation`(degraded 최후수단)은 obstacle_violation 최소인
@@ -241,12 +254,55 @@ src/local_planner_node.cpp   ROS2 wiring (구독/발행/TF/파라미터) 만 담
 
 ```bash
 colcon build --packages-select kau_local_path_planner_lane
-ros2 launch kau_local_path_planner_lane local_planner.launch.py
+ros2 launch kau_local_path_planner_lane local_planner.launch.py use_sim_time:=false
+```
 
-# 단독 검증 (팀 다른 노드 없이)
-ros2 run tf2_ros static_transform_publisher 0 0 0 0 0 0 map base_footprint
-ros2 run kau_local_path_planner_lane fake_upstream.py --shape circle --radius 300
+### 단독 검증 (팀 다른 노드 없이)
+
+`fake_upstream.py` 가 노드가 실제로 구독하는 5 개 토픽을 전부 낸다 --
+`/lane/center`,`/lane/left`,`/lane/right`,`/perception/obstacles`,`/odom`.
+TF 를 안 쓰므로 `static_transform_publisher` 는 필요 없다.
+
+```bash
+# R=100cm 코너를 0.5m/s 로 도는 상황 + 앞 120cm 에 콘 하나
+ros2 run kau_local_path_planner_lane fake_upstream.py \
+    --shape circle --radius 100 --obstacle 1.2,0.0
+
+ros2 launch kau_local_path_planner_lane local_planner.launch.py use_sim_time:=false
 ros2 run kau_local_path_planner_lane rejection_logger.py
+```
 
+주요 인자: `--shape straight`, `--radius`(+ 가 좌회전), `--speed`,
+`--observed`(관측 길이, 기본 168), `--half-width`(노면 반폭, 기본 35),
+`--no-edges`(한쪽 edge 폴백 경로 확인).
+
+로그 한 줄에서 봐야 할 것:
+
+```
+plan st=0 d=+0.5 k0=+0.01000 kmax=0.01221 obs=+999.0 wheels_on=4
+     road_full=+22.7 road_cmt=+23.1 e=0.1 a=0.00 vl=55 alive=6 13.2ms
+     │       │      │            │                              │
+     │       │      │            └ 채택 경로 최대 곡률           └ 계산 시간
+     │       │      └ 현재 곡률. R=100 코너면 0.01 이어야 한다.
+     │       │        코너인데 0 이면 odom 이 안 붙은 것이다.
+     │       └ 선택된 횡오프셋 [cm]
+     └ 0=ok  1=degraded  2=no_feasible  3=degenerate
+```
+
+`odom(...) 수신 없음` WARN 이 보이면 다른 건 볼 것도 없다 -- 그 상태로는
+코너에서 횡오차가 발산한다.
+
+### 테스트 현황
+
+```bash
 colcon test --packages-select kau_local_path_planner_lane
 ```
+
+활성 gtest 는 2 개뿐이다 (`test_boundary_checker_lane`, `test_lane_backbone`).
+둘 다 실제로 겪은 회귀를 잡아 두려고 만든 것이다 -- 도로 이탈 판정이 통째로
+무력했던 건, 그리고 등곡률 외삽이 호길이를 현 길이로 쓰던 건.
+
+2026-08-26 에 옛 패키지에서 복사해 온 gtest 5 개(42 TEST)를 삭제했다.
+lane-only 재설계 후 **컴파일조차 안 되는 상태로 꺼져 있었고**, 그러면서
+"테스트가 있다" 는 착시만 만들었다. 무커버리지 구간은 `CMakeLists.txt` 의
+`BUILD_TESTING` 블록 주석에 적어 뒀다.

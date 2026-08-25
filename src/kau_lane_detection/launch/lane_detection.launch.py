@@ -143,10 +143,15 @@ def lane_detection_node(context, *unused):
         if raw:
             overrides[param] = float(raw)
 
-    # 플랫폼 오버레이. config/lane_detection.yaml 의 BEV 행 좌표는
-    # 시뮬 카메라(cy=180.000) 기준이라 실차(cy=169.603)에서는 지평선이
-    # 10.4 px 어긋난다. platform:=real 이면 그 세 값만 덮어쓴다.
-    # ROS 2 는 parameters 리스트 뒤쪽이 앞쪽을 이긴다.
+    # 플랫폼 오버레이.
+    #
+    # 2026-08-25 부터 BEV 행 좌표는 시뮬/실차가 같은 값을 쓴다
+    # (config/lane_detection.yaml 하나가 유일한 출처). 그래서
+    # lane_detection_real.yaml 은 없앴고, platform:=real 을 줘도
+    # 덮어쓸 것이 없다 — 없으면 경고만 내고 그대로 간다.
+    #
+    # 오버레이가 필요해지면 platform_overrides/lane_detection_<name>.yaml
+    # 을 두면 자동으로 얹힌다. ROS 2 는 리스트 뒤쪽이 앞쪽을 이긴다.
     params = [LaunchConfiguration('params_file')]
 
     platform = LaunchConfiguration('platform').perform(context)
@@ -158,12 +163,13 @@ def lane_detection_node(context, *unused):
             f'lane_detection_{platform}.yaml'
         )
 
-        if not overlay.is_file():
-            raise RuntimeError(
-                f"platform:={platform} 에 해당하는 오버레이가 없다: {overlay}"
+        if overlay.is_file():
+            params.append(str(overlay))
+        else:
+            print(
+                f"[lane_detection.launch] platform:={platform} 오버레이가 "
+                f"없다. config/lane_detection.yaml 값을 그대로 쓴다."
             )
-
-        params.append(str(overlay))
 
     params.append(overrides)
 
@@ -211,9 +217,9 @@ def generate_launch_description():
             'platform',
             default_value='sim',
             description=(
-                'sim | real. real 이면 platform_overrides/'
-                'lane_detection_real.yaml 로 BEV 행 좌표를 덮어쓴다 '
-                '(실차 cy 169.603 기준)'
+                'sim | real. 현재 두 플랫폼이 같은 BEV 값을 쓰므로 '
+                '차이가 없다. platform_overrides/lane_detection_<name>.yaml '
+                '을 두면 그때부터 얹힌다.'
             ),
         ),
 

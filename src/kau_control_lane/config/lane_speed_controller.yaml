@@ -61,7 +61,7 @@
       #          look_k = look_max / v_max
       # look_max 는 valid_length(80 cm 안팎) 를 넘겨봐야 볼 것이 없다.
       look_min_cm: 20.0
-      look_max_cm: 80.0
+      look_max_cm: 50.0
       min_span_cm: 20.0
 
       # v_min 이 나오는 곡률 = margin * kappa_max.

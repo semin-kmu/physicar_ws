@@ -216,14 +216,15 @@ Candidate CandidateGenerator::candidate(
         return c;
     }
 
+    // 2026-08-26: `previewClear`(l_plan 종점 너머 장애물 예고) 제거. backbone
+    // 이 정확히 l_plan 에서 끝나므로 열린 곡선의 deltaS(s0+l_plan, station_s)
+    // 가 항상 <= 0 이었다 -- preview 구간에 드는 장애물이 구조적으로 존재할
+    // 수 없어 항상 clear_cap 을 반환했다. global path(임의 길이)를 참조로
+    // 쓰던 시절의 항이다.
     const double d_final = offsets.back();
-    const double preview = previewClear(
-        *global_path_, stations_, d_final, kEndRatio, s0, params_.l_plan,
-        params_.preview, body_radius_cm_);
-    const double combined_clear = std::min(clear, preview);
     double c_cost = cost(
         params_, kappa_max_vehicle_, *global_path_, kappa_lim_, s0, d_final,
-        peak, bound, combined_clear, cv, previous_path,
+        peak, bound, clear, cv, previous_path,
         road.off_integral_cm / params_.l_plan);
     if (prediction_violation)
     {
