@@ -62,6 +62,7 @@ install(TARGETS
 install(PROGRAMS
   scripts/lane_viewer.py
   scripts/hls_tuner.py
+  scripts/hls_snapshot_saver.py
   scripts/lane_failure_logger.py
   scripts/set_camera_info.py
   DESTINATION lib/${PROJECT_NAME}

@@ -710,7 +710,7 @@ KauLaneDetectionNode::KauLaneDetectionNode()
     path_frame_id_ =
         this->declare_parameter<std::string>(
             "path_frame_id",
-            "map"
+            "base_link"
         );
 
 
