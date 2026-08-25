@@ -85,8 +85,28 @@ lane_laser_object_detector:
     # measured cluster geometry. No safety inflation is applied here; vehicle
     # size and margin stay with Local Path Planning.
     #
-    # [m] Half of the 0.18 x 0.18 m competition cone base footprint.
-    nominal_cone_radius_m: 0.09
+    # [m] Circumscribed-circle radius of the cone's SQUARE BASE.
+    #
+    # The physical traffic cone stands about 0.40 m tall on a square base of
+    # about 0.20 x 0.20 m. The vehicle has to clear the whole base, not just
+    # the part the LiDAR happened to graze, so the published circle is the
+    # smallest circle that contains that square:
+    #
+    #   diagonal             = 0.20 * sqrt(2) = 0.282843 m
+    #   circumscribed radius = diagonal / 2   = 0.141421 m
+    #
+    # This is NOT derived from the cone's height (0.40 m plays no part in a
+    # planar obstacle radius). It is the planar physical boundary circle of
+    # the 0.20 m square base.
+    #
+    # Still no safety inflation: Local Path Planning adds the vehicle
+    # footprint and obs_margin on top, so the real avoidance clearance is
+    # larger than this radius.
+    #
+    # Different purpose from visible_slice_radius_m below: that one moves the
+    # measured surface point onto the cone axis, this one is the size of the
+    # circle that gets published.
+    nominal_cone_radius_m: 0.141421
     # [m] Radius of the cone cross-section visible at the LiDAR mounting
     # height. The closest measured point is pushed away from the sensor by this
     # amount to recover a provisional cone axis centre.
