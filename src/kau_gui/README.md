@@ -1,6 +1,6 @@
 # kau_gui
 
-주행 디버깅 GUI. **map + 추종오차 플롯을 한 화면에.**
+주행 디버깅 GUI. **노드 상태 + map + 추종오차 플롯을 한 화면에.**
 
 화면 규약은 `KAU_AMET_Test/src/full_simulation.py` 의 `show_realtime` 과 같다.
 시뮬과 실차를 나란히 놓고 보는 일이 많으므로 **같은 색이 같은 것을 가리킨다.**
@@ -14,7 +14,9 @@
 `full_simulation.show_realtime` 과 같은 배치다.
 
 ```
-┌─────────────────┬────────────────────────────────┐
+┌──────────────────────────────────────────────────┐
+│ 노드 상태 띠 (가로 전체)                          │
+├─────────────────┬────────────────────────────────┤
 │ speed  [m/s]    │  map (rowspan 4)               │
 │ steer  [deg]    │   scan · TF · obstacle         │
 │ CTE    [cm]     │   global / local / lane        │
@@ -26,6 +28,31 @@
 시뮬과 다를 수밖에 없는 것은 하나뿐이다. 시뮬은 배치 재생이라 전체 로그를
 옅은 회색으로 미리 깔고 커서를 옮기지만 실시간에는 "미래" 가 없다. 그래서
 회색 밑그림과 커서 InfiniteLine 이 빠진다.
+
+### 노드 상태 띠
+
+셀 하나 = 노드 하나. 좌측부터 **이름 · 상태등 · Hz**.
+
+| 색 | 뜻 |
+| --- | --- |
+| 초록 | 그래프에 있고 대표 토픽이 기대 주기대로 온다 |
+| 빨강 | 노드는 살아 있는데 토픽이 끊겼다 |
+| 회색 | 그래프에 없다 (안 떴거나 죽었다) |
+
+감시 대상은 `kau_state_machine` 의 `bringup.yaml` 을 읽어 정한다 — `run.sh` 가
+띄우는 노드의 정의가 그 파일 하나뿐이라 목록을 GUI 에 복사해 두지 않는다.
+`when`(sim/real) 은 `use_sim_time` 으로 거른다.
+
+제외 대상
+
+- `wait: true` — 관문. 스스로 끝나는 게 정상이다 (`clock_gate`)
+- `ros: false` — 그래프에 이름이 없어 판정 불가 (`platform_ekf_pause`)
+
+Hz 는 `status.watch` 에 적은 대표 토픽에서 잰다. 없는 노드는 그래프 존재만으로
+판정하고 Hz 칸을 비운다 (`/map` 처럼 latched 이거나 발행이 없는 노드).
+
+`option.<이름>` 스위치 값은 supervisor 파라미터라 관측 전용인 GUI 가 물어볼 수
+없다. `status.options` 에 `run.sh` 설정과 맞춰 적는다.
 
 ### map 표시물
 
@@ -113,6 +140,10 @@ ros2 run kau_gui kau_gui --ros-args \
 | raw steer · heading err · cte | `/debug/steer` | `kau_msgs/SteerDebug` |
 
 `/odometry/filtered` 는 **존재하지 않는다.** `bringup.yaml` 이 `/odom` 으로 remap 한다.
+
+상태 띠는 위와 별개로 `status.watch` 의 대표 토픽을 하나씩 더 구독한다.
+`raw=True` 라 역직렬화하지 않고 **수신 시각만 찍는다** — 주기 계산에 메시지
+내용이 필요 없으므로 무거운 토픽이라도 비용이 붙지 않는다.
 
 ## 5. 설계 규약
 

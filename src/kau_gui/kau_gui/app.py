@@ -3,8 +3,11 @@
 화면 구성은 KAU_AMET_Test/src/full_simulation.py 의 show_realtime 을 그대로
 따른다. 시뮬과 실차를 나란히 놓고 보므로 같은 자리에 같은 것이 있어야 한다.
 
+    최상단     노드 상태 띠 (status_bar). 가로 전체
     row 0..4     왼쪽 지표 패널 5 개 / 오른쪽 map (rowspan 5)
     열 비율      95 : 125
+
+상태 띠는 실차 전용이다. 시뮬에는 감시할 프로세스가 없다.
 
 시뮬과 다를 수밖에 없는 것은 하나뿐이다. 시뮬은 배치 재생이라 전체 로그를
 옅은 회색으로 미리 깔고 커서를 옮기지만, 실시간에는 "미래" 가 없다.
@@ -26,10 +29,11 @@ import threading                     # noqa: E402
 import numpy as np                   # noqa: E402
 import pyqtgraph as pg               # noqa: E402
 import rclpy                         # noqa: E402
-from pyqtgraph.Qt import QtCore      # noqa: E402
+from pyqtgraph.Qt import QtCore, QtWidgets   # noqa: E402
 
 from . import viz                    # noqa: E402
 from .bridge import Bridge           # noqa: E402
+from .status_bar import StatusBar    # noqa: E402
 
 # full_simulation.PANELS 와 같은 구성 · 같은 순서 · 같은 라벨
 #
@@ -64,7 +68,19 @@ EMPTY = (np.empty(0), np.empty(0))
 
 def _run(bridge: Bridge, fps: float) -> None:
     viz.init("KAU AMET GUI")
+
+    # 상태 띠는 pyqtgraph 그리드 밖이다. 좌우 열 비율(95:125)과 무관하게
+    # 가로 전체를 써야 하므로 GraphicsLayoutWidget 위에 얹지 않는다.
+    root = QtWidgets.QWidget()
+    layout = QtWidgets.QVBoxLayout(root)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(0)
+
+    status = StatusBar(root)
+    layout.addWidget(status, 0)
+
     win = pg.GraphicsLayoutWidget()
+    layout.addWidget(win, 1)
 
     panels = viz.stack_plots(win, PANELS, col=0, row0=0, xlabel="t [s]")
     curves = {}
@@ -107,6 +123,8 @@ def _run(bridge: Bridge, fps: float) -> None:
         s = bridge.snapshot()
         now = s["now"]
 
+        status.set_state(s["nodes"])
+
         for name, c in curves.items():
             c.setData(*s["series"][name])
         # 패널이 setXLink 로 묶여 있으므로 하나만 잡으면 전부 따라온다.
@@ -144,15 +162,19 @@ def _run(bridge: Bridge, fps: float) -> None:
         elif k == QtCore.Qt.Key_R:
             m.autoRange()
 
-    win.setFocusPolicy(QtCore.Qt.StrongFocus)
-    win.keyPressEvent = key
+    root.setFocusPolicy(QtCore.Qt.StrongFocus)
+    root.keyPressEvent = key
     win.ci.layout.setColumnStretchFactor(0, 95)
     win.ci.layout.setColumnStretchFactor(1, 125)
 
-    timer = QtCore.QTimer(win)
+    # 첫 tick 전에 한 번 그린다. 안 그러면 창이 뜬 뒤 1/fps 동안 상태 띠가
+    # "감시 대상 없음" 으로 보여 설정이 틀린 것처럼 읽힌다.
+    update()
+
+    timer = QtCore.QTimer(root)
     timer.timeout.connect(update)
     timer.start(int(round(1000.0 / fps)))
-    viz.run(win, "KAU AMET GUI")
+    viz.run(root, "KAU AMET GUI")
 
 
 

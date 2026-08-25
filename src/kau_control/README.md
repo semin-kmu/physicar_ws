@@ -93,28 +93,41 @@ ros2 run kau_control steer_controller_node --ros-args \
 ### 경로 소스 고르기 — `path.mode`
 
 경로 소스는 셋이고 (`local` / `global` / `lane`), 쓸 소스와 그 순서는
-**yaml 의 `path.mode` 프리셋 하나**가 정한다. 프리셋에 없는 소스는 구독조차
-하지 않는다. 매 tick 프리셋 순서대로 훑어 첫 번째로 "쓸 수 있는" 것을 고른다
-— 받아뒀고 + `timeout` 안에 갱신됐고 + pose 를 얻을 수 있는 소스다.
+**`path.mode` 한 줄**이 정한다. 모드에 없는 소스는 구독조차 하지 않는다.
+매 tick 모드 순서대로 훑어 첫 번째로 "쓸 수 있는" 것을 고른다 — 받아뒀고
++ `timeout` 안에 갱신됐고 + pose 를 얻을 수 있는 소스다.
 
-| `path.mode` | 순서 | 쓰는 곳 |
+**고칠 곳은 딱 한 군데다.**
+
+| 기동 방법 | 고치는 파일 |
+|---|---|
+| `source run.sh`, `control.launch.py` | `config/path_source.yaml` 의 `path.mode` |
+| `lane_follow.launch.py` | `config/lane_follow.yaml` 맨 위 `/**:` 절의 `path.mode` |
+
+두 제어기가 **같은 파일을 함께 받는다** (`/**:` 절). 조향과 속도가 서로 다른
+경로를 보는 사고가 구조적으로 안 난다.
+
+| `path.mode` | 순서 | 용도 |
 |---|---|---|
-| `normal` | local → global → lane | 평상시 주행 (`steer_controller.yaml`, `speed_controller.yaml`) |
+| `normal` | local → global → lane | 평상시 주행 (**기본**) |
+| `local_only` | local 만 | 지역 경로만 시험 |
 | `steer_test` | global 만 | 조향 제어기 시험 |
-| `lane_only` | lane 만 | 차선 추종 단독 (`lane_follow.yaml`) |
+| `lane_only` | lane 만 | 차선 추종 단독 (`lane_follow.yaml` 기본) |
 
 ```bash
 # 조향 제어기 시험 — global 만 따라간다
 ros2 run kau_control steer_controller_node --ros-args \
+    --params-file src/kau_control/config/path_source.yaml \
     --params-file src/kau_control/config/steer_controller.yaml \
     -p path.mode:=steer_test
 ```
 
-topic · latched · timeout · pose_source 는 소스별로 yaml 에 있다
+topic · latched · timeout · pose_source 는 소스별로 같은 파일에 있다
 (`path.sources.<이름>.*`). 모르는 `mode` 이름이나 빈 `topic` 은 기동 시
 FATAL 로 걸린다 — 조용히 돌면 "왜 경로를 안 따라가지" 로 시간을 날린다.
 
-새 조합이 필요하면 `path_tracker.hpp` 의 `modes()` 에 한 줄 추가한다.
+새 조합이 필요하면 `path_tracker.hpp` 의 `modes()` 에 한 줄 추가하고 위 표에
+적는다. 표와 `modes()` 가 어긋나면 yaml 을 고치다 FATAL 을 맞는다.
 
 ### Lane Detection 으로 제어기만 검증하기 (권장 · 측위 불필요)
 
@@ -122,9 +135,9 @@ FATAL 로 걸린다 — 조용히 돌면 "왜 경로를 안 따라가지" 로 �
 `s_offset = 0` 으로 발행한다 (localization 비의존). 즉 Cartographer 없이
 제어기만 따로 검증할 수 있고, 측위 오차가 결과에 섞이지 않는다.
 
-`lane_follow.yaml` 은 `path.mode: lane_only` + `path.sources.lane.pose_source:
-identity` 라 TF 를 보지 않고 차량을 경로 프레임의 원점으로 잡는다 (후륜축만
-`rear_axle_offset` 만큼 뒤).
+`lane_follow.yaml` 은 `/**:` 절에서 `path.mode: lane_only` +
+`path.sources.lane.pose_source: identity` 라 TF 를 보지 않고 차량을 경로
+프레임의 원점으로 잡는다 (후륜축만 `rear_axle_offset` 만큼 뒤).
 
 ```bash
 # 조향만 관찰 (차는 안 움직인다). 인지까지 같이 띄운다
@@ -312,9 +325,10 @@ window 추적이 무너진다 (레퍼런스 실측: 전역 탐색 대비 불일�
 | `include/kau_control/pid.hpp` | 속도 PID (적분 clamp) |
 | `src/speed_controller_node.cpp` | 속도 노드. 곡률 -> 목표속도 -> PID -> `/speed` |
 | `src/steer_controller_node.cpp` | 조향 노드. Pure Pursuit -> `/steering` |
+| `config/path_source.yaml` | **경로 소스 (두 노드 공용).** `path.mode` 가 여기 |
 | `config/speed_controller.yaml` | 속도 튜닝값 |
 | `config/steer_controller.yaml` | 조향 튜닝값 |
-| `config/lane_follow.yaml` | 차선 추종 실험용 (두 노드 섹션) |
+| `config/lane_follow.yaml` | 차선 추종 실험용 (`/**:` 경로 절 + 두 노드 섹션) |
 | `launch/control.launch.py` | 두 노드 기동 |
 | `launch/lane_follow.launch.py` | 인지 + 두 노드 기동 |
 | `scripts/fake_path.py` | 테스트용 경로 발행자 (**임시**) |

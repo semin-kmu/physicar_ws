@@ -14,13 +14,33 @@
 # 단위: 길이 cm / 각도 deg / 속도 m/s
 # ============================================================
 
-steer_controller:
+# ============================================================
+# 경로 입력 — 두 제어기 공용
+#
+# ★ 모드를 바꾸려면 아래 path.mode **한 줄만** 고친다.
+#
+# `/**` 이라 이 파일을 받는 두 노드에 같은 값이 들어간다 -- 조향과 속도가
+# 서로 다른 경로를 보는 사고를 애초에 막는다.
+#
+# 모드는 이 넷뿐이다 (path_tracker.hpp 의 modes()). 여기 없는 이름을
+# 적으면 기동 시 FATAL 로 걸린다.
+#
+#   normal      local -> global -> lane   평상시 주행
+#   local_only  local 만                  지역 경로만 시험
+#   steer_test  global 만                 조향 제어기 시험
+#   lane_only   lane 만                   차선 추종 단독
+#
+# 이 파일은 lane_follow.launch.py 전용이다. 상시 주행 스택(run.sh)이
+# 쓰는 것은 config/path_source.yaml 쪽이다.
+# ============================================================
+
+/**:
   ros__parameters:
 
-    # --- 경로 입력 ---
     path:
-      # lane 하나만 쓴다. global 이 끼어들 자리 자체를 없앤다 --
-      # 측위 없이 도는 실험 중에 전역 경로가 섞이면 원인을 못 가린다.
+      # 상시 주행과 같은 우선순위로 둔다. lane_follow.launch.py 는
+      # local · global 발행자를 띄우지 않으므로 실제로는 lane 으로 내려간다.
+      # 그 둘이 끼어들 여지 자체를 없애려면 lane_only 로 바꾼다.
       mode: "normal"
 
       sources:
@@ -42,6 +62,14 @@ steer_controller:
           # ★ lane detection 이 발행하는 프레임과 반드시 같아야 한다
           #   (kau_lane_detection 의 path_frame_id).
           frame: "base_link"
+
+
+steer_controller:
+  ros__parameters:
+
+    # --- 경로 입력 ---
+    # ★ 경로 소스 설정은 이 파일 맨 위의 `/**:` 절 한 곳이다.
+    #   모드를 바꾸려면 거기 path.mode 한 줄만 고친다.
 
     # --- 인터페이스 (소스 공통) ---
     map_frame: "map"
@@ -86,33 +114,9 @@ steer_controller:
 speed_controller:
   ros__parameters:
 
-    # ★ 위 steer_controller 의 path 절과 같은 값이어야 한다.
-    #   두 노드가 서로 다른 경로를 따라가면 조향과 속도가 어긋난다.
     # --- 경로 입력 ---
-    path:
-      # lane 하나만 쓴다. global 이 끼어들 자리 자체를 없앤다 --
-      # 측위 없이 도는 실험 중에 전역 경로가 섞이면 원인을 못 가린다.
-      mode: "normal"
-
-      sources:
-        lane:
-          topic: "/lane/center"
-          latched: false
-
-          # identity 모드에서는 TF 를 안 보므로 tf_timeout 이 놀고,
-          # 경로 갱신이 유일한 생존 신호가 된다.
-          #
-          # lane detection 은 14 Hz 로 돌지만 게이트에 걸린 프레임은
-          # 발행하지 않는다. 점선 공백 한두 프레임은 넘기고, 그보다
-          # 오래 끊기면 세운다. 0.5 s = 최대 7 프레임 연속 실패.
-          timeout: 0.5
-
-          # ★ TF 를 보지 않고 차량을 경로 프레임의 원점으로 둔다.
-          pose_source: "identity"
-
-          # ★ lane detection 이 발행하는 프레임과 반드시 같아야 한다
-          #   (kau_lane_detection 의 path_frame_id).
-          frame: "base_link"
+    # ★ 경로 소스 설정은 이 파일 맨 위의 `/**:` 절 한 곳이다.
+    #   모드를 바꾸려면 거기 path.mode 한 줄만 고친다.
 
     # --- 인터페이스 (소스 공통) ---
     map_frame: "map"

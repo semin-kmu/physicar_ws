@@ -56,3 +56,46 @@
       odom: "/odom"                 # measured speed. /odometry/filtered 아님
       steering: "/steering"         # commanded steer [rad]
       steer_debug: "/debug/steer"   # raw steer · Ld · heading err · cte
+
+    # --- 노드 상태 (최상단 띠) ---
+    #
+    # 감시 대상 목록은 여기 없다. kau_state_machine 의 bringup.yaml 을 읽어
+    # 그대로 쓴다 -- run.sh 가 띄우는 노드의 정의가 그 파일 하나뿐이라
+    # 목록을 여기 복사해 두면 manifest 가 바뀔 때마다 어긋난다.
+    #
+    # 제외: wait(관문, 스스로 끝난다) · ros=false(그래프에 이름이 없다)
+    status:
+      enabled: true
+      bringup_yaml: ""              # 비우면 kau_state_machine share/config/bringup.yaml
+
+      stale_ratio: 3.0              # 마지막 수신 > 기대주기 x 이 값 -> 빨강
+      # stale 판정 하한. 50 Hz 토픽은 3 배가 60 ms 라 지터만으로도 빨간불이
+      # 깜빡여 정작 진짜 고장이 묻힌다.
+      min_stale_s: 0.3
+
+      # bringup.yaml 의 option.<이름> 스위치. supervisor 파라미터라 관측 전용인
+      # GUI 가 물어볼 수 없다 (docs/09 section 2). run.sh 설정과 맞출 것.
+      options:
+        lane_viewer: true           # run.sh 의 KAU_LANE_VIEWER
+
+      # 주기를 잴 대표 토픽. "<노드> | <topic> | <타입> | <기대 Hz>"
+      # 여기 없는 노드는 그래프 존재만으로 판정하고 Hz 칸을 비운다
+      #   map_amcl_lifecycle_manager  발행 토픽 없음
+      #   map_server                  /map 은 latched
+      #   state_machine               현재 스텁, 발행 없음
+      #   camera_info_bridge          /camera/camera_info 는 kau_lane_detection_node 로 대표
+      #   kau_lane_detection_viewer   웹 뷰어(Flask). ROS 발행 없음
+      #   amcl                        /amcl_pose 는 필터가 갱신될 때만 나간다.
+      #                               정차 중에는 안 오므로 주기로 재면 오보다
+      #                               (nomotion_updater 는 bringup 대상이 아니다)
+      watch:
+        - "kau_ekf                 | /odom                 | nav_msgs/msg/Odometry            | 30"
+        - "laser_scan_clusterer    | /perception/obstacles | kau_msgs/msg/ObstacleCircleArray | 10"
+        - "start_signal_detector   | /perception/start_permission | std_msgs/msg/Bool         | 10"
+        - "kau_lane_detection_node | /lane/center          | kau_msgs/msg/KauPath             | 14"
+        # ★ global_path_publisher 를 rate>0 (기본 1 Hz) 으로 띄울 것.
+        #   rate:=0 (1 회 발행) 이면 정상인데도 빨간불이 켜진다
+        - "global_path_publisher   | /path/global          | kau_msgs/msg/KauPath             | 1"
+        - "local_planner_node      | /path/local           | kau_msgs/msg/KauPath             | 10"
+        - "steer_controller        | /steering             | std_msgs/msg/Float64             | 50"
+        - "speed_controller        | /speed                | std_msgs/msg/Float64             | 50"

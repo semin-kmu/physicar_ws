@@ -238,7 +238,11 @@ stages:
       - name: steer_controller
         package: kau_control
         executable: steer_controller_node
-        param_files: ["kau_control:config/steer_controller.yaml"]
+        # path_source.yaml 이 경로 소스(어떤 경로를 따라갈지)를 갖는다.
+        # 두 제어기가 같은 파일을 받아야 조향과 속도가 갈리지 않는다.
+        param_files:
+          - "kau_control:config/path_source.yaml"
+          - "kau_control:config/steer_controller.yaml"
 
   # 단계 9 · 구동. 마지막에 연다
   - id: 9
@@ -247,4 +251,7 @@ stages:
       - name: speed_controller
         package: kau_control
         executable: speed_controller_node
-        param_files: ["kau_control:config/speed_controller.yaml"]
+        # 단계 8 의 steer_controller 와 같은 path_source.yaml 을 받는다.
+        param_files:
+          - "kau_control:config/path_source.yaml"
+          - "kau_control:config/speed_controller.yaml"

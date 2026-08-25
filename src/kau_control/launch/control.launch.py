@@ -41,6 +41,10 @@ def generate_launch_description():
     speed_params = LaunchConfiguration('speed_params_file')
     steer_params = LaunchConfiguration('steer_params_file')
 
+    # 경로 소스는 두 노드 공용이다. 같은 파일을 둘 다 받아야 조향과 속도가
+    # 서로 다른 경로를 보는 사고가 안 난다.
+    path_params = LaunchConfiguration('path_params_file')
+
     common = ['--ros-args', '--log-level', log_level]
 
     return LaunchDescription([
@@ -69,13 +73,21 @@ def generate_launch_description():
             description='조향 제어 parameter yaml',
         ),
 
+        DeclareLaunchArgument(
+            'path_params_file',
+            default_value=config('path_source.yaml'),
+            description='경로 소스 parameter yaml (두 노드 공용). '
+                        '모드는 그 파일의 path.mode 한 줄이다',
+        ),
+
         Node(
             package=PACKAGE,
             executable='speed_controller_node',
             name='speed_controller',
             output='screen',
             arguments=common,
-            parameters=[speed_params, {'use_sim_time': use_sim_time}],
+            parameters=[path_params, speed_params,
+                        {'use_sim_time': use_sim_time}],
         ),
 
         Node(
@@ -84,6 +96,7 @@ def generate_launch_description():
             name='steer_controller',
             output='screen',
             arguments=common,
-            parameters=[steer_params, {'use_sim_time': use_sim_time}],
+            parameters=[path_params, steer_params,
+                        {'use_sim_time': use_sim_time}],
         ),
     ])

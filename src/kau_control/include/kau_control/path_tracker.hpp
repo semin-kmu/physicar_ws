@@ -15,7 +15,8 @@
 //     lane    기본 /lane/center
 //
 // 쓸 소스와 그 순서는 path.mode 프리셋이 정한다 (modes() 참고).
-//     normal      local -> global -> lane   평상시 주행
+//     normal      local -> global -> lane   평상시 주행 (기본)
+//     local_only  local 만                  지역 경로만 시험
 //     steer_test  global 만                 조향 제어기 시험
 //     lane_only   lane 만                   차선 추종 단독
 //
@@ -438,7 +439,8 @@ private:
     static const std::map<std::string, std::vector<int>> & modes()
     {
         static const std::map<std::string, std::vector<int>> M = {
-            {"normal",     {LOCAL, GLOBAL, LANE}},   // 평상시 주행
+            {"normal",     {LOCAL, GLOBAL, LANE}},   // 평상시 주행 (기본)
+            {"local_only", {LOCAL}},                 // 지역 경로만 시험
             {"steer_test", {GLOBAL}},                // 조향 제어기 시험
             {"lane_only",  {LANE}},                  // 차선 추종 단독
         };

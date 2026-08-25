@@ -11,6 +11,12 @@
        scripts/setup_venv.sh 참고. rosdep 대상이 아니므로 적지 않는다. -->
   <exec_depend>rclpy</exec_depend>
   <exec_depend>ament_index_python</exec_depend>
+  <!-- 상태 띠: 감시 토픽 타입을 문자열로 받아 클래스로 푼다 (get_message) -->
+  <exec_depend>rosidl_runtime_py</exec_depend>
+  <!-- 상태 띠: share/config/bringup.yaml 을 읽어 감시 대상을 정한다.
+       코드를 import 하지는 않는다 (경로만 쓴다) -->
+  <exec_depend>kau_state_machine</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
   <exec_depend>python3-numpy</exec_depend>
   <exec_depend>python3-pyqt5</exec_depend>
   <exec_depend>tf2_ros_py</exec_depend>

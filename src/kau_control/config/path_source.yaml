@@ -1,0 +1,72 @@
+# ============================================================
+# 경로 입력 — steer_controller · speed_controller 공용
+#
+# ★ 모드를 바꾸려면 아래 path.mode **한 줄만** 고친다.
+#
+# 이 파일이 경로 소스 설정의 유일한 주인이다. `/**` 이라 이 파일을
+# 받는 모든 노드에 같은 값이 들어간다 -- 두 제어기가 서로 다른 경로를
+# 따라가면 조향과 속도가 어긋나므로 애초에 갈릴 수 없게 한 것이다.
+#
+# 읽는 곳
+#   run.sh   kau_state_machine/config/bringup.yaml 의 단계 8·9
+#   launch   kau_control/launch/control.launch.py
+#
+# lane_follow.launch.py 는 이 파일을 쓰지 않는다. 차선 추종 단독 실험이라
+# 자기 config/lane_follow.yaml 안에 자기 path 절을 따로 갖고 있다.
+# ============================================================
+
+/**:
+  ros__parameters:
+
+    path:
+      # --------------------------------------------------------
+      # 모드 — 있는 것은 이 넷뿐이다 (path_tracker.hpp 의 modes()).
+      # 여기 없는 이름을 적으면 기동 시 FATAL 로 걸린다.
+      #
+      #   normal      local -> global -> lane
+      #               평상시 주행. local 을 못 쓰면 global, 그것도 못 쓰면
+      #               lane 으로 내려간다
+      #
+      #   local_only  local 만
+      #               지역 경로만 시험. local 이 끊기면 그대로 선다
+      #
+      #   steer_test  global 만
+      #               조향 제어기 시험. 인지·지역경로 없이 전역 경로만 본다
+      #
+      #   lane_only   lane 만
+      #               차선 추종 단독. 측위 없이 도는 실험용
+      #
+      # "쓸 수 있다" = 경로를 받아뒀고 + 아래 timeout 안에 갱신됐고
+      #               + pose 를 얻을 수 있다 (pose_source 참고).
+      # 모드에 없는 소스는 구독조차 하지 않는다.
+      # --------------------------------------------------------
+      mode: "normal"
+
+      sources:
+        local:
+          topic: "/path/local"          # kau_msgs/KauPath
+          latched: false                # 발행측 durability 와 맞출 것
+          timeout: 1.0                  # s, 넘으면 다음 소스로
+          pose_source: "tf"             # tf | identity
+          frame: ""                     # identity 일 때만. 비우면 base_frame
+
+        global:
+          topic: "/path/global"
+          latched: true
+          # global 발행자가 죽으면 이 시간 뒤 다음 소스로 내려간다.
+          # ★ global_path 를 반드시 rate>0 (기본 1 Hz) 로 띄울 것.
+          #   rate:=0 (1 회 발행) 이면 정상 상태에서도 이 시간 뒤 만료된다.
+          timeout: 3.0                  # s, 0 이면 만료 없음
+          pose_source: "tf"
+          frame: ""
+
+        lane:
+          topic: "/lane/center"
+          latched: false
+          timeout: 0.5                  # s, lane 은 14 Hz 라 짧게
+          # lane 도 map 프레임으로 받는다. kau_lane_detection 이
+          # path_frame_id=map 으로 발행하고 있어 그쪽 설정을 그대로 쓴다.
+          # 대신 lane 도 TF 를 타므로 측위가 끊기면 세 소스가 함께 정지한다
+          # (의도된 선택).
+          pose_source: "tf"
+          frame: "base_link"            # pose_source=identity 일 때만 쓰임

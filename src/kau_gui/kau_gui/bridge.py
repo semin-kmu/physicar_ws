@@ -28,12 +28,15 @@ from nav_msgs.msg import Odometry, Path
 from rclpy.node import Node
 from rclpy.qos import (DurabilityPolicy, HistoryPolicy, QoSProfile,
                        ReliabilityPolicy)
+from rosidl_runtime_py.utilities import get_message
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Float64
 from tf2_ros import Buffer, TransformListener
 from visualization_msgs.msg import Marker, MarkerArray
 
 from kau_msgs.msg import SteerDebug
+
+from . import manifest
 
 CM_PER_M = 100.0
 RAD2DEG = 180.0 / math.pi
@@ -104,6 +107,32 @@ class Latest:
         return None if self.stamp is None else (now - self.stamp)
 
 
+class RateMeter:
+    """도착 시각만 찍어 주기를 낸다. 메시지 내용은 보지 않는다."""
+
+    N = 30
+
+    __slots__ = ("_t",)
+
+    def __init__(self):
+        self._t = deque(maxlen=self.N)
+
+    def mark(self, t):
+        self._t.append(t)
+
+    @property
+    def last(self):
+        return self._t[-1] if self._t else None
+
+    @property
+    def hz(self):
+        # 표본 2 개 미만은 '모름'. 0 Hz 와 구분해야 한다.
+        if len(self._t) < 2:
+            return None
+        span = self._t[-1] - self._t[0]
+        return (len(self._t) - 1) / span if span > 1e-6 else None
+
+
 class Bridge(Node):
 
     def __init__(self):
@@ -138,16 +167,26 @@ class Bridge(Node):
 
         self.tf_poses = [None, None, None]      # map / odom / base_link
 
+        # 최상단 상태 띠. [(이름, ok|stale|absent, hz|None)]
+        #
+        # 첫 그래프 조회(1 초 뒤) 전까지도 목록은 보여야 한다. 비워 두면
+        # 그 1 초 동안 "감시 대상 없음" 이 떠서 설정이 틀린 것처럼 보인다.
+        self.nodes = [(n, "absent", None) for n in self.watch_names]
+        self._rates = {}                        # topic -> RateMeter
+
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
         self._make_display_subs()
+        self._make_status_subs()
 
         self.create_timer(0.05, self._on_tf)          # 20 Hz
+        if self.watch_names:
+            self.create_timer(1.0, self._on_graph)    # 1 Hz
 
         self.get_logger().info(
             f"[kau_gui] 관측 전용 기동. render={self.render_hz:g} Hz "
-            f"history={self.history_s:g} s")
+            f"history={self.history_s:g} s 감시노드={len(self.watch_names)}")
 
     # ------------------------------------------------------------------
     # 파라미터
@@ -190,6 +229,140 @@ class Bridge(Node):
         self.scan_far_m = d("scan.far_m", 12.0).value
         self.scan_size = d("scan.point_size", 3.0).value
 
+        self._declare_status()
+
+    # ------------------------------------------------------------------
+    # 노드 상태 (최상단 띠)
+    # ------------------------------------------------------------------
+
+    def _declare_status(self):
+        """감시 대상은 bringup.yaml 이 정한다. GUI 는 목록을 갖지 않는다."""
+        d = self.declare_parameter
+
+        self.stale_ratio = d("status.stale_ratio", 3.0).value
+        self.min_stale_s = d("status.min_stale_s", 0.3).value
+
+        # 노드 -> (대표 topic, 타입, 기대 Hz). 없는 노드는 그래프 존재만으로
+        # 판정하고 Hz 칸을 비운다.
+        #
+        # 기본값이 빈 배열이 아니라 [""] 인 이유: rclpy 는 기본값에서 타입을
+        # 추론하는데 빈 배열은 BYTE_ARRAY 로 잡힌다 (all([]) 이 참이라 첫
+        # 분기에 걸린다). 그러면 yaml 의 문자열 배열과 타입이 안 맞아
+        # InvalidParameterTypeException 으로 GUI 가 기동하지 못한다.
+        self.watch_spec = self._parse_watch(
+            d("status.watch", [""]).value or [])
+
+        self.watch_names = []
+        if not d("status.enabled", True).value:
+            return
+
+        path = (d("status.bringup_yaml", "").value
+                or manifest.default_path())
+        if not path:
+            self.get_logger().warn(
+                "[kau_gui] bringup.yaml 을 못 찾았다. 상태 띠는 빈 채로 뜬다")
+            return
+
+        try:
+            data = manifest.load(path)
+            # manifest 가 쓰는 스위치마다 파라미터를 연다. 기본은 켬이라
+            # 아무것도 안 주면 supervisor 기본 기동과 같은 목록이 나온다.
+            options = {name: d(f"status.options.{name}", True).value
+                       for name in manifest.option_names(data)}
+            self.watch_names = manifest.watch_names(
+                data, bool(self.get_parameter("use_sim_time").value), options)
+        except Exception as e:      # 오탈자 · 스키마 변경 등
+            # 상태 띠 하나 때문에 GUI 전체를 죽이지 않는다.
+            self.get_logger().error(
+                f"[kau_gui] bringup.yaml 해석 실패 ({path}): {e}")
+            return
+
+        unknown = sorted(set(self.watch_spec) - set(self.watch_names))
+        if unknown:
+            # 이름이 틀리면 그 노드는 영영 Hz 가 안 나온다. 조용히 두면
+            # "왜 저것만 Hz 가 없지" 로 시간을 날린다.
+            self.get_logger().warn(
+                f"[kau_gui] status.watch 에 manifest 에 없는 노드: {unknown}")
+
+    def _parse_watch(self, lines) -> dict:
+        """"<노드> | <topic> | <타입> | <기대 Hz>" 목록 -> dict.
+
+        ROS 파라미터 배열은 원소 타입이 같아야 해서 한 줄 문자열로 받는다.
+        예전처럼 names/topics/types/rates 를 평행 배열로 두면 길이가
+        어긋나는 순간 전체가 한 칸씩 밀린다.
+        """
+        out = {}
+        for line in lines:
+            if not str(line).strip():       # 기본값 [""] 의 빈 칸
+                continue
+            parts = [f.strip() for f in str(line).split("|")]
+            if len(parts) != 4:
+                self.get_logger().error(
+                    f"[kau_gui] status.watch 형식 오류 (칸 4 개여야 한다): {line!r}")
+                continue
+            name, topic, typ, rate = parts
+            try:
+                out[name] = (topic, typ, float(rate))
+            except ValueError:
+                self.get_logger().error(
+                    f"[kau_gui] status.watch 의 기대 Hz 가 수가 아니다: {line!r}")
+        return out
+
+    def _make_status_subs(self):
+        """감시 토픽마다 raw 구독 하나. 역직렬화하지 않고 수신 시각만 찍는다."""
+        for name in self.watch_names:
+            spec = self.watch_spec.get(name)
+            if spec is None:
+                continue
+            topic, typ, rate = spec
+            if not topic or not typ or rate <= 0.0 or topic in self._rates:
+                continue
+
+            self._rates[topic] = RateMeter()
+            try:
+                # rclpy 는 타입 문자열을 못 받는다. 클래스로 풀어 준다.
+                self.create_subscription(
+                    get_message(typ), topic,
+                    (lambda _m, tp=topic: self._rates[tp].mark(self._now())),
+                    observe_qos(), raw=True)
+            except Exception as e:      # 타입 이름 오타 등
+                # 감시 하나가 실패했다고 GUI 를 죽이지 않는다. 해당 노드는
+                # stale 로 남아 눈에 띈다.
+                self.get_logger().error(
+                    f"[kau_gui] 감시 구독 실패 {topic} ({typ}): {e}")
+
+    def _on_graph(self):
+        # 노드 이름공간은 쓰지 않는 것이 팀 규약이라(docs/07 section 2)
+        # 이름만 비교한다.
+        alive = {n for n, _ns in self.get_node_names_and_namespaces()}
+        t = self._now()
+
+        out = []
+        for name in self.watch_names:
+            if name not in alive:
+                out.append((name, "absent", None))
+                continue
+
+            spec = self.watch_spec.get(name)
+            if spec is None or not spec[0] or spec[2] <= 0.0:
+                # 대표 토픽이 없거나(진단 로그 전용) latched 라 주기 판정
+                # 불가. 존재만으로 정상 처리하고 Hz 칸은 비운다.
+                out.append((name, "ok", None))
+                continue
+
+            meter = self._rates.get(spec[0])
+            if meter is None or meter.last is None:
+                out.append((name, "stale", None))
+                continue
+
+            # 50 Hz 토픽은 기대주기의 3 배가 60 ms 라 지터만으로도 깜빡인다.
+            # 하한을 둔다.
+            limit = max(self.stale_ratio / spec[2], self.min_stale_s)
+            ok = (t - meter.last) <= limit
+            out.append((name, "ok" if ok else "stale", meter.hz))
+
+        with self._lock:
+            self.nodes = out
 
     def _resolve_map(self, override: str) -> str:
         if override:
@@ -383,6 +556,7 @@ class Bridge(Node):
                 "path_lane": (self.path_lane.value, self.path_lane.stamp),
                 "obstacles": (self.obstacles.value, self.obstacles.stamp),
                 "tf_poses": list(self.tf_poses),
+                "nodes": list(self.nodes),
                 "series": {
                     "speed_target": self.speed_target.arrays(),
                     "speed_real": self.speed_real.arrays(),
