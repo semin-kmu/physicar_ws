@@ -146,25 +146,34 @@ local_planner_node:
     # 다음 경로가 올 때까지 이미 앞으로 나가 있다:
     #
     #   필요 = Ld + (한 주기 이동) + LD_VALID_MARGIN_CM
-    #        = k_v*v + v/plan_hz + 5  =  70v + 5   [cm, v in m/s]
+    #        = max(k_v*v, ld_min) + 100*v/plan_hz + 5   [cm, v in m/s]
     #
-    #     v 0.6 ->  47cm     v 1.0 ->  75cm
-    #     v 1.5 -> 110cm     v 2.0 -> 145cm   <- speed_controller v_max
+    # 저속 세팅(v_max 0.5)에서는 k_v*v(25cm) < ld_min(30cm) 이라 Ld 가 30 에
+    # 고정된다. 따라서
     #
-    # 예전 방식(kCommittedHorizonCm 52.422)은 세그먼트 단위로 잘라서 실효
-    # 75cm 였다 (세그먼트가 75/112.5/112.5cm 라 75 아니면 187.5 둘 중 하나).
-    # 그건 정확히 v=1.0 짜리다. v_max=2.0 에서는 제어기가 검증 안 된 구간의
-    # 점을 보고 조향했고, 실측 로그에서 그 구간 곡률이 kmax 0.0230~0.0350
-    # (반경 43cm / 28.6cm) 으로 나왔다 -- 차량 최소회전반경 49.5cm 미만이라
-    # 애초에 못 따라가는 곡선이다.
+    #     v 0.2 -> 30 + 2 + 5 = 37cm
+    #     v 0.5 -> 30 + 5 + 5 = 40cm    <- speed_controller v_max
+    #
+    # 60 은 여기에 1.5 배 여유. 하한 35 에 붙이지 않은 이유는 Ld 가 고정이라
+    # 여유 전부가 측위 오차 + 경로 지연 흡수에만 쓰이기 때문이다.
+    #
+    # 이력
+    #   kCommittedHorizonCm 52.422  세그먼트 단위로 잘라 실효 75cm (= v 1.0).
+    #                               v_max 2.0 에서 미검증 구간의 점을 보고
+    #                               조향 -> 실측 kmax 0.0230~0.0350 (R 43 /
+    #                               28.6cm). 차량 R_min 49.5cm 미만이라 애초에
+    #                               못 따라가는 곡선이었다.
+    #   145                         v_max 2.0 기준.
+    #   60                          v_max 0.5 저속 세팅 (2026-08-25).
     #
     # 이 값은 KauPath.valid_length 로도 발행되어 steer_controller 가 Ld 를
     # 이 안으로 자른다 (안전망). 단, 제어기는 usable < ld_min(30cm) 이면
     # 정지하므로 35cm 밑으로 내리지 말 것.
     #
-    # ★ plan_hz / k_v / v_max 중 하나라도 바꾸면 다시 계산할 것.
+    # ★ plan_hz / k_v / ld_min / v_max 중 하나라도 바꾸면 다시 계산할 것.
     # ★ 올릴수록 후보 탈락이 늘어 st=1(degraded) 비율이 오른다. 바꾼 뒤
     #   로그의 st= 분포를 반드시 재측정할 것.
-    validated_horizon_cm: 145.0
+    #   ☐ 145 -> 60 변경 후 st= 분포 재측정 (미완)
+    validated_horizon_cm: 60.0
 
     track_yaml_path: ""              # launch 가 채움
