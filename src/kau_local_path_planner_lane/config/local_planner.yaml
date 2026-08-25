@@ -4,8 +4,16 @@
 # 확정한 최종값이다. 비용 가중치(w_*)는 여기만 바꾸면 재빌드 없이
 # 바로 반영된다 -- 실차/시뮬 테스트로 튜닝할 때 이 파일만 만지면 된다.
 #
-# track_yaml_path 는 launch 파일이 kau_object_detection 의 share 경로로
-# 채워 넣는다 (여기 기본값은 launch 인자가 없을 때만 쓰임).
+# ★ 경로 형상의 유일한 출처는 /lane/center 다 (lane-only 재설계, 2026-08-25).
+#   backbone = ego 원점 -> /lane/center bridge -> center 그대로 -> l_plan 까지
+#   등곡률 외삽. /lane/left,/lane/right 는 형상에 기여하지 않고 도로 경계
+#   판정에만 쓴다. map / global path / localization 은 쓰지 않는다.
+#   따라서 이 파일의 어떤 값도 /lane/center 품질보다 나은 결과를 못 만든다.
+#
+# 2026-08-26: 코드가 declare 하지 않아 조용히 무시되던 파라미터를 전부
+#   지웠다 (map_frame, ref_mode, w_lane, lane_gate, w_path_preview,
+#   sim_to_map_*, track_yaml_path, preview). 특히 w_lane 주석은 "차선을
+#   기준으로 쓰지 않는다" 고 적혀 있어 코드와 정반대였다.
 
 local_planner_node:
   ros__parameters:
@@ -23,7 +31,6 @@ local_planner_node:
     #   - kau_control/config/path_source.yaml 의 sources.local.timeout
     #     (1.0s. 주기 0.2s 이므로 여유 충분 -- 지금은 손댈 것 없음)
     plan_hz: 5.0
-    map_frame: "map"
     base_frame: "base_footprint"
 
     # 상대 오도메트리. **절대 위치가 아니라** 두 plan() 사이의 상대 변위만
@@ -72,10 +79,6 @@ local_planner_node:
     wheel_width_cm: 3.7
     min_wheels_on: 1
 
-    # sim world -> map 변환 (kau_global_path 확인값, 회전 없음)
-    sim_to_map_ox: 3.68
-    sim_to_map_oy: 1.39
-    sim_to_map_rot_deg: 0.0
 
     # --- PlannerParams ---
     # 2026-08-25: 300 -> 180.
@@ -110,22 +113,11 @@ local_planner_node:
     # ★ lane_detection 의 bev_src_top_y / bev_out_* 를 건드려 관측 길이가
     #   바뀌면 이 값도 같이 다시 잡아야 한다.
     l_plan: 180.0
-    ref_mode: "fuse"
-    # 2026-08-24: 0 으로 내렸다. /lane/center 는 카메라가 잡은 노란 중앙선이고,
-    # w_lane>0 이면 기준 프레임(위치/heading/곡률)이 그 관측으로 사실상 완전히
-    # 대체된다 (w=1.0*confidence). lane_gate 가 60cm 로 도로 반폭(35cm)보다
-    # 넓어서, 검출기가 흰선을 중앙선으로 오인해도(31.25cm 오차) 그대로 통과했다.
-    # 기준 프레임을 인지 비의존(global path + localization)으로 두기 위해 0.
-    # 되돌리려면 이 값만 올리면 된다 -- 코드 경로는 그대로 살아 있다.
-    w_lane: 0.0
 
     kappa_margin: 0.95
     bound_depth: 2
     cusp_guard: 0.6
     obs_margin: 4.0
-    lane_gate: 60.0
-    preview: 450.0                   # l_plan+preview=750cm. 스윕 결과 최적값,
-                                      # 600 이상은 오히려 악화
 
     # 비용 가중치
     w_obstacle: 4.0
@@ -134,7 +126,6 @@ local_planner_node:
     w_end: 0.6
     w_continuity: 10.0               # 스윕 결과 10 근방 최적. 20+ 부터
                                       # 회피 반응 지연으로 안전 악화
-    w_path_preview: 2.0
 
     # 바퀴가 노면 밖인 구간의 비율 [0,1] 에 붙는 비용.
     #
@@ -255,4 +246,3 @@ local_planner_node:
     #   ☐ 145 -> 60 변경 후 st= 분포 재측정 (미완)
     validated_horizon_cm: 60.0
 
-    track_yaml_path: ""              # launch 가 채움

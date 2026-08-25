@@ -39,42 +39,25 @@ struct Obstacle
 std::vector<Obstacle> obstaclesNear(
     const Curve & cv, const std::vector<Obstacle> & obstacles, double reach_cm);
 
-// Python: Curve.min_dist_to -- kau_control::Curve 에는 없어서 여기서
-// 세그먼트별 bezier::nearestOnSeg 로 직접 구현.
-double minDistToPoint(const Curve & cv, const Point2 & p);
-
-// Python: LocalPlanner._clearance. 차체 반폭 포함 최소 여유 [cm]. 음수면 충돌.
+// Python: LocalPlanner._clearance 의 후신 (2026-08-25). 3분할 원 근사 대신
+// 실제 차체(회전 사각형, 후륜축 기준)와 장애물(원) 간 최단거리 [cm].
+// 음수면 충돌. 각 station 에서 장애물 중심을 heading 기준 로컬프레임으로
+// 회전한 뒤 사각형 반폭으로 클램프하는 표준 rectangle-point 최단거리 공식.
 // near 장애물이 없으면 clear_cap 반환 (근처에 장애물 없음을 나타내는 상한).
-double clearance(
-    const Curve & cv, const std::vector<Obstacle> & obstacles,
-    double body_radius_cm, double clear_target_cm, double clear_cap_cm = 999.0);
-
-// 2026-08-25: 3분할 원 근사(`clearance`) 대신 실제 차체(회전 사각형,
-// 후륜축 기준)와 장애물(원) 간 최단거리. 각 station 에서 장애물 중심을
-// heading 기준 로컬프레임으로 회전한 뒤 사각형 반폭으로 클램프하는 표준
-// rectangle-point 최단거리 공식 (KAU_AMET_Test Python 포팅과 동일 원리).
 double clearanceRect(
     const Curve & cv, const std::vector<Obstacle> & obstacles,
     const VehicleFootprint & body, double clear_target_cm,
     double sample_interval_cm, double clear_cap_cm = 999.0);
 
-// Python: LocalPlanner._preview_clear. l_plan 종점 너머 preview 구간의
-// 장애물 여유 [cm]. 비용에만 반영, hard gate 아님.
-//
-// stations: 장애물별 (reference 호길이, 횡위치) -- Python 의 self.stations,
-// gp.delta_s/nearest_global 로 사전계산해서 전달한다 (매 후보마다 재계산할
-// 필요 없음, 장애물이 바뀔 때만 갱신).
+// 장애물별 (backbone 호길이, 그 지점 기준 횡위치). 매 후보마다 재계산하지
+// 않도록 backbone 이 바뀔 때 한 번만 만들어 둔다 (LocalPlanner::plan).
+// directTargetIndices 가 lateral 의 **부호**로 장애물이 어느 쪽인지 판단한다.
 struct ObstacleStation
 {
-    double station_s = 0.0;      // reference(global path) 호길이
+    double station_s = 0.0;      // backbone 호길이
     double lateral    = 0.0;     // 그 지점 기준 횡위치 [cm]
     Obstacle obstacle;
 };
-
-double previewClear(
-    const Curve & global_path, const std::vector<ObstacleStation> & stations,
-    double d, double end_ratio, double s0, double l_plan, double preview,
-    double body_radius_cm, double clear_cap_cm = 999.0);
 
 }  // namespace local_path_planner_lane
 }  // namespace kau

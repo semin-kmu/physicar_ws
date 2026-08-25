@@ -46,10 +46,10 @@ struct PlannerParams
     int    bound_depth  = 2;        // kappa_bound 분할 단계
     double cusp_guard   = 0.6;      // |d * kappa_ref| 상한
     double obs_margin   = 4.0;      // cm, 차체 반폭에 더하는 corridor 여유
-    // cm, 종점 너머 장애물 예고 구간 (비용에만 반영, hard gate 아님).
-    // `previewClear`(collision_checker) 가 여전히 씀 -- global path 곡률
-    // 예고(`w_path_preview`)만 소스가 없어져 제거했다.
-    double preview      = 450.0;
+    // 2026-08-26: `preview` 제거. backbone 이 정확히 l_plan 에서 끝나므로
+    // "종점 너머" 구간이 구조적으로 존재하지 않는다 -- `previewClear` 는
+    // 항상 상한값만 돌려주고 있었다. global path(임의 길이)를 참조로 쓰던
+    // 시절의 개념이다 (곡률 예고 `w_path_preview` 는 2026-08-25 에 먼저 제거).
 
     // --- 비용 가중치 ---
     double w_obstacle     = 4.0;
@@ -107,9 +107,9 @@ struct PlannerParams
     // --- P0 앵커 (2026-08-25) ---
     //
     // P0 를 실측 자세에 그대로 두면 추종오차 e 가 매 틱 계획에 실린다.
-    // 첫 knot 이 0.25*l_plan(=75cm) 이므로 플래너는 e 를 75cm 안에 없애라고
-    // 요구하는데(추가 곡률 ~ 4e/d^2), Pure Pursuit 의 횡오차 수렴은 Ld(=50cm
-    // @1m/s)의 몇 배 거리가 든다. 즉 오차가 줄기 전에 요구가 커져 발산한다:
+    // 첫 knot 이 0.6*l_plan(l_plan=180 이면 108cm) 이므로 플래너는 e 를 그
+    // 안에 없애라고 요구하는데(추가 곡률 ~ 4e/d^2), Pure Pursuit 의 횡오차
+    // 수렴은 Ld 의 몇 배 거리가 든다. 즉 오차가 줄기 전에 요구가 커져 발산한다:
     //   e=7cm, 조향 70% 코너 -> kappa0 가 kappa_lim 을 넘어 전 후보 탈락.
     //
     // 그래서 P0 를 이전 틱 경로 위 최근접점으로 옮긴다. 이 투영은 자차 편차를

@@ -58,42 +58,6 @@ std::vector<Obstacle> obstaclesNear(
     return out;
 }
 
-double minDistToPoint(const Curve & cv, const Point2 & p)
-{
-    double best = std::numeric_limits<double>::infinity();
-    for (int i = 0; i < cv.nseg(); ++i)
-    {
-        best = std::min(best, kau::bezier::nearestOnSeg(cv.seg(i), p).dist);
-    }
-    return best;
-}
-
-double clearance(
-    const Curve & cv, const std::vector<Obstacle> & obstacles,
-    double body_radius_cm, double clear_target_cm, double clear_cap_cm)
-{
-    double max_radius = 0.0;
-    for (const Obstacle & o : obstacles)
-    {
-        max_radius = std::max(max_radius, o.radius);
-    }
-    const double reach = body_radius_cm + clear_target_cm + max_radius;
-
-    const std::vector<Obstacle> near = obstaclesNear(cv, obstacles, reach);
-    if (near.empty())
-    {
-        return clear_cap_cm;
-    }
-
-    double best = std::numeric_limits<double>::infinity();
-    for (const Obstacle & o : near)
-    {
-        best = std::min(
-            best, minDistToPoint(cv, o.center) - o.radius - body_radius_cm);
-    }
-    return best;
-}
-
 double clearanceRect(
     const Curve & cv, const std::vector<Obstacle> & obstacles,
     const VehicleFootprint & body, double clear_target_cm,
@@ -154,32 +118,6 @@ double clearanceRect(
         }
     }
     return best;
-}
-
-double previewClear(
-    const Curve & global_path, const std::vector<ObstacleStation> & stations,
-    double d, double end_ratio, double s0, double l_plan, double preview,
-    double body_radius_cm, double clear_cap_cm)
-{
-    if (stations.empty() || preview <= 0.0)
-    {
-        return clear_cap_cm;
-    }
-    const double end = s0 + l_plan;
-    const double d_end = end_ratio * d;
-
-    double out = clear_cap_cm;
-    for (const ObstacleStation & st : stations)
-    {
-        const double advance = global_path.deltaS(end, st.station_s);
-        if (advance >= 0.0 && advance <= preview)
-        {
-            out = std::min(
-                out, std::abs(d_end - st.lateral) - st.obstacle.radius -
-                         body_radius_cm);
-        }
-    }
-    return out;
 }
 
 }  // namespace local_path_planner_lane

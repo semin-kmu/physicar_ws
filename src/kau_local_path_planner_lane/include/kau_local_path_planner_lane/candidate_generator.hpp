@@ -22,10 +22,11 @@
 //     재사용한다 -- 어느 쪽이든 "부호(좌/우)"만 쓰므로 실질적으로 동등하다.
 //
 // 2026-08-24 KAU_AMET_Test 세션 알고리즘 반영 (이번 포팅 세션):
-//   - corridor 가 2-frame(0.25L, 1.0L)에서 3-frame(0.25L, 0.625L, 1.0L)
-//     으로 확장됐다 (긴 2-segment chord 가 도로 굴곡을 한 번에 가로질러
-//     road_boundary 를 자주 위반하던 문제 완화, 실측: road-valid 전멸
-//     100->45). `corridorOffsets`/`candidate()` 를 N-frame(가변 길이)
+//   - corridor 가 2-frame 에서 3-frame 으로 확장됐다 -- 중간 knot 이 하나
+//     늘었다 (현재 위치는 아래 `corridorOffsets` 주석 참고). 긴 2-segment
+//     chord 가 도로 굴곡을 한 번에 가로질러 road_boundary 를 자주 위반하던
+//     문제 완화다 (실측: road-valid 전멸 100->45).
+//     `corridorOffsets`/`candidate()` 를 N-frame(가변 길이)
 //     지원하도록 일반화했다 -- Python 의 `zip(*offsets)`/`zip(offsets,
 //     frames)` 제네릭 패턴과 동일 원리. obstacle_offsets/primitives/
 //     direct_family/K2 는 기존 2-frame 그대로 (corridor 만 변경).
@@ -65,7 +66,6 @@ inline constexpr std::array<double, 7> kCorridorFractions{
 
 inline constexpr double kRoadSafetyMarginCm = 2.0;
 inline constexpr double kRoadSampleIntervalCm = 4.0;
-inline constexpr double kEndRatio = 0.80;
 
 // 2026-08-24 (committed/prediction horizon, KAU_AMET_Test 알고리즘 반영):
 // 1-lap dynamic+EMA 실측(`diagnose_receding_horizon.py`) 결과, 실제
@@ -123,15 +123,6 @@ public:
     CandidateGenerator(CandidateGenerator &&) = delete;
     CandidateGenerator & operator=(CandidateGenerator &&) = delete;
 
-    // 2026-08-25 (lane-only 재설계): backbone 이 매 사이클(lane 관측 기반)
-    // 새로 만들어지므로, 생성자에서 한 번 받은 뒤 고정하지 않고 매 plan()
-    // 마다 재설정한다 (Python `self.gp = backbone` 재대입과 동일 원리).
-    // 호출자가 backbone 객체를 plan() 동안 계속 살려둬야 한다(포인터만 보관).
-    void setGlobalPath(const Curve & global_path) { global_path_ = &global_path; }
-
-    // RoadBoundary(좌/우 edge) 도 매 사이클 새로 온다 -- 위와 동일 이유.
-    void setBoundary(const RoadBoundary & boundary) { boundary_ = &boundary; }
-
     // 2026-08-25 (P0 앵커): P0 를 이전 경로에 앵커하면 발행 경로가 자차에서
     // 최대 이만큼 떨어져 있다. road/obstacle 검사는 **경로를 따라** 수행되므로
     // 그대로 두면 마진이 그만큼 잠식된다 (kRoadSafetyMarginCm 은 2cm 뿐이다).
@@ -145,7 +136,8 @@ public:
     }
 
     // Python: _corridor_offsets(frames), N-frame 일반화(2026-08-24).
-    // frames[0]=0.25*l_plan, frames[1]=0.625*l_plan, frames[2]=l_plan(종점).
+    // frames 는 LocalPlanner::plan() 이 0.6 / 0.8 / 1.0 * l_plan 에서 뜬다
+    // (l_plan=180 이면 108 / 144 / 180cm -- 셋 다 lane 관측 168cm 안쪽).
     // 반환은 7개 (offset_at_frame0, offset_at_frame1, offset_at_frame2) 쌍
     // -- 마지막 원소만 direct_family/direct_target_indices 가 terminal
     // 값으로 읽는다 (Python 의 pair[-1] 과 동일 원리).

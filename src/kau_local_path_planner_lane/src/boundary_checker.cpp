@@ -77,81 +77,8 @@ namespace
 {
 
 // ------------------------------------------------------------------
-// 2026-08-25: 도로 이탈 판정 복구.
-//
-// `marginAlongNormal` 은 반환 직전에 `clamp(d, 0.0, ...)` 로 음수를 0 으로
-// 깎는다. 그건 그 함수의 **본래 용도**(코리도 폭: "이 방향으로 얼마나 더
-// 갈 수 있나")에서는 옳다 -- 이미 밖이면 남은 폭은 0 이고, 음수가 되면
-// `corridorOffsets` 의 safe_lower > safe_upper 로 뒤집혀 `std::clamp` 가
-// 정의되지 않은 동작이 된다.
-//
-// 그런데 여유 판정(clearance) 경로가 같은 함수를 그대로 쓰는 바람에
-// **여유가 절대 음수가 될 수 없었고**, 그 결과 도로 이탈 판정이 통째로
-// 무력했다 (실측: 경로를 도로 밖 50m 로 보내도 min_wheels_on=4,
-// off_integral=0, roadOkWheels=통과). w_road 비용 항도 항상 0 이었다.
-//
-// 두 용도를 분리한다. 폭 질의는 기존 `marginAlongNormal`(비음수) 을 계속
-// 쓰고, 판정은 아래 부호 있는 버전을 쓴다. 상한(max_search_cm) clamp 는
-// 남긴다 -- 그건 "아주 멀리 안쪽" 을 잘라 주는 것이라 판정에 해가 없다.
-//
-// 부호 규약: 좌 edge 는 +normal 쪽, 우 edge 는 -normal 쪽에 있다고 보고
-// 각각 "안쪽이면 양수" 가 되게 잰다. 따라서 도로 안이면 둘 다 양수이고,
-// 왼쪽으로 벗어나면 left 항이 음수가 된다.
-// ------------------------------------------------------------------
-double signedMarginAlongNormal(
-    const RoadBoundary & boundary, const Point2 & origin, const Point2 & normal,
-    double sign, double footprint_cm, double max_search_cm = 200.0)
-{
-    double d;
-    if (sign > 0.0)
-    {
-        d = edgeMargin(boundary.left, origin, normal, 1.0, max_search_cm);
-        if (!boundary.left.has_value())
-        {
-            // 반대쪽만 관측됐으면 LANE_WIDTH 로 근사 (marginAlongNormal 동일).
-            const double r =
-                edgeMargin(boundary.right, origin, normal, -1.0, max_search_cm);
-            if (boundary.right.has_value())
-            {
-                d = kLaneWidthCm - r;
-            }
-        }
-    }
-    else
-    {
-        d = edgeMargin(boundary.right, origin, normal, -1.0, max_search_cm);
-        if (!boundary.right.has_value())
-        {
-            const double l =
-                edgeMargin(boundary.left, origin, normal, 1.0, max_search_cm);
-            if (boundary.left.has_value())
-            {
-                d = kLaneWidthCm - l;
-            }
-        }
-    }
-    // 상한만 자른다. 하한 0 clamp 를 걸면 "밖으로 나갔다" 가 표현되지 않는다.
-    d = std::min(d, max_search_cm);
-    return d - footprint_cm;
-}
-
-// 한 station(위치+heading)에서 좌/우 edge 까지의 안전 여유 최솟값.
-// 음수면 침범 (boundary_checker.hpp 의 roadClearance 규격 그대로).
-double stationClearance(
-    const RoadBoundary & boundary, const Point2 & center, double heading,
-    double footprint_cm)
-{
-    const Point2 normal{-std::sin(heading), std::cos(heading)};
-    const double left_m = signedMarginAlongNormal(
-        boundary, center, normal, 1.0, footprint_cm, 200.0);
-    const double right_m = signedMarginAlongNormal(
-        boundary, center, normal, -1.0, footprint_cm, 200.0);
-    return std::min(left_m, right_m);
-}
-
-// ------------------------------------------------------------------
-// 2026-08-25 (성능 응급수정): roadClearanceRect/roadReportWheels 가 바퀴
-// 코너(station 당 최대 8개) 마다 stationClearance -> marginAlongNormal ->
+// 2026-08-25 (성능 응급수정): roadReportWheels 가 바퀴 코너(station 당 최대
+// 8개) 마다 station 별 여유 -> marginAlongNormal ->
 // edge->nearestGlobal 을 **독립적으로** 호출해, plan() 한 번에 수만 번의
 // nearestGlobal(내부적으로 다항식 실근 탐색)이 실행됐다 (실측: 경로 1개
 // 생성에 18초!). polygon+공간인덱스 기반이던 옛 boundary_checker 는 이
@@ -235,8 +162,14 @@ double marginFromProjection(
             d = max_search_cm;
         }
     }
-    // signedMarginAlongNormal 과 같은 규약 -- 상한만 자르고 부호는 살린다.
-    // (여기서 하한 0 clamp 를 걸면 도로 이탈 판정이 통째로 무력해진다.)
+    // 판정용 규약 -- 상한만 자르고 **부호는 살린다.** 여기서 하한 0 clamp 를
+    // 걸면(= marginAlongNormal 의 폭 질의 규약) 여유가 절대 음수가 될 수 없어
+    // 도로 이탈 판정이 통째로 무력해진다 (2026-08-25 실측: 경로를 도로 밖
+    // 50m 로 보내도 min_wheels_on=4, off_integral=0, roadOkWheels=통과).
+    //
+    // 부호 규약: 좌 edge 는 +normal 쪽, 우 edge 는 -normal 쪽에 있다고 보고
+    // 각각 "안쪽이면 양수" 가 되게 잰다. 도로 안이면 둘 다 양수, 왼쪽으로
+    // 벗어나면 left 항이 음수가 된다.
     d = std::min(d, max_search_cm);
     return d - footprint_cm;
 }
@@ -251,78 +184,6 @@ double stationClearanceFromProjection(
 }
 
 }  // namespace
-
-double roadClearance(
-    const RoadBoundary & boundary, const Curve & cv, double footprint_cm,
-    double sample_interval_cm)
-{
-    double best = std::numeric_limits<double>::infinity();
-    const int nseg = cv.nseg();
-    for (int i = 0; i < nseg; ++i)
-    {
-        const int count = std::max(
-            3, static_cast<int>(std::ceil(cv.segLen(i) / sample_interval_cm)) + 1);
-        const bool include_end = (i == nseg - 1);
-        const double step = include_end
-            ? 1.0 / static_cast<double>(count - 1)
-            : 1.0 / static_cast<double>(count);
-        const kau::bezier::Ctrl & seg = cv.seg(i);
-        const kau::bezier::Ctrl d1 = kau::bezier::hodograph(seg);
-        for (int k = 0; k < count; ++k)
-        {
-            const double u = static_cast<double>(k) * step;
-            const Point2 center = kau::bezier::evalSeg(seg, u);
-            const Point2 tangent = kau::bezier::evalSeg(d1, u);
-            const double heading = std::atan2(tangent.y, tangent.x);
-            best = std::min(best, stationClearance(boundary, center, heading, footprint_cm));
-        }
-    }
-    return std::isfinite(best) ? best : 0.0;
-}
-
-double roadClearanceRect(
-    const RoadBoundary & boundary, const Curve & cv,
-    const VehicleFootprint & body, double road_safety_margin_cm,
-    double sample_interval_cm)
-{
-    double best = std::numeric_limits<double>::infinity();
-    const int nseg = cv.nseg();
-    for (int i = 0; i < nseg; ++i)
-    {
-        const int count = std::max(
-            3, static_cast<int>(std::ceil(cv.segLen(i) / sample_interval_cm)) + 1);
-        const bool include_end = (i == nseg - 1);
-        const double step = include_end
-            ? 1.0 / static_cast<double>(count - 1)
-            : 1.0 / static_cast<double>(count);
-        const kau::bezier::Ctrl & seg = cv.seg(i);
-        const kau::bezier::Ctrl d1 = kau::bezier::hodograph(seg);
-        for (int k = 0; k < count; ++k)
-        {
-            const double u = static_cast<double>(k) * step;
-            const Point2 center = kau::bezier::evalSeg(seg, u);
-            const Point2 tangent = kau::bezier::evalSeg(d1, u);
-            const double heading = std::atan2(tangent.y, tangent.x);
-            const double ch = std::cos(heading);
-            const double sh = std::sin(heading);
-            const Point2 normal{-std::sin(heading), std::cos(heading)};
-            const EdgeProjection proj = projectStation(boundary, center);
-            for (double dx : {body.rearEdge(), body.frontEdge()})
-            {
-                for (double dy : {-body.half_width_cm, body.half_width_cm})
-                {
-                    const Point2 corner{
-                        center.x + dx * ch - dy * sh,
-                        center.y + dx * sh + dy * ch};
-                    best = std::min(
-                        best, stationClearanceFromProjection(
-                            proj, corner, normal, road_safety_margin_cm));
-                }
-            }
-        }
-    }
-    return std::isfinite(best) ? best : 0.0;
-}
 
 RoadReport roadReportWheels(
     const RoadBoundary & boundary, const Curve & cv, const WheelFootprint & wheels,

@@ -2,9 +2,9 @@
 // test_boundary_checker_lane.cpp (2026-08-25)
 //
 // lane-only 재설계 이후의 boundary_checker (좌/우 edge Curve 기반) 회귀
-// 테스트. 같은 폴더의 test_boundary_checker.cpp 는 폴리곤(outer/inner)
-// 시절 API 라 아직 꺼져 있고, 이 파일이 그 규격 중 "도로 이탈 판정" 부분을
-// 새 API 로 옮겨 담은 것이다.
+// 테스트. 폴리곤(outer/inner) 시절 API 를 검증하던 test_boundary_checker.cpp
+// 는 2026-08-26 에 삭제했고 (컴파일 불가 상태로 꺼져 있었다), 이 파일이 그
+// 규격 중 "도로 이탈 판정" 부분을 새 API 로 옮겨 담은 것이다.
 //
 // 이 테스트가 존재하는 이유: 2026-08-25 에 `marginAlongNormal` 의
 // `clamp(d, 0.0, ...)` 때문에 여유가 절대 음수가 될 수 없어 **도로 이탈
@@ -27,7 +27,6 @@ using kau::bezier::Point2;
 using kau::control::Curve;
 using kau::local_path_planner_lane::marginAlongNormal;
 using kau::local_path_planner_lane::RoadBoundary;
-using kau::local_path_planner_lane::roadClearance;
 using kau::local_path_planner_lane::roadOkWheels;
 using kau::local_path_planner_lane::roadReportWheels;
 using kau::local_path_planner_lane::WheelFootprint;
@@ -147,15 +146,6 @@ TEST(BoundaryCheckerLane, FarOutsidePathIsRejected)
         EXPECT_FALSE(roadOkWheels(rb, path, physicarWheels(), kNoMargin, kStep))
             << "bias=" << bias;
     }
-}
-
-// roadClearance(3분할 원 근사 경로) 도 같은 부호 규격을 따라야 한다
-// -- path_evaluator 의 leastViolation 이 `max(0, -roadClearance)` 로 쓴다.
-TEST(BoundaryCheckerLane, RoadClearanceIsSignedToo)
-{
-    const RoadBoundary rb = straightRoad(35.0);
-    EXPECT_GT(roadClearance(rb, straightAtY(0.0, 0.0, 300.0), 11.0, kStep), 0.0);
-    EXPECT_LT(roadClearance(rb, straightAtY(200.0, 0.0, 300.0), 11.0, kStep), 0.0);
 }
 
 // edge 를 하나도 관측 못 했으면 도로 제약이 없어야 한다 (hold 만료 등).

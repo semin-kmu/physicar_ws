@@ -27,9 +27,24 @@ find_package(tf2_ros REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(Eigen3 REQUIRED)
 
+# 역할별 모듈. 한 클래스의 멤버 구현을 여러 TU 로 나눠 담는다.
 add_executable(kau_lane_detection_node
   src/kau_lane_detection_node.cpp    # 진입점 (main)
-  src/kau_lane_detection.cpp         # 멤버 함수 구현
+
+  src/lane_geometry.cpp              # 상태 없는 기하 유틸 (클래스 밖)
+
+  src/node_setup.cpp                 # 생성자 / 파라미터 / 배선
+  src/bev_geometry.cpp               # BEV 사다리꼴 / 축척 / CameraInfo
+  src/camera_pose.cpp                # pan 램프 / tilt 고정 자세
+  src/lane_detect.cpp                # 히스토그램 + 슬라이딩 윈도우
+  src/center_resolve.cpp             # 도로 단면 판정 / 중앙선 기준
+  src/path_build.cpp                 # Bezier 생성 / EMA / 게이트
+  src/path_publish.cpp               # KauPath / RViz 발행
+  src/pan_aim.cpp                    # Pan 조준각 (feedforward)
+  src/pan_search.cpp                 # Pan 소실 탐색 상태기계
+  src/map_context.cpp                # 측위 TF / 전역경로 곡률 / 장애물
+  src/debug_view.cpp                 # 디버그 오버레이
+  src/lane_pipeline.cpp              # 프레임 파이프라인 (imageCallback)
 )
 
 ament_target_dependencies(kau_lane_detection_node
