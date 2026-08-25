@@ -1,0 +1,54 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>kau_object_detection_lane</name>
+  <version>0.1.0</version>
+  <description>
+    Localization-free LiDAR object detection and start signal detection for the
+    KAU AMET PhysiCar platform. Publishes the Object List in base_link so the
+    Lane-only driving stack needs no map, no odom and no localisation.
+
+    Independent of kau_object_detection: the detection logic was forked into
+    this package on 2026-08-25 and neither builds nor runs against it.
+  </description>
+  <maintainer email="team11@physicar.local">KAU AMET Team</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>sensor_msgs</depend>
+
+  <!-- Object List contract published on /perception/obstacles. -->
+  <depend>kau_msgs</depend>
+  <depend>builtin_interfaces</depend>
+
+  <!-- RViz visualisation of the published Object List. -->
+  <depend>visualization_msgs</depend>
+
+  <!-- tf2 lookup of base_link <- lidar_link at the scan measurement time.
+       This is the only transform this package reads; it is a static URDF
+       transform, so no localisation node has to be running. -->
+  <depend>geometry_msgs</depend>
+  <depend>tf2</depend>
+  <depend>tf2_ros</depend>
+
+  <!-- Start signal detection. The camera is used for the one-time start
+       traffic light only. The compressed payload is decoded with cv::imdecode,
+       so OpenCV alone is enough and no cv_bridge is needed. -->
+  <depend>std_msgs</depend>
+  <depend>libopencv-dev</depend>
+
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+
+  <test_depend>ament_cmake_gtest</test_depend>
+  <test_depend>ament_cmake_pytest</test_depend>
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+  <test_depend>python3-yaml</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

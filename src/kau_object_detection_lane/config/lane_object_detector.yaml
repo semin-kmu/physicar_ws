@@ -1,0 +1,155 @@
+# Localization-free LiDAR Object Detection.
+#
+# Values copied on 2026-08-25 from kau_object_detection's
+# config/laser_scan_clusterer.yaml, which was the team's validated tuning at
+# that date. This is an independent copy: changing a value there does NOT
+# change it here. See README.md "Source synchronisation".
+#
+# Deliberately ABSENT relative to that file, and they must stay absent:
+#   world_pose_topic / world_pose_base_frame / world_pose_timeout_s
+#       Gazebo world pose diagnostics. Not forked in.
+#   lidar_offset_x_m / lidar_offset_y_m
+#       The tf2 lookup base_link <- lidar_link already contains the mount
+#       translation. Re-adding it here would double-count it.
+#   track_boundary_tolerance_m / track_outer_* / track_inner_*
+#       Track ROI. Its polygons are map-frame data and cannot describe
+#       base_link.
+#   object_list_pose_timeout_s
+#       There is no vehicle pose source in this pipeline.
+#   raw_diagnostic_object_list_topic / raw_diagnostic_object_list_enabled
+#       The raw-vs-smoothed twin has nothing to be the twin of here.
+#   temporal_tracking_enabled / association_distance_m / outlier_distance_m
+#   smoothing_alpha / minimum_confirmation_frames / track_timeout_s
+#       There is no tracker in this node. See README.md "Why there is no
+#       tracker". These names are not declared, so passing one is an error
+#       rather than a silently ignored setting.
+#
+# use_sim_time is deliberately not set here. Pinning it in this file would make
+# it impossible to turn off on the real vehicle (with no /clock, now() would
+# stay at 0). Pass it as a launch argument or with -p.
+
+lane_laser_object_detector:
+  ros__parameters:
+
+    # --- Input --------------------------------------------------------------
+    # sensor_msgs/LaserScan, SensorDataQoS (best effort, keep last, volatile).
+    input_topic: /scan_filtered
+    # The scan must declare this frame_id or the frame is reported as
+    # STATUS_LIDAR_UNAVAILABLE. It is also the tf2 source frame.
+    expected_frame_id: lidar_link
+
+    # --- Scan structure validation ------------------------------------------
+    # Fewest beams a usable scan may carry.
+    minimum_sample_count: 2
+    # Allowed difference between the beam count the header describes and the
+    # number of range samples actually present.
+    sample_count_tolerance: 1
+    # Whether a scan without an intensities array is rejected.
+    require_intensities: false
+
+    # --- Clustering ---------------------------------------------------------
+    # [m] Base distance below which two adjacent beams count as one object.
+    base_distance_threshold_m: 0.05
+    # Multiplier on the range-dependent arc term, so the link distance grows
+    # with distance the way the beam spacing does. Dimensionless.
+    angular_resolution_scale: 1.5
+    # [rad] Tolerance on the header angles when deciding whether the scan is a
+    # closed 360-degree sweep, which is what enables last-beam-to-first-beam
+    # wrap-around clustering.
+    circular_scan_tolerance_rad: 0.05
+
+    # --- Speckle / isolated point filtering ---------------------------------
+    # Runs before clustering. A beam is kept when it links to its immediate
+    # previous or next beam under the same adaptive distance rule the clusterer
+    # uses, so a real two-beam cone survives and only a beam with no reachable
+    # neighbour at all is dropped.
+    speckle_filter_enabled: true
+    # Supporting immediate neighbours a point needs. 1 keeps mutually supported
+    # two-beam candidates; 2 discards them again.
+    minimum_support_neighbors: 1
+    # Support radius relative to the clustering link threshold. Dimensionless.
+    # At 1.0 a point holding any clustering link can never be removed as
+    # speckle.
+    neighbor_distance_scale: 1.0
+
+    # --- Cluster acceptance and geometry ------------------------------------
+    # Candidate acceptance only. Raw clustering does not delete small clusters,
+    # so 1 lets a supported two-point cone reach the geometry stage.
+    minimum_cluster_points: 1
+    # [m] Perpendicular distance below which a point is treated as collinear
+    # while building the observed convex-hull footprint.
+    collinear_tolerance_m: 0.001
+
+    # --- Cone occupancy gate ------------------------------------------------
+    # Provisional circular occupancy candidate, derived read-only from the
+    # measured cluster geometry. No safety inflation is applied here; vehicle
+    # size and margin stay with Local Path Planning.
+    #
+    # [m] Half of the 0.18 x 0.18 m competition cone base footprint.
+    nominal_cone_radius_m: 0.09
+    # [m] Radius of the cone cross-section visible at the LiDAR mounting
+    # height. The closest measured point is pushed away from the sensor by this
+    # amount to recover a provisional cone axis centre.
+    #
+    # NOTE, carried over unchanged from the source file: its comment cites a
+    # 0.20 m LiDAR height, which is the value robot_state_publisher's URDF
+    # produces. The simulator model (physicar_base SDF) places the sensor at
+    # 0.182 m. The tuned value below is copied verbatim and has NOT been
+    # re-derived here; re-deriving it is a separate task.
+    visible_slice_radius_m: 0.043
+    # [m] Largest observed extent that may still be a single cone. Deliberately
+    # loose: 1.7x the full 0.18 m base diameter absorbs beam quantisation,
+    # mounting-height error and cone tilt, while still rejecting the
+    # multi-metre wall clusters seen in the practice world by a wide margin.
+    # This gate, together with the cluster width above, is what keeps walls and
+    # fences from ever becoming circles.
+    maximum_observed_width_m: 0.30
+
+    # --- Object List output (kau_msgs/ObstacleCircleArray) ------------------
+    # Published for Local Path Planning. Circles carry the measured physical
+    # obstacle only.
+    object_list_topic: /perception/obstacles
+    # THE Lane-only contract. base_link, never map: this package exists so the
+    # Object List is usable with no localisation running. The only other value
+    # that makes sense on this vehicle is base_footprint, which differs from
+    # base_link by a pure z offset and so gives identical planar coordinates.
+    object_list_frame_id: base_link
+    # [0, 1] Written on every accepted circle. v1 approves candidates in a
+    # binary way, so 1.0 is the only value in use.
+    object_list_confidence: 1.0
+    # [s] No usable scan for this long makes the node report
+    # STATUS_LIDAR_UNAVAILABLE with an empty array.
+    object_list_scan_timeout_s: 0.3
+    # [s] How long the tf2 lookup may wait for a transform covering the scan
+    # stamp. Only a short wait is useful: a scan whose transform never arrives
+    # has to be reported, not held. base_link <- lidar_link is a static
+    # transform, so in practice this never has to wait at all.
+    object_list_transform_timeout_s: 0.05
+    # [s] Watchdog tick. Node clock, so it follows simulation time.
+    object_list_watchdog_period_s: 0.1
+    # [s] Republication period while the watchdog holds. Must stay below
+    # object_list_scan_timeout_s so a consumer sees the state inside its own
+    # discard window without being spammed at the full tick rate. The node
+    # refuses to start otherwise.
+    object_list_watchdog_publish_period_s: 0.2
+
+    # --- RViz visualisation of the published Object List --------------------
+    # visualization_msgs/MarkerArray built from the very message published on
+    # object_list_topic, so the circles seen in RViz are the circles Local Path
+    # Planning receives. Visualisation only: no consumer contract depends on
+    # this topic, and it is not a planner input.
+    obstacle_marker_topic: /perception/obstacle_markers
+    # Set false to stop advertising the marker topic, for instance to save CPU
+    # on the real vehicle. Nothing about the published Object List changes.
+    obstacle_marker_enabled: true
+    # [s] How long a marker survives in RViz without being refreshed. The
+    # explicit DELETE markers are the primary cleanup; this is the safety net
+    # for a node that stops publishing altogether. Three publish periods at
+    # 10 Hz, so a single dropped best-effort frame never makes circles blink.
+    obstacle_marker_lifetime_s: 0.3
+
+    # --- Diagnostics --------------------------------------------------------
+    # [s] Period of the read-only pipeline summary log.
+    summary_period_seconds: 2.0
+    # Log the nearest published circle alongside each summary.
+    log_circle_candidates: true
