@@ -1,0 +1,198 @@
+# kau_local_path_planner_lane 파라미터.
+#
+# 값들은 KAU_AMET_Test 시뮬레이션 세션(2026-08-22)에서 실측/스윕으로
+# 확정한 최종값이다. 비용 가중치(w_*)는 여기만 바꾸면 재빌드 없이
+# 바로 반영된다 -- 실차/시뮬 테스트로 튜닝할 때 이 파일만 만지면 된다.
+#
+# track_yaml_path 는 launch 파일이 kau_object_detection 의 share 경로로
+# 채워 넣는다 (여기 기본값은 launch 인자가 없을 때만 쓰임).
+
+local_planner_node:
+  ros__parameters:
+    # 2026-08-25: 10.0 -> 5.0.
+    #
+    # kau_state_machine/docs/08_설정_스키마.md 의 local_path_planner.params.
+    # replan_hz 가 원래 "확정 5.0 상시" 인데 이 파일만 10 으로 어긋나 있었다.
+    # 5Hz 면 한 주기 이동이 v_max 0.5m/s 에서 10cm 라 재계획 지연이 문제되지
+    # 않는다 (아래 validated_horizon_cm 재계산 참조).
+    #
+    # ★ 이 값을 바꾸면 같이 봐야 하는 곳:
+    #   - validated_horizon_cm (이 파일 아래. 한 주기 이동이 들어간다)
+    #   - kau_gui/config/gui.yaml 의 watch 줄 "/path/local ... | 5"
+    #     (기대 주기라, 안 맞추면 감시등 계산이 틀어진다)
+    #   - kau_control/config/path_source.yaml 의 sources.local.timeout
+    #     (1.0s. 주기 0.2s 이므로 여유 충분 -- 지금은 손댈 것 없음)
+    plan_hz: 5.0
+    map_frame: "map"
+    base_frame: "base_footprint"
+
+    # RViz 시각화용 nav_msgs/Path 발행 (/path/local 과 내용 동일, Bezier 를
+    # 폴리라인으로 샘플링 + cm -> m 변환). 제어단은 /path/local 을 쓴다.
+    # viz_spacing_cm 5.0 = /viz/path/global, /viz/path/global_avoidance 와 같은 밀도.
+    publish_viz_path: true
+    viz_topic: /viz/path/local
+    viz_spacing_cm: 5.0
+
+    # 차량 제원 (docs/경로_형식.md 부록 B 확정값)
+    kappa_max_vehicle: 0.020221      # 1/cm, R_min=49.455cm, delta_max=20deg
+    body_radius_cm: 11.0353          # 3분할 원 근사 반경 (candidate 생성 offset 계산에 유지)
+    # 2026-08-25: road/obstacle hard-gate 전용 회전 사각형 차체 (후륜축 기준).
+    # body_radius_cm(3분할 원)의 근사 오차(곡선에서 전방부가 원보다 튀어나감)를
+    # 없애기 위해 실제 치수(28x20cm, rear_overhang 5cm)를 그대로 반영.
+    body_front_cm: 23.0              # 후륜축 -> 전단 (body_length - rear_overhang)
+    rear_overhang_cm: 5.0            # 후륜축 -> 후단
+    half_width_cm: 10.0              # body_width / 2
+    wheelbase_cm: 18.0
+
+    # 2026-08-24: 앵커 보정. body_* 치수는 후륜축 기준인데 경로 점과 TF 는
+    # base_footprint 다. PhysiCar URDF(physicar.urdf.xacro) 는 base_footprint 를
+    # 휠베이스 **중앙** 에 둔다 (바퀴 x = ±wheelbase/2). 이 보정 없이 치수를
+    # 그대로 얹으면 판정 사각형이 9cm 앞으로 밀린다.
+    # kau_control VehicleParams::rear_axle_offset 과 같은 값이다.
+    rear_axle_offset_cm: -9.0
+
+    # 도로 이탈(감점) 판정용 바퀴 제원. 출처: physicar.urdf.xacro
+    # (track_width 0.16 "measured", wheel_width 0.035).
+    #
+    # 대회 규정: 흰 실선은 밟아도 되고 (선의 바깥 모서리가 곧 아스팔트 끝이라
+    # track 폴리곤과 일치한다), 네 바퀴가 전부 노면 밖으로 나가야 감점이다.
+    # 그래서 이탈 판정 대상은 차체가 아니라 바퀴이고, hard reject 기준은
+    # min_wheels_on=1 (규정 그대로) 이다. 더 보수적으로 몰고 싶으면 4 로 올린다.
+    # 규정보다 약한 이탈은 아래 w_road 비용이 흡수한다.
+    track_width_cm: 16.0
+    wheel_width_cm: 3.7
+    min_wheels_on: 1
+
+    # sim world -> map 변환 (kau_global_path 확인값, 회전 없음)
+    sim_to_map_ox: 3.68
+    sim_to_map_oy: 1.39
+    sim_to_map_rot_deg: 0.0
+
+    # --- PlannerParams ---
+    l_plan: 300.0                    # cm. 400 이상은 2-segment 고정 구조와
+                                      # 충돌해 오히려 악화됨 (실측, 늘리지 말 것)
+    ref_mode: "fuse"
+    # 2026-08-24: 0 으로 내렸다. /lane/center 는 카메라가 잡은 노란 중앙선이고,
+    # w_lane>0 이면 기준 프레임(위치/heading/곡률)이 그 관측으로 사실상 완전히
+    # 대체된다 (w=1.0*confidence). lane_gate 가 60cm 로 도로 반폭(35cm)보다
+    # 넓어서, 검출기가 흰선을 중앙선으로 오인해도(31.25cm 오차) 그대로 통과했다.
+    # 기준 프레임을 인지 비의존(global path + localization)으로 두기 위해 0.
+    # 되돌리려면 이 값만 올리면 된다 -- 코드 경로는 그대로 살아 있다.
+    w_lane: 0.0
+
+    kappa_margin: 0.95
+    bound_depth: 2
+    cusp_guard: 0.6
+    obs_margin: 4.0
+    lane_gate: 60.0
+    preview: 450.0                   # l_plan+preview=750cm. 스윕 결과 최적값,
+                                      # 600 이상은 오히려 악화
+
+    # 비용 가중치
+    w_obstacle: 4.0
+    w_ref: 1.0
+    w_kappa: 2.0
+    w_end: 0.6
+    w_continuity: 10.0               # 스윕 결과 10 근방 최적. 20+ 부터
+                                      # 회피 반응 지연으로 안전 악화
+    w_path_preview: 2.0
+
+    # 바퀴가 노면 밖인 구간의 비율 [0,1] 에 붙는 비용.
+    #
+    # hard reject 가 "네 바퀴 전부 밖" (규정) 이라 거의 걸리지 않는다. 그것만
+    # 두면 도로 제약이 사실상 사라져 잔디 위로 세 바퀴 걸친 경로가 정상 후보가
+    # 된다. 이탈을 벽이 아니라 트레이드오프로 두려고 비용으로 넣는다 -- 평소엔
+    # 노면 안으로 붙고, 그럴 만한 이유가 있을 때만 물고 나간다.
+    # 흰선을 밟기만 하는 것은 0 이다 (규정상 감점이 아니므로).
+    #
+    # 크기 근거 (스윕 전 초기값): 장애물 회피보다는 싸고 횡오프셋 선호보다는
+    # 확실히 비싸야 한다.
+    #   장애물 항 최대 w_obstacle*1.0 = 4.0   (충돌 회피가 항상 이겨야 함)
+    #   오프셋 항 d=20cm 에서 약 1.6
+    #   "경로의 10% 를 두 바퀴 이탈" = ratio 0.05 -> 1.5 가 되게
+    #   => 0.05 * w_road = 1.5, w_road = 30
+    # 아직 실측 스윕 전이다. 1-lap 로그의 off= 필드를 보고 조정할 것.
+    w_road: 30.0
+
+    clear_target: 15.0
+    d_scale: 18.0
+
+    # --- P0 앵커 (2026-08-25) ---
+    #
+    # 문제: P0 를 실측 자세에 두면 추종오차 e 가 매 틱 계획에 실린다. 첫 knot
+    # 이 0.25*l_plan(=75cm) 이라 플래너는 e 를 75cm 안에 없애라고 요구하는데
+    # (추가 곡률 ~ 4e/d^2), Pure Pursuit 의 횡오차 수렴에는 Ld(=50cm @1m/s)의
+    # 몇 배 거리가 든다. 오차가 줄기 전에 요구가 커져 발산한다:
+    #   e   3cm ->  +10.6% kappa_max
+    #   e   5cm ->  +17.6%
+    #   e  10cm ->  +35.2%
+    # 조향 70% 코너에서 e=7.1cm 면 kappa0 가 kappa_lim 을 넘어 **전 후보**가
+    # kappa_bound 로 탈락하고 kDegraded 로 떨어진다 (kappa(0) == kappa0 가
+    # 정확히 성립하기 때문).
+    #
+    # 대책: P0 를 이전 틱 경로 위 최근접점으로 옮긴다. 이 투영은 자차 편차를
+    # 종방향(진행, 남김)과 횡방향(추종오차, 버림)으로 정확히 가른다. 횡오차
+    # 수렴은 제어기 소관이고 Pure Pursuit 이 스스로 한다.
+    #
+    #   e <= lo  -> alpha=0 : 이전 경로의 G2 순수 연장 (루프 차단)
+    #   e >= hi  -> alpha=1 : 실측 자세 (측위 점프/물리 이탈에서 복귀)
+    #   사이     -> 선형 (하드 스위치는 고장 시점에 계획이 튄다)
+    #
+    # lo 는 정상 주행 추종오차보다 커야 루프가 끊긴다. /debug/steer 의
+    # cross_track_cm 분포를 보고 잡을 것.
+    #
+    # 안전: alpha<1 이면 발행 경로가 자차에서 (1-alpha)*e 만큼 떨어진다.
+    # road/obstacle 검사는 경로를 따라 하므로 그 값을 마진에 더한다
+    # (kRoadSafetyMarginCm 이 2cm 뿐이라 빠뜨리면 마진이 음수가 된다).
+    # 이 보정값은 유계다 -- lo=5/hi=15 이면 e=7.5cm 에서 최대 5.6cm.
+    anchor_blend_lo_cm: 5.0
+    anchor_blend_hi_cm: 15.0
+    anchor_max_age_sec: 0.5          # 이전 경로가 이보다 낡으면 alpha=1
+
+    # --- 검증 구간 (2026-08-25) ---
+    #
+    # 경로는 l_plan(300cm) 을 그리지만 hard gate(도로/곡률)는 이 길이까지만
+    # 건다. 그 너머는 도착 전에 재계획되므로 비용으로만 다룬다.
+    #
+    # 크기는 **제어기가 보는 점**이 정한다. Pure Pursuit 의 목표점은 경로
+    # 시작이 아니라 (경로 위 자차 위치 + Ld) 에 있고, 자차는 경로를 받은 뒤
+    # 다음 경로가 올 때까지 이미 앞으로 나가 있다:
+    #
+    #   필요 = Ld + (한 주기 이동) + LD_VALID_MARGIN_CM
+    #        = max(k_v*v, ld_min) + 100*v/plan_hz + 5   [cm, v in m/s]
+    #
+    # 저속 세팅(v_max 0.5)에서는 k_v*v(25cm) < ld_min(30cm) 이라 Ld 가 30 에
+    # 고정된다. plan_hz 5.0 기준으로
+    #
+    #     v 0.2 -> 30 + 4 + 5 = 39cm
+    #     v 0.5 -> 30 + 10 + 5 = 45cm   <- speed_controller v_max
+    #
+    # 60 은 여기에 1.33 배 여유. 하한 35 에 붙이지 않은 이유는 Ld 가 고정이라
+    # 여유 전부가 측위 오차 + 경로 지연 흡수에만 쓰이기 때문이다.
+    #
+    # 2026-08-25 plan_hz 10 -> 5 재계산: 한 주기 이동이 5 -> 10cm 로 늘어
+    # 필요값이 40 -> 45cm 가 됐다. 60 이 여전히 이를 넘으므로 값은 그대로
+    # 두지만, 여유가 1.5 -> 1.33 배로 줄었다. v_max 를 올리거나 plan_hz 를
+    # 더 낮추면 이 식을 다시 풀 것 (예: plan_hz 5, v 1.0 -> 50+20+5 = 75cm
+    # 로 60 을 넘긴다).
+    #
+    # 이력
+    #   kCommittedHorizonCm 52.422  세그먼트 단위로 잘라 실효 75cm (= v 1.0).
+    #                               v_max 2.0 에서 미검증 구간의 점을 보고
+    #                               조향 -> 실측 kmax 0.0230~0.0350 (R 43 /
+    #                               28.6cm). 차량 R_min 49.5cm 미만이라 애초에
+    #                               못 따라가는 곡선이었다.
+    #   145                         v_max 2.0 기준.
+    #   60                          v_max 0.5 저속 세팅 (2026-08-25).
+    #
+    # 이 값은 KauPath.valid_length 로도 발행되어 steer_controller 가 Ld 를
+    # 이 안으로 자른다 (안전망). 단, 제어기는 usable < ld_min(30cm) 이면
+    # 정지하므로 35cm 밑으로 내리지 말 것.
+    #
+    # ★ plan_hz / k_v / ld_min / v_max 중 하나라도 바꾸면 다시 계산할 것.
+    # ★ 올릴수록 후보 탈락이 늘어 st=1(degraded) 비율이 오른다. 바꾼 뒤
+    #   로그의 st= 분포를 반드시 재측정할 것.
+    #   ☐ 145 -> 60 변경 후 st= 분포 재측정 (미완)
+    validated_horizon_cm: 60.0
+
+    track_yaml_path: ""              # launch 가 채움

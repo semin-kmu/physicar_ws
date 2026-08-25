@@ -1,0 +1,34 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>kau_local_path_planner_lane</name>
+  <version>0.1.0</version>
+  <description>KAU AMET PhysiCar local path planner (lane-only variant). map/global path/localization 배제 -- /lane/left,/lane/right,/lane/center(KauPath) 만으로 backbone 구성 -> candidate quintic Bezier 생성 -> obstacle/road/curvature 제약 선택 -> /path/local</description>
+  <maintainer email="team11@physicar.local">KAU AMET Team</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>tf2</depend>
+  <depend>tf2_ros</depend>
+  <depend>tf2_geometry_msgs</depend>
+  <depend>kau_msgs</depend>
+  <depend>kau_control</depend>
+  <depend>eigen</depend>
+
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+  <test_depend>ament_cmake_gtest</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
