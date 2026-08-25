@@ -31,9 +31,18 @@ ROS 쪽에는 image_raw 만 bridge 되어 있어서 camera_info 가 비어 있�
     image_bridge:=true          image_raw 도 직접 bridge 해야 할 때
     viewer:=false               웹 뷰어(포트 5000) 없이 노드만
     params_file:=/path/to.yaml  다른 파라미터 파일로 교체
+    set_camera_info:=false      실차 카메라 캘리브 자동 주입 끄기
+    camera_info_file:=/path.yaml  주입할 캘리브 파일 교체
     pan_search:=false           카메라 pan 탐색 끄기 (기본: yaml)
     pan_aim:=false              카메라 pan 조준 끄기 (기본: yaml)
     pan_aim_source:=global      조준 근거를 전역경로로 (기본: yaml = lane)
+
+실차 카메라 드라이버는 캘리브 파일이 없으면 intrinsic 을 0 으로 채워
+발행하고, 인지 노드는 그걸 거부한다. 예전에는 사람이 매번 손으로
+`ros2 service call /camera/set_camera_info ...` 를 쳐야 했다. 이제
+set_camera_info 노드가 config/camera_info_real.yaml 을 그 서비스에
+실어 보내고 스스로 끝난다. 시뮬에는 그 서비스가 없으므로 기다렸다가
+"건너뜀" 한 줄만 남긴다 (gz bridge 가 camera_info 를 직접 낸다).
 
 pan_search / pan_aim / pan_aim_source 는 안 주면 yaml 값
 (pan_search_enable · pan_aim_enable · pan_aim_source)이 그대로 산다.
@@ -112,12 +121,36 @@ def lane_detection_node(context, *unused):
         if raw:
             overrides[param] = raw
 
+    # 플랫폼 오버레이. config/lane_detection.yaml 의 BEV 행 좌표는
+    # 시뮬 카메라(cy=180.000) 기준이라 실차(cy=169.603)에서는 지평선이
+    # 10.4 px 어긋난다. platform:=real 이면 그 세 값만 덮어쓴다.
+    # ROS 2 는 parameters 리스트 뒤쪽이 앞쪽을 이긴다.
+    params = [LaunchConfiguration('params_file')]
+
+    platform = LaunchConfiguration('platform').perform(context)
+
+    if platform and platform != 'sim':
+        overlay = (
+            Path(get_package_share_directory(PACKAGE)) /
+            'platform_overrides' /
+            f'lane_detection_{platform}.yaml'
+        )
+
+        if not overlay.is_file():
+            raise RuntimeError(
+                f"platform:={platform} 에 해당하는 오버레이가 없다: {overlay}"
+            )
+
+        params.append(str(overlay))
+
+    params.append(overrides)
+
     return [Node(
         package=PACKAGE,
         executable='kau_lane_detection_node',
         name='kau_lane_detection_node',
         output='screen',
-        parameters=[LaunchConfiguration('params_file'), overrides],
+        parameters=params,
     )]
 
 
@@ -126,6 +159,12 @@ def generate_launch_description():
         Path(get_package_share_directory(PACKAGE)) /
         'config' /
         'lane_detection.yaml'
+    )
+
+    default_camera_info = str(
+        Path(get_package_share_directory(PACKAGE)) /
+        'config' /
+        'camera_info_real.yaml'
     )
 
     camera_info_bridge = LaunchConfiguration('camera_info_bridge')
@@ -144,6 +183,33 @@ def generate_launch_description():
             'params_file',
             default_value=default_params,
             description='차선 인지 노드 파라미터 yaml',
+        ),
+
+        DeclareLaunchArgument(
+            'platform',
+            default_value='sim',
+            description=(
+                'sim | real. real 이면 platform_overrides/'
+                'lane_detection_real.yaml 로 BEV 행 좌표를 덮어쓴다 '
+                '(실차 cy 169.603 기준)'
+            ),
+        ),
+
+        # 실차용. 카메라 드라이버의 /camera/set_camera_info 에 캘리브를
+        # 넣어 준다. 시뮬에는 그 서비스가 없어 조용히 건너뛴다.
+        DeclareLaunchArgument(
+            'set_camera_info',
+            default_value='true',
+            description=(
+                '실차 카메라 드라이버에 캘리브레이션을 자동 주입할지. '
+                '/camera/set_camera_info 가 없으면(시뮬) 건너뛴다'
+            ),
+        ),
+
+        DeclareLaunchArgument(
+            'camera_info_file',
+            default_value=default_camera_info,
+            description='set_camera_info 로 보낼 캘리브레이션 yaml',
         ),
 
         DeclareLaunchArgument(
@@ -207,6 +273,27 @@ def generate_launch_description():
                 "global = /path/global + 측위. "
                 "주행 중 ros2 param set 으로도 바꿀 수 있다"
             ),
+        ),
+
+        # ------------------------------------------------------------
+        # Camera Calibration Injection
+        #
+        # 한 번 부르고 스스로 죽는 일회성 노드다. 인지 노드보다 먼저
+        # 두지만 순서를 보장하지는 않는다 -- 보장할 필요도 없다.
+        # 인지 노드는 CameraInfo 가 올 때까지 기다리고, 유효하지 않은
+        # 것은 무시하다가 유효한 게 오는 순간 잡는다.
+        # ------------------------------------------------------------
+
+        Node(
+            package=PACKAGE,
+            executable='set_camera_info.py',
+            name='kau_set_camera_info',
+            output='screen',
+            parameters=[{
+                'camera_info_file': LaunchConfiguration('camera_info_file'),
+                'use_sim_time': use_sim_time,
+            }],
+            condition=IfCondition(LaunchConfiguration('set_camera_info')),
         ),
 
         # ------------------------------------------------------------

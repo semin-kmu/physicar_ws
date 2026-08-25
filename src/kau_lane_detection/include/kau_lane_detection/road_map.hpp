@@ -138,11 +138,29 @@ struct LaneLine
 
 inline constexpr int LANE_COUNT = 2;
 
+// 2026-08-25: 실차 트랙 실측으로 확정. 이전 값(31.25 / 62.50)은
+// 시뮬 mesh 실측이었다.
+//
+//   흰선 안쪽 간격        56.0 cm
+//   흰선 폭                7.4 cm
+//   -> 흰선 중심 <-> 중심  56.0 + 7.4 = 63.4 cm
+//   -> 차로 폭             63.4 / 2   = 31.7 cm
+//
+// 시뮬 mesh(31.25 / 62.50)와는 1.44% 다르지만 양쪽에 같은 값을
+// 쓴다. 이 상수가 걸리는 게이트 중 가장 빡빡한 것이 축척 불일치
+// 경고의 +-15% 라 10배 여유이고, 회랑(+-40%) / 중심선 이탈(30%) /
+// 좌우 판정(40%) 은 그보다 더 넓다. constexpr 이라 플랫폼별로
+// 나눌 수도 없으므로, 배포 대상인 실차 값으로 통일한다.
+//
+// 이전에 "실차 실측치가 서로 안 맞아 보류" 로 남아 있던 것은
+// 56 을 아스팔트 총 폭으로, 흰선 폭을 5.6 으로 잘못 적었기
+// 때문이었다. 56 은 흰선 **안쪽 간격**이고 폭은 7.4 다.
+
 // 인접 선 중심 사이 거리 [cm] = 차로 폭
-inline constexpr double LANE_WIDTH_CM = 31.25;
+inline constexpr double LANE_WIDTH_CM = 31.7;
 
 // 흰선 중심 <-> 흰선 중심 [cm] = 도로 폭
-inline constexpr double ROAD_WIDTH_CM = 62.50;
+inline constexpr double ROAD_WIDTH_CM = 63.4;
 
 
 inline constexpr LaneLine LINES[] =

@@ -63,6 +63,7 @@ install(PROGRAMS
   scripts/lane_viewer.py
   scripts/hls_tuner.py
   scripts/lane_failure_logger.py
+  scripts/set_camera_info.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
@@ -75,6 +76,7 @@ install(DIRECTORY
   launch
   config
   web
+  platform_overrides
   DESTINATION share/${PROJECT_NAME}
 )
 

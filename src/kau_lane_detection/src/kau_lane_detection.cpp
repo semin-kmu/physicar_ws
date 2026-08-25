@@ -5731,6 +5731,56 @@ void KauLaneDetectionNode::updatePanSearch(
                 ? "Pan 조준 불가 (측위 또는 /path/global 없음)"
                 : "Pan 조준 불가 (차선 근거 부족)"
         );
+
+
+        // ------------------------------------------------------------
+        // 카메라가 이미 돌아가 있으면 Holding 으로 넘긴다.
+        //
+        // 조준은 매 프레임 pan_state_ 를 Idle 로 눌러 두므로, 여기서
+        // 그냥 흘려 보내면 "돌아간 각을 든 채 Idle" 이 된다. 그 상태를
+        // 곧바로 0 으로 되돌리면 **직선을 확인하기도 전에 복귀**한다 —
+        // 근거가 한두 프레임 끊긴 것뿐인데 커브 한가운데서 정면으로
+        // 돌아섰다가 다시 조준하는 왕복이 된다 (§8 실측 15초 9회의
+        // 형태 그대로다).
+        //
+        // 그래서 복귀 판정을 Holding 에 맡긴다. 이미 있는 게이트가
+        // 정확히 이 질문에 답한다 — "정면으로 돌려도 그 선이 화면에
+        // 남는가" 를 pan_return_confirm_frames 프레임 연속으로 본다.
+        // 끝내 안 서면 pan_hold_timeout_s 가 상한을 준다.
+        //
+        // pan_search_dir_ 은 Holding 이 "어느 쪽 선을 보고 판정할지"
+        // 고르는 데 쓰므로 여기서 세워야 한다. 조준 경로는 이 값을
+        // 0 으로 두는데, 그대로 두면 Holding 이 부호 판정에서 항상
+        // 오른쪽을 보게 된다. 지금 돌아가 있는 방향이 곧 보고 있는
+        // 방향이다 (+ = 왼쪽).
+        // ------------------------------------------------------------
+        if (
+            pan_search_enable_ &&
+            std::abs(pan_cmd_deg_) > 1e-6 &&
+            pan_state_ == PanSearchState::Idle
+        )
+        {
+            pan_search_dir_ = (pan_cmd_deg_ > 0.0) ? +1 : -1;
+
+            pan_state_ = PanSearchState::Holding;
+
+            pan_straight_streak_ = 0;
+
+            pan_hold_start_ = frame_stamp;
+
+            RCLCPP_INFO(
+                this->get_logger(),
+                "조준 포기 시점에 카메라가 %+.1fdeg 돌아가 있다. "
+                "바로 복귀하지 않고 유지하며 복귀 조건을 본다 "
+                "(정면에서도 %s 흰선이 %d점 이상 %d프레임 연속 "
+                "보이면 복귀, 최대 %.1fs).",
+                pan_cmd_deg_,
+                (pan_search_dir_ > 0) ? "왼쪽" : "오른쪽",
+                std::max(4, pan_return_min_points_),
+                pan_return_confirm_frames_,
+                pan_hold_timeout_s_
+            );
+        }
     }
 
 
@@ -5790,6 +5840,45 @@ void KauLaneDetectionNode::updatePanSearch(
     {
         case PanSearchState::Idle:
         {
+            // ------------------------------------------------
+            // 안전망 — Idle 인데 목표각이 0 이 아닌 경우.
+            //
+            // Idle 은 "카메라가 돌아 있을 이유가 없는 상태" 이므로
+            // 목표각도 0 이어야 하는데, 그걸 보장하는 주체가
+            // 없었다. 아래 분기들은 **탐색을 새로 걸 때만**
+            // commandPan 을 부르고 나머지 경로는 전부 그냥
+            // break 라, 어디선가 물려받은 각이 매 프레임 그대로
+            // 재발행됐다 -- "돌아간 뒤 복귀를 안 함" 의 정체다.
+            //
+            // 정상 경로에서는 여기가 안 돈다:
+            //
+            //   Returning 완료 -> 목표각이 이미 0
+            //   조준 포기      -> 위에서 Holding 으로 넘긴다
+            //                     (복귀 판정을 거쳐서 돌아온다)
+            //
+            // 즉 여기 걸린다는 것은 위 두 경로를 타지 않고 각이
+            // 남았다는 뜻이다. 그때만 램프로 0 으로 되돌린다.
+            // 이번 프레임에 탐색이 걸리면 아래
+            // commandPan(pan_start_deg_ * dir) 이 덮으므로
+            // 순서상 손해가 없다.
+            // ------------------------------------------------
+            if (std::abs(pan_goal_deg_) > 1e-9)
+            {
+                RCLCPP_INFO(
+                    this->get_logger(),
+                    "Pan 복귀(안전망): Idle 인데 목표각이 남아 있다 "
+                    "(%+.1fdeg -> 0.0deg, %.0fdeg/s 램프, 약 %.2fs)",
+                    pan_goal_deg_,
+                    pan_rate_deg_s_,
+                    (pan_rate_deg_s_ > 0.0)
+                        ? std::abs(pan_goal_deg_) / pan_rate_deg_s_
+                        : 0.0
+                );
+
+                commandPan(0.0);
+            }
+
+
             left_miss_streak_ =
                 (left.found_count == 0)
                     ? left_miss_streak_ + 1 : 0;
@@ -6066,6 +6155,15 @@ void KauLaneDetectionNode::updatePanSearch(
             {
                 // 근거 자체가 없다 (그 선을 이번 프레임에 못 봤거나
                 // 캘리브레이션 전). 판정 불가 -> 카운트를 끊는다.
+                //
+                // ★ 예전에는 여기서 break 했다. 그런데 아래
+                //   pan_hold_timeout_s 검사가 이 break 뒤에 있어서,
+                //   **근거가 아예 없는 동안에는 타임아웃이 한 번도
+                //   돌지 않았다.** 조준 포기로 Holding 에 들어오는
+                //   경우가 정확히 그 상황이라(근거가 없어서 포기한
+                //   것이다) 상한이 있으나 마나였다. break 를 빼고
+                //   아래 타임아웃까지 흘려 보낸다 — 복귀 판정은
+                //   streak 가 0 이라 어차피 통과하지 못한다.
                 pan_straight_streak_ = 0;
 
                 RCLCPP_INFO_THROTTLE(
@@ -6076,12 +6174,8 @@ void KauLaneDetectionNode::updatePanSearch(
                     (pan_search_dir_ > 0) ? "왼쪽" : "오른쪽",
                     pan_cmd_deg_
                 );
-
-                break;
             }
-
-
-            if (visible >= min_pts)
+            else if (visible >= min_pts)
             {
                 ++pan_straight_streak_;
             }
@@ -6105,7 +6199,10 @@ void KauLaneDetectionNode::updatePanSearch(
             }
 
 
-            if (pan_straight_streak_ >= pan_return_confirm_frames_)
+            if (
+                visible >= 0 &&
+                pan_straight_streak_ >= pan_return_confirm_frames_
+            )
             {
                 RCLCPP_INFO(
                     this->get_logger(),

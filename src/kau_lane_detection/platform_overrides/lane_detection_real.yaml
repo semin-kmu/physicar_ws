@@ -1,0 +1,47 @@
+# 실차 전용 BEV 오버레이 — lane_detection.yaml 위에 덧씌운다.
+#
+#   ros2 launch kau_lane_detection lane_detection.launch.py platform:=real
+#
+# config/lane_detection.yaml 의 BEV 행 좌표는 **시뮬 카메라(cy=180.000)**
+# 기준으로 유도된 값이다. 실차는 주점이 다르다:
+#
+#   시뮬 cy 180.000  (Gazebo 는 주점을 항상 이미지 중심에 둔다)
+#   실차 cy 169.603  (getOptimalNewCameraMatrix 결과, platform_overrides/
+#                     ov5647_480x360.yaml 의 camera_matrix 와 같은 값)
+#
+# 지평선 행도 지면 행도 전부 cy 를 기준으로 잡히므로, 세 값이 정확히
+# cy 차이(10.397 px)만큼 위로 내려간다. 그 외에는 바꿀 것이 없다 —
+# fy 가 양쪽 다 261.559 이고, sx/sy/비등방/lane_width_px 는 cy 에
+#무관하다.
+#
+#                        시뮬(기본)   실차(여기)   차이
+#   bev_vanishing_y        169.57      159.17     -10.40
+#   bev_src_top_y          190.32      179.93     -10.39
+#   bev_src_bottom_y       286.10      275.71     -10.39
+#
+# 세 값 모두 카메라 2.0 deg 하향(camera_tilt_deg: 2.0)을 전제한다.
+# 틸트를 바꾸면 vanishing_y = cy + fy*tan(pitch) 로 다시 유도할 것
+# (부호 주의: 광학 pitch 는 아래가 음수, /camera/tilt 는 아래가 양수).
+#
+# ★ 실차에서 반드시 검증할 것 ★
+#
+# 위 값들은 **유도값이지 실측값이 아니다.** 유도에 쓴 총 pitch
+# -2.284 deg 는 "명령 2.0 deg 하향 + 마운트 실측편차 -0.284 deg" 인데,
+# 그 -0.284 deg 는 **시뮬** 영상에서 잰 값(옛 bev_vanishing_y 179.0 이
+# 당시 cy 180.0 보다 1 px 위였던 것)이다. 실차 마운트가 같은 편차를
+# 가질 이유는 없다. 1 px 오차 = 0.22 deg 다.
+#
+# 검증법: 직선 구간 정지 상태에서 bev_vanishing_y 를 런타임으로 훑어
+# BEV 좌/우 흰선 간격이 위아래로 일정해지는 값을 찾는다. 이 파라미터는
+# refreshBevParameters() 가 매 프레임 다시 읽으므로 재시작이 필요 없다:
+#
+#   ros2 param set /kau_lane_detection_node bev_vanishing_y 158.0
+#
+# 확정되면 그 값과 함께 top_y/bottom_y 도 같은 식으로 다시 유도해
+# 여기에 반영할 것 (셋이 같은 지평선을 공유해야 한다).
+
+kau_lane_detection_node:
+  ros__parameters:
+    bev_vanishing_y: 159.17
+    bev_src_top_y: 179.93
+    bev_src_bottom_y: 275.71
