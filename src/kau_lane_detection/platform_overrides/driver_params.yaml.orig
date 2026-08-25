@@ -59,6 +59,7 @@ camera:  # node name = 'camera'
     # format: "MJPEG"  # Hardware JPEG - not supported by this camera
     # 15 fps = 66666 microseconds
     FrameDurationLimits: [66666, 66666]
+    # camera_info_url: "file:///home/physicar/physicar_ws/physicar_ws/src/kau_lane_detection/platform_overrides/ov5647_480x360.yaml"
     # --- Colour / exposure tuning disabled to fall back to libcamera defaults ---
     # AwbEnable: false
     # ColourGains: [0.9, 1.0]
