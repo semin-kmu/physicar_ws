@@ -10,14 +10,46 @@
 
 
 # ====================================================================
+# 노드 스위치 — 어느 노드를 띄울지
+# ====================================================================
+#
+# 왼쪽이 노드 이름(kau_state_machine/config/bringup.yaml 의 name),
+# 오른쪽이 true/false. false 면 이번 기동에서 뺀다.
+#
+# 순서는 실제 기동 순서(단계 0 -> 9)와 같다. 여기서 순서를 바꿔도
+# 기동 순서는 안 바뀐다 -- 순서의 주인은 bringup.yaml 이다.
+#
+# 표에 없는 노드는 켠 것으로 본다. 없는 이름을 적으면 기동이 선다.
+#
+# ★ option 스위치보다 이 표가 세다. 주행 필수 노드도 뺄 수 있으니
+#   끄기 전에 그게 없어도 되는지 확인할 것. 뺀 노드는 기동 로그에
+#   경고로 남는다.
+#
+KAU_NODES="
+    clock_gate                    true
+    platform_ekf_pause            true
+    kau_ekf                       true
+    map_server                    true
+    amcl                          true
+    map_amcl_lifecycle_manager    true
+    laser_scan_clusterer          true
+    start_signal_detector         true
+    camera_info_bridge            true
+    kau_lane_detection_node       false
+    kau_lane_detection_viewer     false
+    global_path_publisher         true
+    local_planner_node            true
+    state_machine                 true
+    steer_controller              true
+    speed_controller              true
+"
+
+# ====================================================================
 # 설정 — 여기만 고친다
 # ====================================================================
 
-# 차선 인지 BEV 웹 뷰어 (http://localhost:5000).
-KAU_LANE_VIEWER=true
-
 # Gazebo 는 true, 실제 차량은 false.
-KAU_USE_SIM_TIME=false
+KAU_USE_SIM_TIME=true
 
 # 로그 디렉터리 이름 (~/.ros/kau/<이름>). 비우면 기동 시각으로 자동
 KAU_RUN_ID=""
@@ -48,16 +80,34 @@ then
     . "${KAU_WS}/install/setup.bash"
 fi
 
-# 빈 값은 넘기지 않는다. launch 쪽 기본값이 살아야 한다.
-kau_args=(
-    "lane_viewer:=${KAU_LANE_VIEWER}"
-    "use_sim_time:=${KAU_USE_SIM_TIME}"
-)
-[ -n "${KAU_RUN_ID}" ]       && kau_args+=("run_id:=${KAU_RUN_ID}")
-[ -n "${KAU_BRINGUP_YAML}" ] && kau_args+=("bringup_yaml:=${KAU_BRINGUP_YAML}")
+# 표를 읽어 false 인 이름만 모은다. 파이프를 쓰면 서브셸이라 결과가
+# 안 남으므로 here-string 으로 먹인다.
+kau_skip=""
+kau_bad=""
+while read -r kau_name kau_on _; do
+    case "${kau_name}" in
+        ''|'#'*) continue ;;
+    esac
+    case "${kau_on}" in
+        true)  ;;
+        false) kau_skip="${kau_skip:+${kau_skip},}${kau_name}" ;;
+        *)     kau_bad="${kau_bad} ${kau_name}=${kau_on:-(빈값)}" ;;
+    esac
+done <<< "${KAU_NODES}"
 
-echo "[run.sh] ros2 launch kau_state_machine state_machine.launch.py ${kau_args[*]}"
-ros2 launch kau_state_machine state_machine.launch.py "${kau_args[@]}"
+if [ -n "${kau_bad}" ]; then
+    # 오타를 그냥 켠 것으로 넘기면 끈 줄 알았던 노드가 조용히 뜬다.
+    echo "[run.sh] KAU_NODES 는 true 나 false 만 받는다:${kau_bad}" >&2
+else
+    # 빈 값은 넘기지 않는다. launch 쪽 기본값이 살아야 한다.
+    kau_args=("use_sim_time:=${KAU_USE_SIM_TIME}")
+    [ -n "${kau_skip}" ]         && kau_args+=("skip:=${kau_skip}")
+    [ -n "${KAU_RUN_ID}" ]       && kau_args+=("run_id:=${KAU_RUN_ID}")
+    [ -n "${KAU_BRINGUP_YAML}" ] && kau_args+=("bringup_yaml:=${KAU_BRINGUP_YAML}")
+
+    echo "[run.sh] ros2 launch kau_state_machine state_machine.launch.py ${kau_args[*]}"
+    ros2 launch kau_state_machine state_machine.launch.py "${kau_args[@]}"
+fi
 
 # source 로 불렸을 때 셸에 흔적을 남기지 않는다.
-unset kau_args KAU_WS
+unset kau_args kau_skip kau_bad kau_name kau_on KAU_WS
