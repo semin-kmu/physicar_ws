@@ -9,8 +9,16 @@
     # --- 렌더 ---
     # ROS 수신 주기와 무관하다. 화면만 이 주기로 다시 그린다.
     # 플롯 데이터는 콜백에서 전량 링버퍼에 쌓으므로 50 Hz 신호도 누락되지 않는다.
-    render_hz: 10.0
-    history_s: 30.0                 # 플롯 x 축 길이 = 롤링 버퍼 길이
+    #
+    # 렌더 예산 (소프트웨어 raster 측정, 프레임당):
+    #   antialias 끔      1610 -> 80 ms   viz.init
+    #   5 Hz              -50 %
+    #   history 15 s      -25 %  (플롯 점 수 1500 -> 750)
+    #   창 1280x720       -13 %  viz.run
+    # 올리려면 render_hz 부터 올릴 것. history_s 는 플롯 한 화면에 담기는
+    # 시간이라 값을 바꾸면 보이는 것이 바뀐다.
+    render_hz: 5.0
+    history_s: 15.0                 # 플롯 x 축 길이 = 롤링 버퍼 길이
 
     # --- 프레임 ---
     # map -> odom -> base_link 를 map 패널에 ROS 표준 축 마커로 그린다.
@@ -79,6 +87,8 @@
         lane_viewer: true           # run.sh 의 KAU_LANE_VIEWER
 
       # 주기를 잴 대표 토픽. "<노드> | <topic> | <타입> | <기대 Hz>"
+      # topics 에 이미 있는 토픽(/odom · /speed · /steering)은 표시용 구독에서
+      # 주기를 같이 잰다. 여기 적어도 구독이 하나 더 생기지 않는다.
       # 여기 없는 노드는 그래프 존재만으로 판정하고 Hz 칸을 비운다
       #   map_amcl_lifecycle_manager  발행 토픽 없음
       #   map_server                  /map 은 latched

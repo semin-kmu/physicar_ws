@@ -48,7 +48,11 @@ CAR_HALF_W = 10.0
 
 
 def init(title: str = "KAU AMET GUI"):
-    pg.setConfigOptions(antialias=True, background="w", foreground="k")
+    # antialias 가 렌더 비용의 거의 전부다 (측정 1610 -> 80 ms/frame).
+    # pyqtgraph 는 aa 를 켜면 곡선을 drawLines 가 아니라 drawPath 로 그린다
+    # (PlotCurveItem._shouldUseDrawLineSegments). 같은 조건에 선 굵기 > 1.0 도
+    # 있으므로 W_PLOT · W_PATH 를 1.0 이하로 내리지 말 것.
+    pg.setConfigOptions(antialias=False, background="w", foreground="k")
     return pg.mkQApp(title)
 
 
@@ -353,6 +357,9 @@ def draw_map_image(plot, img, res_m: float, ox_m: float, oy_m: float):
     # pgm row 0 은 월드 y 최대다. ImageItem 은 y 가 위로 증가하므로 뒤집는다.
     it.setImage(np.flipud(img).T, levels=(0, 255))
     it.setRect(QtCore.QRectF(x0, y0, w * res, h * res))
+    # 배경은 안 바뀌는데 매 프레임 다시 확대돼 그려진다 (측정 20 ms/frame).
+    # 캐시해 두면 뷰 변환이 바뀔 때만 다시 만든다.
+    it.setCacheMode(pg.QtWidgets.QGraphicsItem.DeviceCoordinateCache)
     plot.addItem(it)
 
     # 맵 경계 (viz.draw_map_border 와 같은 규약)
@@ -366,7 +373,8 @@ def draw_map_image(plot, img, res_m: float, ox_m: float, oy_m: float):
     return it
 
 
-def run(widget, title: str, size=(1600, 950)) -> None:
+# 창 크기. 페인트 비용이 픽셀 수를 따라간다 (1600x950 -> 1280x720 에서 -13 %).
+def run(widget, title: str, size=(1280, 720)) -> None:
     widget.setWindowTitle(title)
     widget.resize(*size)
     widget.show()

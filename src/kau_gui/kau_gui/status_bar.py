@@ -54,15 +54,28 @@ class StatusBar(QtWidgets.QWidget):
         self.setFixedHeight(PAD * 2 + CELL_H)
 
     def set_state(self, nodes):
-        """nodes: [(name, 'ok'|'stale'|'absent', hz|None)]."""
-        self._nodes = nodes
+        """nodes: [(name, 'ok'|'stale'|'absent', hz|None)].
 
+        값이 같으면 다시 그리지 않는다. 갱신은 1 Hz 인데 렌더는 그보다
+        빨라, 그냥 두면 같은 그림을 몇 번씩 다시 칠한다.
+        """
+        if nodes == self._nodes:
+            return
+        self._nodes = list(nodes)
+        self._fit()
+        self.update()
+
+    def resizeEvent(self, ev):
+        # 폭이 바뀌면 열 수가 바뀐다. 높이도 같이 따라가야 한다.
+        super().resizeEvent(ev)
+        self._fit()
+
+    def _fit(self):
         # 창을 좁히면 열이 줄어 행이 늘어난다. 높이를 같이 안 늘리면
         # 아래 행이 잘려 노드가 사라진 것처럼 보인다.
         want = PAD * 2 + self._rows() * CELL_H
         if self.height() != want:
             self.setFixedHeight(want)
-        self.update()
 
     def _cols(self):
         return max(1, max(1, self.width() - PAD * 2) // CELL_W)

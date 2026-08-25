@@ -173,14 +173,20 @@ class Bridge(Node):
         # 그 1 초 동안 "감시 대상 없음" 이 떠서 설정이 틀린 것처럼 보인다.
         self.nodes = [(n, "absent", None) for n in self.watch_names]
         self._rates = {}                        # topic -> RateMeter
+        self._subscribed = set()                # 이미 구독한 토픽
 
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
+        # 순서가 중요하다. meter 를 먼저 만들어 두어야 표시용 구독이 같은
+        # 토픽을 잡을 때 주기를 거기서 같이 잰다.
+        self._prepare_rates()
         self._make_display_subs()
         self._make_status_subs()
 
-        self.create_timer(0.05, self._on_tf)          # 20 Hz
+        # TF 를 렌더보다 자주 볼 이유가 없다. 화면이 5 Hz 인데 20 Hz 로
+        # 뜨면 네 번 중 세 번은 버린다.
+        self.create_timer(1.0 / max(1.0, self.render_hz), self._on_tf)
         if self.watch_names:
             self.create_timer(1.0, self._on_graph)    # 1 Hz
 
@@ -195,8 +201,8 @@ class Bridge(Node):
     def _declare(self):
         d = self.declare_parameter
 
-        self.render_hz = d("render_hz", 10.0).value
-        self.history_s = d("history_s", 30.0).value
+        self.render_hz = d("render_hz", 5.0).value
+        self.history_s = d("history_s", 15.0).value
 
         self.map_frame = d("frames.map", "map").value
         self.odom_frame = d("frames.odom", "odom").value
@@ -308,17 +314,30 @@ class Bridge(Node):
                     f"[kau_gui] status.watch 의 기대 Hz 가 수가 아니다: {line!r}")
         return out
 
-    def _make_status_subs(self):
-        """감시 토픽마다 raw 구독 하나. 역직렬화하지 않고 수신 시각만 찍는다."""
+    def _prepare_rates(self):
+        """감시 토픽마다 RateMeter 하나. 구독보다 먼저 만든다."""
         for name in self.watch_names:
             spec = self.watch_spec.get(name)
             if spec is None:
                 continue
             topic, typ, rate = spec
-            if not topic or not typ or rate <= 0.0 or topic in self._rates:
+            if not topic or not typ or rate <= 0.0:
+                continue
+            self._rates.setdefault(topic, RateMeter())
+
+    def _make_status_subs(self):
+        """표시용으로 안 잡는 감시 토픽만 raw 구독. 역직렬화하지 않고
+        수신 시각만 찍는다."""
+        for name in self.watch_names:
+            spec = self.watch_spec.get(name)
+            if spec is None:
+                continue
+            topic = spec[0]
+            typ = spec[1]
+            if topic not in self._rates or topic in self._subscribed:
                 continue
 
-            self._rates[topic] = RateMeter()
+            self._subscribed.add(topic)
             try:
                 # rclpy 는 타입 문자열을 못 받는다. 클래스로 풀어 준다.
                 self.create_subscription(
@@ -398,12 +417,30 @@ class Bridge(Node):
     # 구독
     # ------------------------------------------------------------------
 
+    def _sub(self, msg_type, topic, cb):
+        """표시용 구독 하나.
+
+        감시 목록에 같은 토픽이 있으면 주기도 여기서 잰다. 따로 구독하면
+        같은 메시지를 두 번 받는다 -- /odom · /speed · /steering 이 그렇고,
+        셋을 합치면 초당 130 건이다. mark 는 콜백 본체보다 먼저다.
+        _on_scan 처럼 중간에 return 하는 콜백이 있어서 뒤에 두면 주기가
+        끊긴 것으로 잘못 읽힌다.
+        """
+        meter = self._rates.get(topic)
+        if meter is not None:
+            body = cb
+
+            def cb(m, _body=body, _meter=meter):
+                _meter.mark(self._now())
+                _body(m)
+
+        self._subscribed.add(topic)
+        self.create_subscription(msg_type, topic, cb, observe_qos())
+
     def _make_display_subs(self):
         t = self.topics
-        self.create_subscription(
-            LaserScan, t["scan"], self._on_scan, observe_qos())
-        self.create_subscription(
-            MarkerArray, t["obstacles"], self._on_markers, observe_qos())
+        self._sub(LaserScan, t["scan"], self._on_scan)
+        self._sub(MarkerArray, t["obstacles"], self._on_markers)
 
         # latched 인 것은 /path/global (KauPath) 이고, 여기서 보는
         # /viz/path/global (nav_msgs/Path) 은 아니다. 발행측이 RViz 기본에
@@ -411,24 +448,17 @@ class Bridge(Node):
         # TRANSIENT_LOCAL 로 구독하면 durability 가 안 맞아 **한 건도 안 온다**
         # ("requesting incompatible QoS. No messages will be sent to it").
         # 나중에 띄우면 다음 재발행까지 비지만 rate 1 Hz 라 최대 1 초다.
-        self.create_subscription(
-            Path, t["path_global"],
-            lambda m: self._on_path(m, self.path_global), observe_qos())
-        self.create_subscription(
-            Path, t["path_local"],
-            lambda m: self._on_path(m, self.path_local), observe_qos())
-        self.create_subscription(
-            Path, t["path_lane"],
-            lambda m: self._on_path(m, self.path_lane), observe_qos())
+        self._sub(Path, t["path_global"],
+                  lambda m: self._on_path(m, self.path_global))
+        self._sub(Path, t["path_local"],
+                  lambda m: self._on_path(m, self.path_local))
+        self._sub(Path, t["path_lane"],
+                  lambda m: self._on_path(m, self.path_lane))
 
-        self.create_subscription(
-            Odometry, t["odom"], self._on_odom, observe_qos())
-        self.create_subscription(
-            Float64, t["speed_cmd"], self._on_speed, observe_qos())
-        self.create_subscription(
-            Float64, t["steering"], self._on_steering, observe_qos())
-        self.create_subscription(
-            SteerDebug, t["steer_debug"], self._on_debug, observe_qos())
+        self._sub(Odometry, t["odom"], self._on_odom)
+        self._sub(Float64, t["speed_cmd"], self._on_speed)
+        self._sub(Float64, t["steering"], self._on_steering)
+        self._sub(SteerDebug, t["steer_debug"], self._on_debug)
 
     # ------------------------------------------------------------------
     # 표시용 콜백

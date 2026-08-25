@@ -141,9 +141,9 @@ ros2 run kau_gui kau_gui --ros-args \
 
 `/odometry/filtered` 는 **존재하지 않는다.** `bringup.yaml` 이 `/odom` 으로 remap 한다.
 
-상태 띠는 위와 별개로 `status.watch` 의 대표 토픽을 하나씩 더 구독한다.
-`raw=True` 라 역직렬화하지 않고 **수신 시각만 찍는다** — 주기 계산에 메시지
-내용이 필요 없으므로 무거운 토픽이라도 비용이 붙지 않는다.
+상태 띠는 `status.watch` 의 대표 토픽에서 주기를 잰다. 위 표에 이미 있는
+토픽(`/odom` · `/speed` · `/steering`)은 **표시용 구독을 그대로 쓴다.** 나머지는
+`raw=True` 구독을 하나씩 더 만들어 역직렬화 없이 **수신 시각만 찍는다.**
 
 ## 5. 설계 규약
 
@@ -153,6 +153,26 @@ ros2 run kau_gui kau_gui --ros-args \
 | 시간축은 GUI 노드 clock 기준 수신 시각 | 발행 노드마다 sim/system clock 이 섞이면 축이 어긋난다 |
 | 스캔은 TF 실패 시 갱신하지 않고 늙게 둔다 | 낡은 점군을 최신인 척 그리는 것이 가장 위험하다 |
 | 색은 `viz.py` 한 곳 | 흩어 두면 범례와 실제 선 색이 어긋난다 |
+| antialias 끔 · 렌더 5 Hz · 창 1280x720 | 아래 렌더 예산 |
+
+### 렌더 예산
+
+프레임당 비용 (소프트웨어 raster 측정). 켠 채로 두면 10 Hz 를 못 따라간다.
+
+| 항목 | 효과 |
+| --- | --- |
+| `antialias=False` (`viz.init`) | **1840 -> 60 ms.** pyqtgraph 는 aa 를 켜면 곡선을 `drawLines` 대신 `drawPath` 로 그린다 |
+| `render_hz` 5 | -50 % |
+| `history_s` 15 | -25 % |
+| 창 1280x720 (`viz.run`) | -13 % |
+| 맵 배경 `DeviceCoordinateCache` | -5 ms. 안 바뀌는 그림을 매 프레임 다시 확대하고 있었다 |
+| 상태 띠 값 바뀔 때만 재도색 | -5 ms |
+
+기각한 것: `setDownsampling(peak)` (점이 이미 2.5 pt/px 라 효과 없음),
+링버퍼 numpy 화 (snapshot 이 0.28 ms 라 전체의 0.3 %), 점군 단색화 (거리색을
+버릴 만큼 안 싸다).
+
+선 굵기를 1.0 이하로 내리지 말 것. `drawLines` 빠른 경로 조건에 포함된다.
 
 ## 6. 미확정
 
@@ -160,4 +180,5 @@ ros2 run kau_gui kau_gui --ros-args \
 | --- | --- | --- |
 | 실행 검증 | **미검증** | 실차에서 확인 |
 | 실행 위치 | 미정 | `09` 문서는 노트북 전용. 차량에서 띄우면 렌더 부하가 주행에 얹힌다 |
+| 렌더 예산 | 소프트웨어 raster 기준 | 실차 GPU 가 있으면 `useOpenGL` 로 더 내릴 여지 |
 | 맵 배경 | `kau_localization` 의 pgm | `/map` 토픽은 구독하지 않는다 |
