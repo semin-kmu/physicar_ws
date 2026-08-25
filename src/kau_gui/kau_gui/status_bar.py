@@ -3,6 +3,10 @@
 셀 하나 = 노드 하나. 좌측부터 이름 · 상태등 · Hz 한 줄이다.
 
     steer_controller  ●  49.7Hz
+    map_server        ●  -
+
+Hz 칸의 "-" 는 **잴 대표 토픽이 없다** 는 뜻이다 (status.watch 에 없는 노드).
+측정에 실패한 것이 아니다 -- 그쪽은 상태등이 빨강으로 간다.
 
 색
     초록  정상 (그래프에 있고 대표 토픽이 기대 주기대로 온다)
@@ -41,6 +45,10 @@ HZ_W = 38.0         # Hz 칸. "129.9Hz" 가 7 pt 에서 37 px
 
 FONT_NAME = 7.5
 FONT_HZ = 7.0
+
+# 잴 대표 토픽이 없는 노드의 Hz 칸. 빈칸으로 두면 "측정 실패" 와 구분이
+# 안 된다. en dash 다 -- 하이픈보다 길어 훑을 때 숫자 자리로 읽힌다.
+HZ_NONE = "\u2013"
 
 
 class StatusBar(QtWidgets.QWidget):
@@ -131,11 +139,14 @@ class StatusBar(QtWidgets.QWidget):
                 QtCore.QPointF(x0 + nw + LAMP_W * 0.5, y0 + CELL_H * 0.5),
                 LAMP_R, LAMP_R)
 
-            # Hz. 대표 토픽이 없는 노드는 잴 수 없으므로 비워 둔다.
+            # Hz. 대표 토픽이 없거나 아직 표본이 모자라면 못 잰다.
             # 0.0 Hz 를 찍으면 "안 온다" 로 읽히는데 그건 사실이 아니다.
+            # 그렇다고 비워 두면 **잴 것이 없는 것과 측정에 실패한 것이
+            # 구분되지 않는다** -- 둘 다 빈칸이면 상태등만 보고 판단해야 한다.
+            # 그래서 대시를 찍는다. 색이 흐려 훑을 때 눈에 걸리지 않는다.
             p.setFont(hz_f)
             p.setPen(COL_DIM)
             p.drawText(
                 QtCore.QRectF(x0 + nw + LAMP_W, y0, HZ_W, CELL_H),
                 QtCore.Qt.AlignVCenter | QtCore.Qt.AlignLeft,
-                "" if hz is None else f"{hz:.1f}Hz")
+                HZ_NONE if hz is None else f"{hz:.1f}Hz")

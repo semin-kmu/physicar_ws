@@ -93,15 +93,30 @@
       #   map_amcl_lifecycle_manager  발행 토픽 없음
       #   map_server                  /map 은 latched
       #   state_machine               현재 스텁, 발행 없음
-      #   camera_info_bridge          /camera/camera_info 는 kau_lane_detection_node 로 대표
       #   kau_lane_detection_viewer   웹 뷰어(Flask). ROS 발행 없음
-      #   amcl                        /amcl_pose 는 필터가 갱신될 때만 나간다.
-      #                               정차 중에는 안 오므로 주기로 재면 오보다
-      #                               (nomotion_updater 는 bringup 대상이 아니다)
+      #
+      # 위 넷은 잴 대표 토픽이 아예 없다. Hz 칸에 "-" 가 뜬다 (status_bar.py).
+      # 측정 실패(빨간불)와 구분하기 위한 표시다.
       watch:
+        # 기대 Hz 는 2026-08-25 sim 주행 중 ros2 topic hz 실측값이다.
+        # 이 값은 표시용이 아니라 stale 판정에만 쓰인다 -- 화면에 뜨는 Hz 는
+        # 언제나 실측치다. 판정 한계는 max(stale_ratio/기대, min_stale_s).
+
+        # /imu/cov(약 42 Hz) 가 아니라 느린 쪽을 본다. 둘 다 이 노드가 내므로
+        # 하나만 봐도 되고, 느린 쪽이 끊김을 더 확실히 잡는다.
+        - "odom_covariance_relay  | /odom/laser_cov       | nav_msgs/msg/Odometry            | 9"
         - "kau_ekf                 | /odom                 | nav_msgs/msg/Odometry            | 30"
         - "laser_scan_clusterer    | /perception/obstacles | kau_msgs/msg/ObstacleCircleArray | 10"
         - "start_signal_detector   | /perception/start_permission | std_msgs/msg/Bool         | 10"
+
+        # ★ /amcl_pose 는 필터가 갱신될 때만 나간다. update_min_d 0.01 이라
+        #   주행 중에는 스캔마다 갱신돼 실측 8.7 Hz 였지만, **정차하면 멈춘다.**
+        #   기대를 실측 9 로 두면 한계가 0.33 초라 출발 대기 중에 바로 빨간불이
+        #   된다. 그래서 일부러 낮춰 잡아 한계를 1.5 초로 벌렸다.
+        #   그래도 오래 서 있으면 빨간불이 된다 -- 이 노드의 빨강은
+        #   "죽었다" 가 아니라 "갱신이 없다" 로 읽을 것.
+        - "amcl                    | /amcl_pose            | geometry_msgs/msg/PoseWithCovarianceStamped | 2"
+        - "camera_info_bridge      | /camera/camera_info   | sensor_msgs/msg/CameraInfo       | 14"
         - "kau_lane_detection_node | /lane/center          | kau_msgs/msg/KauPath             | 14"
         # ★ global_path_publisher 를 rate>0 (기본 1 Hz) 으로 띄울 것.
         #   rate:=0 (1 회 발행) 이면 정상인데도 빨간불이 켜진다
