@@ -127,6 +127,17 @@ if(BUILD_TESTING)
     target_link_libraries(test_lane_backbone kau_local_path_planner_lane_impl)
     ament_target_dependencies(test_lane_backbone kau_control kau_msgs)
   endif()
+
+  # test_least_violation_lane 은 degraded 최후수단(leastViolationRect)을 지킨다.
+  # 이 경로는 hard constraint 를 만족하는 후보가 전멸했을 때만 실행되므로
+  # 정상 주행 스모크로는 절대 안 밟힌다 -- 단위테스트가 유일한 커버리지다.
+  # 특히 "장애물 우선" 규칙(정규화-합산으로 되돌아가면 obs_margin 을 키울수록
+  # 충돌이 늘던 2026-08-24 회귀)을 obs_margin 스윕으로 고정한다.
+  ament_add_gtest(test_least_violation_lane test/test_least_violation_lane.cpp)
+  if(TARGET test_least_violation_lane)
+    target_link_libraries(test_least_violation_lane kau_local_path_planner_lane_impl)
+    ament_target_dependencies(test_least_violation_lane kau_control kau_msgs)
+  endif()
 endif()
 
 ament_export_include_directories(include)
