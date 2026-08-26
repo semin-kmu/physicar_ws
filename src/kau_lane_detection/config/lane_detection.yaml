@@ -57,7 +57,7 @@ kau_lane_detection_node:
 
     # dst 좌우 여백 비율. 클수록 차선이 가운데로 모인다.
     # 0.25 -> 좌/우 흰선이 약 129px, 351px
-    bev_dst_margin_ratio: 0.25
+    bev_dst_margin_ratio: 0.2
 
     # 480x360 -> 640x480 (가로/세로 모두 4/3배).
     #
@@ -100,18 +100,26 @@ kau_lane_detection_node:
     # OpenCV BGR2HLS 규약: H 0~179, L/S 0~255.
     # 배열 순서는 [H, L, S] 다 — 밝기 하한은 첫 칸이 아니라 L(둘째)이다.
     #
-    # 2026-08-25 원설계값으로 되돌렸다. 근거와 실측표는
-    # CLAUDE.md §4 참고.
+    # 2026-08-26 설정. 근거와 실측표는 CLAUDE.md §4 참고.
     #
-    #   노랑(주황 중앙선): H 15~35, S 하한 150 이 잔디를 가른다
-    #                      (잔디 S 37~91 vs 중앙선 S 225)
-    #   흰색            : S 상한 70 이 중앙선을 흰선 마스크에서 뺀다
+    #   노랑(주황 중앙선): 잔디를 **H 상한 20** 이 가른다.
+    #                      현재 월드 BEV 실측 — 중앙선 H 18 / 잔디 H 33.
+    #                      S 하한 105 는 잔디 방어선이 아니라 그늘에서
+    #                      어두워진 주황선을 살리기 위한 값이다
+    #                      (중앙선 S 5%ile 157).
+    #   흰색            : L 하한 205 하나로 가른다 (흰선 L 232 /
+    #                      잔디 L 117 / 중앙선 L 117).
+    #
+    # ★ 흰색 S 상한이 255 라 "채도가 낮다" 조건이 없다. 지금은 중앙선
+    #   L 이 117 이라 안 새지만, 실차 조명에서 중앙선 L 이 205 를 넘으면
+    #   흰선 마스크로 들어온다 (좌/우 판정이 통째로 어긋난다). 실차에서
+    #   흰선 마스크에 중앙선이 보이면 여기를 먼저 볼 것.
     # --------------------------------------------------------
 
-    yellow_hls_lo: [15, 70, 150]
-    yellow_hls_hi: [35, 255, 255]
-    white_hls_lo: [0, 200, 20]
-    white_hls_hi: [180, 255, 70]
+    yellow_hls_lo: [0, 80, 105]
+    yellow_hls_hi: [20, 255, 255]
+    white_hls_lo: [0, 205, 0]
+    white_hls_hi: [179, 255, 255]
 
     # --------------------------------------------------------
     # Sliding Window
@@ -364,6 +372,28 @@ kau_lane_detection_node:
     #
     # (ego_lane_hold_frames 의 후신이다. 차로 번호 판정이
     #  없어지면서 남은 것은 이 스칼라 하나뿐이다.)
+    # /lane/center 를 무엇으로 만들 것인가.
+    #
+    #   "yellow" (기본) 노란 중앙선 관측 하나만 쓴다 — 융합 없음
+    #   "fused"         좌/노랑/우 세 후보를 found_count 가중평균
+    #
+    # 좌/우 흰선은 lane_width_px 만큼 평행이동해 "중앙선이었을 자리"
+    # 를 추정한 값이라, fused 는 관측이 아닌 값을 섞는 것이다.
+    # 하류(local planner)가 /lane/left, /lane/right 를 따로 받아
+    # corridor 를 직접 만드는 구성에서는 그 융합이 방해가 된다.
+    #
+    # ★ 이 값은 중심선 합성에만 영향을 준다. 슬라이딩 윈도우로
+    #   좌/우 흰선을 추적하는 것과 /lane/left, /lane/right 발행은
+    #   전혀 바뀌지 않는다 (그쪽은 buildEdgePath 가 추적점을 그대로
+    #   적합한다).
+    #
+    # 대가: 노란선은 점선이라 공백/가림에서 근거가 줄고, fused 는
+    # 흰선으로 메우지만 yellow 는 못 메운다. 그때 /lane/center 가
+    # 짧아지거나 끊긴다.
+    #
+    # refreshBevParameters 가 매 프레임 재독하므로 주행 중 A/B 가 된다.
+    center_source: "yellow"
+
     center_hold_frames: 10
 
     # 카메라 접지점 -> path frame 원점 보정 [cm].
@@ -661,7 +691,53 @@ kau_lane_detection_node:
     #
     # 하드웨어 한계는 ±30 deg 다 (physicar_driver_node MAX_TILT).
     camera_tilt_enable: true
+
+    # 외부에서 /camera/tilt 를 쏘면 자리를 내줄지.
+    #
+    #   false (기본) 무시하고 camera_tilt_deg 를 **다시 세운다**
+    #   true         손을 뗀다 (기동 타이머도 끈다).
+    #                카메라 자세를 손으로 맞춰 볼 때만 쓸 것.
+    #
+    # ★ physicar_webserver 가 웹 UI 카메라 조작 시 /camera/tilt 로
+    #   쏜다. 실측: 기동 20초 뒤 0.00 deg 가 들어와 카메라가 중립으로
+    #   돌아갔고, BEV 세 행은 아래로 10 deg 를 전제한 채 남아 지평선이
+    #   46.2 px 어긋났다. 그 상태에서 lw/rw 가 0 이 되고 len 이
+    #   85 -> 18 cm 로 무너졌다.
+    #
+    # ★ 무시만 하고 두면 안 된다. 카메라는 실제로 남의 각도로 돌아가는데
+    #   노드는 그걸 모른 채 원래 각도 기하로 계산하므로 조용히 틀린다.
+    #   그래서 false 는 "무시" 가 아니라 "무시하고 되돌려 세움" 이다.
+    camera_tilt_yield_enable: false
+
+    # ★ 부호 규약 두 개가 다르다. 헷갈리면 BEV 가 통째로 틀어진다.
+    #
+    #   camera_tilt_deg  : **기하 규약, + = 아래.**
+    #                      bev_vanishing_y / src_top_y / src_bottom_y 가
+    #                      alpha = tilt + 0.284deg 로 이걸 전제한다.
+    #                      여기 값은 바꾸지 말 것.
+    #
+    #   camera_tilt_sign : **배선 규약.** 토픽에 실을 때 곱한다.
+    #                      pan_sign 과 같은 역할이다.
+    #
+    #     실차  -1.0  (+ 가 위로 간다. physicar_driver_node 의
+    #                  apply_tilt 이 from_normalized(-norm) 로 반전
+    #                  — apply_pan 에는 없는 처리다)
+    #     시뮬  +1.0  (+ 가 아래. 실측 확인: /camera/tilt 에 +10 을 주면
+    #                  지평선 행이 158 -> 113 으로 올라간다 = 아래를 봄.
+    #                  -20~+20 구간 기울기가 모델과 0.3% 이내 일치)
+    #
+    # ★ 기본값은 시뮬(+1.0)이다. 실차는 launch 의 platform:=real 이
+    #   -1.0 으로 덮는다.
+    #
+    #   기본을 시뮬로 둔 이유: ros2 run 으로 노드만 직접 띄우면 launch 를
+    #   안 거쳐 이 기본값이 그대로 먹는데, 일상적으로 그렇게 띄우는 쪽이
+    #   시뮬이기 때문이다. 부호가 틀리면 카메라가 반대로 돌아 BEV 가
+    #   하늘/벽을 잡으므로 흔한 쪽을 안전하게 둔다.
+    #
+    #   실차에서 launch 없이 직접 띄울 때는 아래를 같이 줄 것:
+    #     -p camera_tilt_sign:=-1.0
     camera_tilt_deg: 10.0
+    camera_tilt_sign: 1.0
 
     # 1 Hz 로 이 시간(초)만큼 반복 발행하고 타이머를 끈다.
     camera_tilt_repeat_s: 5.0

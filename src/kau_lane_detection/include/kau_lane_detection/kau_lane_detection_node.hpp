@@ -945,6 +945,37 @@
         // + 가 아래**다 (camera_tilt_joint axis = +Y, URDF/SDF 공통).
         // bev_vanishing_y 유도에 쓰는 광학 pitch 부호와는 반대이니
         // 헷갈리지 말 것 — 그쪽은 아래가 음수다.
+        // /camera/tilt 배선 부호 (pan_sign 과 같은 역할).
+        //
+        // camera_tilt_deg 는 **기하 규약(+ = 아래)** 을 유지한다 —
+        // bev_vanishing_y / src_top_y / src_bottom_y 유도가
+        // alpha = tilt + 0.284deg 로 그 규약을 전제하기 때문이다.
+        //
+        // 토픽에 실어 보내는 부호는 하드웨어마다 다르다:
+        //   실차  + = 위   (physicar_driver_node::apply_tilt 이
+        //                   from_normalized(-norm) 로 반전)
+        //   시뮬  + = 아래 (JointPositionController 직결, 실측 확인)
+        //
+        // 기본값은 시뮬(+1.0)이다. launch 가 platform:=real 이면
+        // -1.0 으로 덮는다. 나가는 명령과 되읽는 에코에 대칭으로
+        // 건다 — 한쪽만 걸면 외부 tilt 해석이 뒤집힌다.
+        // 외부 /camera/tilt 에 자리를 내줄지.
+        //
+        //   true  남이 tilt 를 잡으면 손을 뗀다 (기동 타이머도 끈다).
+        //         카메라 자세를 손으로 맞춰 볼 때 쓴다.
+        //   false 무시하고 camera_tilt_deg 를 **다시 세운다**. (기본)
+        //
+        // 기본을 false 로 둔 이유: 무시만 하면 카메라는 실제로 남의
+        // 각도로 돌아가는데 노드는 그걸 모른 채 원래 각도 기하로
+        // 계산하게 된다 — 조용히 틀리는 쪽이 제일 나쁘다. 그래서
+        // 무시할 거면 되돌려 세워야 한다.
+        //
+        // physicar_webserver 가 웹 UI 조작 시 /camera/tilt 로 쏘는데,
+        // 그때마다 BEV 세 행 전제가 깨져 인지가 통째로 무너졌다.
+        bool camera_tilt_yield_enable_ = false;
+
+        double camera_tilt_sign_ = 1.0;
+
         double camera_tilt_deg_ = 0.0;
 
         bool camera_tilt_enable_ = false;
@@ -1098,6 +1129,20 @@
         // ================================================================
 
         // 근거가 없어도 직전 판정을 유지할 프레임 수
+        // /lane/center 를 무엇으로 만들 것인가.
+        //
+        //   "yellow" 노란 중앙선 하나만 쓴다 (융합 없음, 기본)
+        //   "fused"  좌/노랑/우 세 후보를 found_count 가중평균
+        //
+        // 좌/우 흰선은 lane_width_px 만큼 평행이동해 "중앙선 추정치"
+        // 로 환산되므로, fused 는 관측이 아닌 값을 섞는 것이다.
+        // 하류(local planner)가 /lane/left, /lane/right 를 따로 받아
+        // corridor 를 직접 만든다면 그 융합이 오히려 방해가 된다.
+        //
+        // 대가: 노란선은 점선이라 공백/가림에서 근거가 줄고, 그때
+        // fused 는 흰선으로 메우지만 yellow 는 못 메운다.
+        std::string center_source_;
+
         int center_hold_frames_;
 
         // 판정 이력

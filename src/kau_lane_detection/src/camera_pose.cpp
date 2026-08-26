@@ -284,7 +284,8 @@ void KauLaneDetectionNode::publishCameraTilt()
 
     std_msgs::msg::Float64 msg;
 
-    msg.data = camera_tilt_deg_ * M_PI / 180.0;
+    msg.data =
+        camera_tilt_sign_ * camera_tilt_deg_ * M_PI / 180.0;
 
     camera_tilt_last_sent_rad_ = msg.data;
 
@@ -337,7 +338,45 @@ void KauLaneDetectionNode::tiltEchoCallback(
     }
 
 
-    const double external_deg = msg->data * 180.0 / M_PI;
+    // 배선 부호를 되돌려 기하 규약(+ = 아래)으로 읽는다.
+    const double external_deg =
+        camera_tilt_sign_ * msg->data * 180.0 / M_PI;
+
+
+    // ------------------------------------------------------------
+    // 양보하지 않는 경우 — 무시하고 우리 각도를 다시 세운다.
+    //
+    // 그냥 무시만 하면 카메라는 남의 각도로 돌아가는데 BEV 세 행은
+    // 원래 각도를 전제한 채 남아 조용히 틀린다. 되돌려 세워야 한다.
+    //
+    // 우리가 지금 보낸 값은 camera_tilt_last_sent_rad_ 에 남으므로,
+    // 그 에코가 돌아오면 위 조기 반환에 걸려 무한 루프가 되지 않는다.
+    // ------------------------------------------------------------
+
+    if (!camera_tilt_yield_enable_)
+    {
+        RCLCPP_WARN_THROTTLE(
+            this->get_logger(),
+            *this->get_clock(),
+            2000,
+            "외부 /camera/tilt (아래로 %.2f deg 에 해당) 를 무시하고 "
+            "아래로 %.2f deg 를 다시 세운다. 양보하려면 "
+            "camera_tilt_yield_enable 을 true 로 줄 것.",
+            external_deg,
+            camera_tilt_deg_
+        );
+
+        std_msgs::msg::Float64 restore;
+
+        restore.data =
+            camera_tilt_sign_ * camera_tilt_deg_ * M_PI / 180.0;
+
+        camera_tilt_last_sent_rad_ = restore.data;
+
+        camera_tilt_publisher_->publish(restore);
+
+        return;
+    }
 
     // 같은 외부 각이 반복해서 오면 한 번만 경고한다.
     if (
@@ -368,8 +407,8 @@ void KauLaneDetectionNode::tiltEchoCallback(
     {
         RCLCPP_WARN(
             this->get_logger(),
-            "외부 /camera/tilt %+.2f deg 를 받아 기동 tilt 를 양보한다. "
-            "BEV 세 행은 %+.2f deg 를 전제하므로 지평선이 %.1f px "
+            "외부 /camera/tilt 를 받아(아래로 %.2f deg 에 해당) 기동 tilt 를 양보한다. "
+            "BEV 세 행은 아래로 %.2f deg 를 전제하므로 지평선이 %.1f px "
             "어긋난 상태다. 이 각으로 맞추려면:\n"
             "  ros2 param set /kau_lane_detection_node bev_vanishing_y %.2f\n"
             "  ros2 param set /kau_lane_detection_node bev_src_top_y %.2f\n"
@@ -386,8 +425,8 @@ void KauLaneDetectionNode::tiltEchoCallback(
     {
         RCLCPP_WARN(
             this->get_logger(),
-            "외부 /camera/tilt %+.2f deg 를 받아 기동 tilt 를 양보한다. "
-            "BEV 세 행은 %+.2f deg 를 전제한다 — 유도값은 "
+            "외부 /camera/tilt 를 받아(아래로 %.2f deg 에 해당) 기동 tilt 를 양보한다. "
+            "BEV 세 행은 아래로 %.2f deg 를 전제한다 — 유도값은 "
             "CameraInfo 수신 후에 찍는다.",
             external_deg,
             camera_tilt_bev_ref_deg_
@@ -435,7 +474,8 @@ void KauLaneDetectionNode::refreshCameraTilt()
 
     std_msgs::msg::Float64 msg;
 
-    msg.data = camera_tilt_deg_ * M_PI / 180.0;
+    msg.data =
+        camera_tilt_sign_ * camera_tilt_deg_ * M_PI / 180.0;
 
     camera_tilt_last_sent_rad_ = msg.data;
 
@@ -452,10 +492,12 @@ void KauLaneDetectionNode::refreshCameraTilt()
     {
         RCLCPP_INFO(
             this->get_logger(),
-            "camera_tilt_deg -> %+.2f deg 발행. 이 각 기준 BEV 유도값은 "
+            "camera_tilt_deg -> 아래로 %.2f deg (토픽 %+.2f deg). "
+            "이 각 기준 BEV 유도값은 "
             "vanishing %.2f / top %.2f / bottom %.2f 다 "
-            "(현재 세 행은 %+.2f deg 기준: %.2f / %.2f / %.2f).",
+            "(현재 세 행은 아래로 %.2f deg 기준: %.2f / %.2f / %.2f).",
             tilt_deg,
+            camera_tilt_sign_ * tilt_deg,
             van,
             top,
             bot,
@@ -469,8 +511,9 @@ void KauLaneDetectionNode::refreshCameraTilt()
     {
         RCLCPP_INFO(
             this->get_logger(),
-            "camera_tilt_deg -> %+.2f deg 발행.",
-            tilt_deg
+            "camera_tilt_deg -> 아래로 %.2f deg (토픽 %+.2f deg).",
+            tilt_deg,
+            camera_tilt_sign_ * tilt_deg
         );
     }
 }

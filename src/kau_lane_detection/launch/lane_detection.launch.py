@@ -114,6 +114,7 @@ STR_OVERRIDES = (
 # 실수로 넣어야 하는 값. 문자열로 넣으면 노드가 타입 불일치로 죽는다.
 FLOAT_OVERRIDES = (
     ('camera_tilt', 'camera_tilt_deg'),
+    ('camera_tilt_sign', 'camera_tilt_sign'),
 )
 
 
@@ -155,6 +156,13 @@ def lane_detection_node(context, *unused):
     params = [LaunchConfiguration('params_file')]
 
     platform = LaunchConfiguration('platform').perform(context)
+
+    # 카메라 tilt 배선 부호는 플랫폼마다 반대다 (yaml 주석 참고).
+    #   시뮬 + = 아래  /  실차 + = 위
+    # yaml 기본값은 시뮬(+1.0)이므로 실차면 여기서 뒤집는다.
+    # 인자로 직접 준 값이 항상 이긴다.
+    if platform and platform != 'sim' and 'camera_tilt_sign' not in overrides:
+        overrides['camera_tilt_sign'] = -1.0
 
     if platform and platform != 'sim':
         overlay = (
@@ -211,6 +219,15 @@ def generate_launch_description():
             'params_file',
             default_value=default_params,
             description='차선 인지 노드 파라미터 yaml',
+        ),
+
+        DeclareLaunchArgument(
+            'camera_tilt_sign',
+            default_value='',
+            description=(
+                '/camera/tilt 배선 부호. 안 주면 platform 이 정한다 '
+                '(sim 은 yaml 기본값 +1.0 / real -1.0)'
+            ),
         ),
 
         DeclareLaunchArgument(

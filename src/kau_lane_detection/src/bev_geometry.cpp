@@ -509,6 +509,12 @@ void KauLaneDetectionNode::refreshBevParameters()
             "track_step_px"
         ).as_double();
 
+    // /lane/center 근거 선택. 실차에서 A/B 하려고 런타임 재독한다.
+    center_source_ =
+        this->get_parameter(
+            "center_source"
+        ).as_string();
+
     publish_roi_overlay_ =
         this->get_parameter(
             "publish_roi_overlay"

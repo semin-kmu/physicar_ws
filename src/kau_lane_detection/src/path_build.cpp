@@ -768,15 +768,26 @@ KauLaneDetectionNode::LanePath KauLaneDetectionNode::buildCenterlinePath(
         const LaneDetectionResult * lane;
 
         double offset;
+
+        // 노란 중앙선은 관측 그대로다. 흰선 둘은 lane_width_px 만큼
+        // 평행이동해 "중앙선이었을 자리" 를 추정한 값이다.
+        bool observed_center;
     };
 
 
     const Source sources[3] =
     {
-        { &left,    lane_width_px_ },
-        { &yellow,  0.0            },
-        { &right,  -lane_width_px_ }
+        { &left,    lane_width_px_, false },
+        { &yellow,  0.0,            true  },
+        { &right,  -lane_width_px_, false }
     };
+
+
+    // center_source == "yellow" 면 추정 후보를 빼고 관측만 쓴다.
+    // 하류가 /lane/left, /lane/right 로 corridor 를 직접 만들 때는
+    // 여기서 섞는 것이 오히려 방해가 된다.
+    const bool center_yellow_only =
+        (center_source_ != "fused");
 
 
     struct Candidate
@@ -792,6 +803,12 @@ KauLaneDetectionNode::LanePath KauLaneDetectionNode::buildCenterlinePath(
 
     for (const Source & src : sources)
     {
+        if (center_yellow_only && !src.observed_center)
+        {
+            continue;
+        }
+
+
         if (
             !src.lane->valid ||
             src.lane->found_count <= 0 ||

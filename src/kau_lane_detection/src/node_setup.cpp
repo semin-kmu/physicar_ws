@@ -178,6 +178,21 @@ KauLaneDetectionNode::KauLaneDetectionNode()
             5.0
         );
 
+    // 토픽 배선 부호. 기본은 시뮬(+ = 아래)이라 1.0 이다.
+    // 실차는 launch 의 platform:=real 이 -1.0 으로 덮는다.
+    // 외부 /camera/tilt 를 만나면 양보할지. 기본은 무시하고 재설정.
+    camera_tilt_yield_enable_ =
+        this->declare_parameter<bool>(
+            "camera_tilt_yield_enable",
+            false
+        );
+
+    camera_tilt_sign_ =
+        this->declare_parameter<double>(
+            "camera_tilt_sign",
+            1.0
+        );
+
     camera_tilt_repeat_s_ =
         this->declare_parameter<double>(
             "camera_tilt_repeat_s",
@@ -221,10 +236,13 @@ KauLaneDetectionNode::KauLaneDetectionNode()
 
         RCLCPP_INFO(
             this->get_logger(),
-            "기동 tilt: %+.2f deg (+ = 아래) 를 %d 회 발행한다. "
-            "bev_vanishing_y 가 이 각도를 전제한다.",
+            "기동 tilt: 아래로 %.2f deg. 토픽에는 %+.2f deg 를 %d 회 "
+            "발행한다 (camera_tilt_sign %+.1f). bev_vanishing_y 가 "
+            "이 하향각을 전제한다.",
             camera_tilt_deg_,
-            camera_tilt_ticks_left_
+            camera_tilt_sign_ * camera_tilt_deg_,
+            camera_tilt_ticks_left_,
+            camera_tilt_sign_
         );
     }
 
@@ -329,25 +347,25 @@ KauLaneDetectionNode::KauLaneDetectionNode()
     yellow_hls_lo_ =
         this->declare_parameter<std::vector<int64_t>>(
             "yellow_hls_lo",
-            {15, 70, 150}
+            {0, 80, 105}
         );
 
     yellow_hls_hi_ =
         this->declare_parameter<std::vector<int64_t>>(
             "yellow_hls_hi",
-            {35, 255, 255}
+            {20, 255, 255}
         );
 
     white_hls_lo_ =
         this->declare_parameter<std::vector<int64_t>>(
             "white_hls_lo",
-            {0, 200, 20}
+            {0, 205, 0}
         );
 
     white_hls_hi_ =
         this->declare_parameter<std::vector<int64_t>>(
             "white_hls_hi",
-            {180, 255, 70}
+            {179, 255, 255}
         );
 
 
@@ -648,6 +666,12 @@ KauLaneDetectionNode::KauLaneDetectionNode()
 
     // 근거(노란선 또는 흰선 두 개)가 끊겨도 직전 중앙선 대비
     // 위치 판정을 유지할 프레임 수. 점선 공백과 순간 가림 대응.
+    center_source_ =
+        this->declare_parameter<std::string>(
+            "center_source",
+            "yellow"
+        );
+
     center_hold_frames_ =
         this->declare_parameter<int>(
             "center_hold_frames",
