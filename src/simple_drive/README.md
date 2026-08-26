@@ -115,18 +115,51 @@ DODGE(전타 L) -> COUNTER(반대 전타 L) -> HOLD(0 도 직진) -> 차선추�
 ```bash
 colcon build --packages-select simple_drive
 source install/setup.bash
-
-# 1) 인지만 띄운다 -- run_backup.sh 의 BACKUP_NODES 에서
-#    backup_path_planner / backup_speed_controller / backup_steer_controller
-#    를 false 로 바꾼다
-source run_backup.sh
-
-# 2) 판단 + 제어
-ros2 launch simple_drive simple_drive.launch.py use_sim_time:=false
 ```
 
-> **★ 위 세 노드를 끄지 않으면 `/speed` 와 `/steering` 을 두 곳에서 쏜다.**
-> 두 publisher 값이 섞여 차량에 간다. 반드시 확인하고 띄운다.
+### 터미널 A -- 인지만
+
+```bash
+# 실차
+ros2 launch backup_bringup backup.launch.py \
+  use_sim_time:=false camera_info_bridge:=false set_camera_info:=true \
+  skip:=backup_path_planner,backup_speed_controller,backup_steer_controller,backup_gui
+
+# 시뮬 (camera_info 를 gz 에서 bridge 해야 한다)
+ros2 launch backup_bringup backup.launch.py \
+  use_sim_time:=true camera_info_bridge:=true set_camera_info:=true \
+  skip:=backup_path_planner,backup_speed_controller,backup_steer_controller,backup_gui
+```
+
+`camera_info_bridge` 는 gz -> ROS 브리지라 **실차에서는 false** 다.
+
+### 터미널 B -- 판단 + 제어
+
+```bash
+ros2 launch simple_drive simple_drive.launch.py use_sim_time:=false
+
+# 신호등 없이 주행만 볼 때
+ros2 launch simple_drive simple_drive.launch.py \
+  use_sim_time:=false require_permission:=false
+```
+
+> **★ backup_path_planner / backup_speed_controller / backup_steer_controller
+> 를 끄지 않으면 `/speed` 와 `/steering` 을 두 곳에서 쏜다.** 두 publisher
+> 값이 섞여 차량에 간다. 반드시 확인하고 띄운다. kau 스택(`run.sh`)과도
+> 동시에 띄우지 않는다.
+
+### 보면서 확인할 것
+
+```bash
+ros2 topic echo /simple/state    # STRAIGHT|center 처럼 상태|차선근거
+ros2 topic echo /steering        # [rad]
+ros2 topic echo /simple/debug    # cross_track_m, lookahead_m, cmd_steer_deg
+```
+
+`|` 뒤가 지금 무엇을 근거로 달리는지다. `center` 는 노란 중앙선,
+`white_*` 는 흰선 복원, `none` 은 근거 없음(유예 중)이다.
+
+Ctrl-C 로 내리면 `/steering`, `/speed` 에 0 을 5 회 발행하고 끝난다.
 
 ## 튜닝 순서
 

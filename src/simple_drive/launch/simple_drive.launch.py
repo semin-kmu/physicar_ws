@@ -39,6 +39,10 @@ def generate_launch_description():
     # 주행 튜닝 중에는 이 인자로 끈다.
     red_to_green = ParameterValue(
         LaunchConfiguration('require_red_to_green'), value_type=bool)
+    # 신호등이 아예 없는 환경(실차 주행 튜닝)에서 출발 게이트를 통째로
+    # 끈다. 켜 두면 permission=false 라 영원히 안 나간다.
+    permission = ParameterValue(
+        LaunchConfiguration('require_permission'), value_type=bool)
     log_level = LaunchConfiguration('log_level')
 
     # 판단 -> 제어 순서로 띄운다. 제어가 먼저 뜨면 워치독이 곧바로
@@ -50,6 +54,7 @@ def generate_launch_description():
         name='simple_decision',
         output='screen',
         parameters=[params, {'use_sim_time': use_sim_time,
+                             'require_permission': permission,
                              'require_red_to_green': red_to_green}],
         arguments=['--ros-args', '--log-level', log_level],
     )
@@ -67,6 +72,9 @@ def generate_launch_description():
         DeclareLaunchArgument('use_sim_time', default_value='true',
                               description='Gazebo true / 실차 false'),
         DeclareLaunchArgument('log_level', default_value='info'),
+        DeclareLaunchArgument(
+            'require_permission', default_value='true',
+            description='출발 신호 게이트 자체. 신호등 없는 환경에서만 false'),
         DeclareLaunchArgument(
             'require_red_to_green', default_value='true',
             description='빨강->초록 전이를 봐야 출발. 평가 없이 튜닝할 때만 false'),
