@@ -707,7 +707,7 @@ kau_lane_detection_node:
     # ★ 무시만 하고 두면 안 된다. 카메라는 실제로 남의 각도로 돌아가는데
     #   노드는 그걸 모른 채 원래 각도 기하로 계산하므로 조용히 틀린다.
     #   그래서 false 는 "무시" 가 아니라 "무시하고 되돌려 세움" 이다.
-    camera_tilt_yield_enable: false
+    camera_tilt_yield_enable: true
 
     # ★ 부호 규약 두 개가 다르다. 헷갈리면 BEV 가 통째로 틀어진다.
     #
@@ -1004,7 +1004,7 @@ kau_lane_detection_node:
     # pan_search_enable: false 가 우선한다 — 그건 "카메라를 아예
     # 움직이지 마라" 라서 조준도 같이 꺼진다.
     # ============================================================
-    pan_aim_enable: true
+    pan_aim_enable: false
 
     # 전역경로 위 자차 최근접점에서 호길이로 이만큼 [m] 전진한
     # 점을 조준한다.
