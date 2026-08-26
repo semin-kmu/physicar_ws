@@ -172,10 +172,17 @@ KauLaneDetectionNode::KauLaneDetectionNode()
             true
         );
 
+    // 기본 0 — 값의 주인은 yaml 이다.
+    //
+    // 예전 기본값은 5.0 이었는데 yaml 은 10.0 이라, 둘이 갈라진 채로
+    // "카메라는 10도로 서 있고 BEV 세 행은 5도를 전제" 하는 상태가
+    // 오래 굴러갔다. 0 이면 yaml 을 안 주는 순간 카메라가 중립에
+    // 서므로 어긋남이 즉시 눈에 보인다 — 조용히 틀린 각도로 도는
+    // 것보다 낫다.
     camera_tilt_deg_ =
         this->declare_parameter<double>(
             "camera_tilt_deg",
-            5.0
+            0.0
         );
 
     // 토픽 배선 부호. 기본은 시뮬(+ = 아래)이라 1.0 이다.

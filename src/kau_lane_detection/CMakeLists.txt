@@ -80,6 +80,7 @@ install(PROGRAMS
   scripts/hls_snapshot_saver.py
   scripts/lane_failure_logger.py
   scripts/set_camera_info.py
+  scripts/calibrate_camera.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

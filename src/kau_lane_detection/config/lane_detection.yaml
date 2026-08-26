@@ -690,7 +690,7 @@ kau_lane_detection_node:
     # 지평선을 공유해야 한다 (위 BEV 절의 y = cy + fy*tan(...) 식).
     #
     # 하드웨어 한계는 ±30 deg 다 (physicar_driver_node MAX_TILT).
-    camera_tilt_enable: true
+    camera_tilt_enable: false
 
     # 외부에서 /camera/tilt 를 쏘면 자리를 내줄지.
     #
@@ -736,8 +736,8 @@ kau_lane_detection_node:
     #
     #   실차에서 launch 없이 직접 띄울 때는 아래를 같이 줄 것:
     #     -p camera_tilt_sign:=-1.0
-    camera_tilt_deg: 10.0
-    camera_tilt_sign: 1.0
+    camera_tilt_deg: 0.0
+    camera_tilt_sign: 0.0
 
     # 1 Hz 로 이 시간(초)만큼 반복 발행하고 타이머를 끈다.
     camera_tilt_repeat_s: 5.0
